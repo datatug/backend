@@ -13,12 +13,11 @@ import "github.com/dal-go/dalgo/dal"
 // (sneat-go/pkg/modules/datatug), wiring a real adapter per port; tests
 // construct it over an in-memory database with fakes.
 type Facade struct {
-	db          dal.DB
-	ids         IDGenerator
-	githubOAuth GithubOAuthExchanger
+	db  dal.DB
+	ids IDGenerator
 }
 
 // NewFacade returns a Facade over the given database and ports.
-func NewFacade(db dal.DB, ids IDGenerator, githubOAuth GithubOAuthExchanger) Facade {
-	return Facade{db: db, ids: ids, githubOAuth: githubOAuth}
+func NewFacade(db dal.DB, ids IDGenerator) Facade {
+	return Facade{db: db, ids: ids}
 }

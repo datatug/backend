@@ -15,7 +15,7 @@ import (
 // store, addressed by the same `repo@org@folder` id the web client uses.
 func TestFacade_RegisterGithubProject(t *testing.T) {
 	db := sneatcoretesting.NewMemoryDB()
-	f := NewFacade(db, fakeIDGenerator{next: "unused"}, nil)
+	f := NewFacade(db, fakeIDGenerator{next: "unused"})
 	ctx := context.Background()
 
 	id, err := f.RegisterGithubProject(ctx, testUserID, RegisterGithubProjectRequest{
@@ -56,12 +56,12 @@ func TestFacade_RegisterGithubProject_keepsCloudStore(t *testing.T) {
 	db := sneatcoretesting.NewMemoryDB()
 	ctx := context.Background()
 
-	cloudID, err := NewFacade(db, fakeIDGenerator{next: "proj1234"}, nil).
+	cloudID, err := NewFacade(db, fakeIDGenerator{next: "proj1234"}).
 		CreateProject(ctx, testUserID, models4datatug.FirestoreStoreID, "Cloud project")
 	if err != nil {
 		t.Fatalf("CreateProject(): %v", err)
 	}
-	githubID, err := NewFacade(db, fakeIDGenerator{next: "unused"}, nil).
+	githubID, err := NewFacade(db, fakeIDGenerator{next: "unused"}).
 		RegisterGithubProject(ctx, testUserID, RegisterGithubProjectRequest{
 			Org: "datatug", Repo: "demo-projects", Title: "GitHub project",
 		})
