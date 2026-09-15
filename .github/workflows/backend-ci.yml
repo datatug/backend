@@ -1,0 +1,36 @@
+name: Backend CI
+
+# Go CI for the dalgo-only domain module github.com/datatug/backend.
+# Runs strongo's Standard Go CI (lint · test · build) and auto-tags the next
+# vX.Y.Z on push to main from conventional-commit messages.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+      - .github/workflows/backend-ci.yml
+  pull_request:
+    paths:
+      - '**/*.go'
+      - go.mod
+      - go.sum
+      - .github/workflows/backend-ci.yml
+
+concurrency:
+  group: backend-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    uses: strongo/cicd/.github/workflows/workflow.yml@main
+    permissions:
+      contents: write
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    with:
+      tag_prefix: v
+      code_coverage: true
+      min_test_coverage_percent: 88

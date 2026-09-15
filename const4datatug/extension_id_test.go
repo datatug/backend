@@ -1,11 +1,9 @@
 package const4datatug
 
-import (
-	"testing"
-
-	"github.com/stretchr/testify/assert"
-)
+import "testing"
 
 func TestExtensionID(t *testing.T) {
-	assert.Equal(t, "datatug", string(ExtensionID))
+	if ExtensionID != "datatug" {
+		t.Errorf("ExtensionID = %q, want %q", ExtensionID, "datatug")
+	}
 }

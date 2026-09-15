@@ -1,65 +1,71 @@
 # DataTug backend
 
-The DataTug cloud backend: a [Sneat](https://sneat.co) platform extension that
-`sneat-go` (the `api.sneat.cloud` host) composes through `Extension()`.
+Go domain module for the DataTug extension. Module path:
+`github.com/datatug/backend`.
 
-## Endpoints
+Built to the org standard
+[`extension-backend-architecture.md`](https://github.com/sneat-co/sneat-specs/blob/main/standards/extension-backend-architecture.md):
+the module depends on **`dal-go` only** — never `sneat-go-core`,
+`sneat-core-modules`, or another extension's backend. Anything it needs from
+outside the domain crosses a **port** defined here and is satisfied by an
+**adapter** in the host composition root.
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/v0/datatug/projects/create_project?store=firestore` | Create a DataTug project in the user's cloud store |
+`github.com/sneat-co/sneat-go-core` appears in `go.mod` **for tests only**:
+`sneatcoretesting.NewMemoryDB()` gives the domain tests a real in-memory
+dal-go database (it also enforces Firestore's transaction rules), so no
+Firestore emulator or platform bootstrapping is needed.
 
-Request (auth required — `Authorization: Bearer <firebase-id-token>`):
+## What's here
 
-```json
-{ "title": "My project" }
-```
+| Package | What it is |
+| --- | --- |
+| `const4datatug` | Extension id (`datatug`) |
+| `models4datatug` | DBOs and dalgo key builders: the project record `datatug_projects/{projectID}` and the user's DataTug index `users/{userID}/ext/datatug` |
+| `facade4datatug` | `Facade` (injected `dal.DB` + ports) and the `CreateProject` command; `ports.go` holds the `IDGenerator` port |
 
-Response `201 Created`:
+## `CreateProject`
 
-```json
-{ "id": "<projectID>" }
-```
+`Facade.CreateProject(ctx, userID, storeID, title)` creates a project in the
+DataTug cloud store, in one transaction:
 
-The store is read from the `?store=` query parameter, exactly as the
-`datatug` CLI agent's `create_project` endpoint does, so the web client can
-reuse one call shape. Only `firestore` (the DataTug cloud store) is served
-here — see "Not served here" below.
+1. reads the user's DataTug index **first** — Firestore requires every read in
+   a transaction to happen before the first write;
+2. inserts `datatug_projects/{projectID}` — title, private access, the creating
+   user, `created.at`;
+3. registers the project brief in the user's index: inserting
+   `users/{userID}/ext/datatug` when the user has none, and otherwise updating
+   only the new project's field path, so two concurrent creates cannot clobber
+   each other's briefs.
 
-## What creating a project does
+Only the cloud store (`storeID == "firestore"`) is served. A project in a
+**GitHub repo** is created by the client that holds the user's GitHub
+credential (`datatug-apps`, with a user PAT), and a **local filesystem**
+project by the `datatug` CLI agent.
 
-In a single dal-go transaction (`facade.RunReadwriteTransaction`):
+Extension-owned user data lives in the user-ext document
+(`users/{uid}/ext/{extID}`), never inline in the core `users/{uid}` document.
+The module builds that key itself (`models4datatug.NewUserExtKey`) rather than
+importing `sneat-core-modules`' `dal4userus`, to keep the dal-go-only rule; a
+test pins the exact path.
 
-1. inserts `datatug_projects/{projectID}` — `{title, access, userIDs, created.at}`;
-2. registers the project brief in the user's DataTug index,
-   `users/{userID}/ext/datatug`: inserting that document when the user has none,
-   and otherwise updating only the new project's field path, so two concurrent
-   creates cannot clobber each other's briefs.
+## Host wiring
 
-## Design rules
+| Concern | Where it lives |
+| --- | --- |
+| HTTP endpoint | `sneat-go/pkg/modules/datatug/api4datatug` — `POST /v0/datatug/projects/create_project?store=firestore` |
+| Ports | `sneat-go/pkg/modules/datatug/adapters.go` (`IDGenerator`) |
+| Extension registration | `sneat-go/pkg/modules/datatug/module.go`, composed in `pkg/sneatmain/sneat_main.go`'s `extraModules` |
 
-- **The facade does not know where data is stored.** `facade4datatug` uses only
-  dal-go (`dal.DB` / `dal.ReadwriteTransaction`, through
-  `sneat-go-core/facade`) and imports no database client, so it runs against any
-  dal-go backed database. The host supplies Firestore via `facade.GetSneatDB`.
-- **Extension-owned user data lives in the user-ext document**
-  (`users/{uid}/ext/{extID}`, see `dal4userus.NewUserExtKey`), never inline in
-  the core `users/{uid}` document.
-- **Route paths are literal.** The host mounts them verbatim; no module-id or
-  `/v0/` prefix is added.
-
-## Not served here
-
-- A project in a **GitHub repo** is created by the client that holds the user's
-  GitHub credential (`datatug-apps`, with a user-supplied PAT).
-- A project on a **local filesystem** is created by the `datatug` CLI agent.
-
-This API is the cloud (Firestore) store only.
-
-## Development
+## Build & test
 
 ```bash
 go build ./...
+go test ./...
 go vet ./...
-go test ./... -coverprofile=cover.out
 ```
+
+## CI & versioning
+
+`.github/workflows/backend-ci.yml` runs strongo's Standard Go CI (lint · test ·
+build) on pushes and PRs touching Go sources, and auto-tags the next `vX.Y.Z` on
+push to `main` from conventional-commit messages.
