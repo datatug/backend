@@ -2,6 +2,8 @@ github.com/RoaringBitmap/roaring/v2 v2.27.0 h1:rTzs+cuH9YBj6j4L9GF2DcK2NmOfdUvLI
 github.com/RoaringBitmap/roaring/v2 v2.27.0/go.mod h1:BZufmFbox589n3j5eOmyTaLSGXbRLc2LmQvjKjzSEGU=
 github.com/bits-and-blooms/bitset v1.24.6 h1:qcrftZUVBIwfs+m+nhoCBAPT+ZPZZjti8SbHbDQQkZ4=
 github.com/bits-and-blooms/bitset v1.24.6/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
+github.com/crediterra/money v0.4.0 h1:HYnNINcEweVcpyxU7SFWK3jRnyCYCXtUuVJ8mc/QKOs=
+github.com/crediterra/money v0.4.0/go.mod h1:v1LjiUrGIVmK0L070iz4ghVDhqVGiyd9vNX0XJOLGak=
 github.com/dal-go/dalgo v0.80.4 h1:qlbxd+k0vH1LlcKWIddkRVDXo2OwnBRiowUBytYw64c=
 github.com/dal-go/dalgo v0.80.4/go.mod h1:u7sD8jlXshi2qHrlPUm9GzR2uyPRaBI4Ro9ef5+WFzY=
 github.com/dal-go/record v0.1.3 h1:K85k/kSX08lTefMiMmPpC12nmCY2TVJk7+ZyC5PD9XU=
@@ -14,10 +16,18 @@ github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWD
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/strongo/analytics v0.2.9 h1:Sc5NiJNQWfdA0O62F5ylNC5mOyKCMyrGzXSKZ7Ubamw=
 github.com/strongo/analytics v0.2.9/go.mod h1:o9czh6b7MoBhoQe7DSd5Mr1t8Ndfjc7NSZDMtkXFedw=
+github.com/strongo/decimal v0.1.2 h1:/LHdX9zJTUPpEM2cuQhnwCWNWLCUwG0BJMyOetpryY8=
+github.com/strongo/decimal v0.1.2/go.mod h1:uKFgetJbR2uT026stdbK54ELXTH9h0vZOPPOp7DAODk=
+github.com/strongo/delaying v0.2.6 h1:7JHbs/T3DdPFqTkY1SucofY+Oyff0uo/5dwxSr3Ivac=
+github.com/strongo/delaying v0.2.6/go.mod h1:8Oyv0h5T8F3dsxDP86nDou2duPNwPvLIgQBWAv6JM08=
 github.com/strongo/logus v0.4.4 h1:zv0t1tSCE1pHEOpmZnlwKRDb8pfxaCeP/Hk2PCj6swg=
 github.com/strongo/logus v0.4.4/go.mod h1:mVugDWLg/FXFiNAunrt+gvuEJtsSeCgwosU22FV1myY=
 github.com/strongo/random v0.0.2 h1:lnISBL6GM6xkWCJDRZRoOXaOUoytg76IyWkx6CLUHKg=
 github.com/strongo/random v0.0.2/go.mod h1:V/TldevwaA3XYhJApc5kQUmpAVUZhoEcsdl5m1+emx4=
+github.com/strongo/slice v0.3.10 h1:FeODEVCsR+1WHbw44eshB4++HhY1fNR9zJyJ6zns6zo=
+github.com/strongo/slice v0.3.10/go.mod h1:XkxT6IjPgsI0LnuvFCQL6wPLZarQ8dzrGiuuehUtt1A=
+github.com/strongo/strongoapp v0.31.59 h1:GFyttyNmXufSnMH/JLIKyGNu6+wG5xw2RoCfYrVlUD8=
+github.com/strongo/strongoapp v0.31.59/go.mod h1:annRLoxivy0gQXjXsKXKNRSHe+AFUgzc0x+Kpei33j0=
 github.com/strongo/validation v0.0.13 h1:EgRfP5XBZSVoiOd4805OGCOVqZndeqFONpSmdSerEE8=
 github.com/strongo/validation v0.0.13/go.mod h1:EY+//fgQhn6rr0rOvWRJuUCTSk5BIETZL2bL9CIDhbs=
 go.uber.org/mock v0.6.0 h1:hyF9dfmbgIX5EfOdasqLsWD6xqpNZlXblLB/Dbnwv3Y=

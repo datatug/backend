@@ -22,6 +22,12 @@ Firestore emulator or platform bootstrapping is needed.
 | `const4datatug` | Extension id (`datatug`) |
 | `models4datatug` | DBOs and dalgo key builders: the project record `datatug_projects/{projectID}` and the user's DataTug index `users/{userID}/ext/datatug` |
 | `facade4datatug` | `Facade` (injected `dal.DB` + ports) and the `CreateProject` command; `ports.go` holds the `IDGenerator` port |
+| `api4datatug` | The HTTP layer: `POST /v0/datatug/projects/create_project` |
+| `datatugext` | `Extension(ids)` — the extension config the host composes |
+
+Only `models4datatug` and `facade4datatug` are bound by the dal-go-only rule;
+`api4datatug` and `datatugext` are the thin HTTP/composition layer that
+necessarily speaks the platform's HTTP framework.
 
 ## `CreateProject`
 
@@ -52,9 +58,10 @@ test pins the exact path.
 
 | Concern | Where it lives |
 | --- | --- |
-| HTTP endpoint | `sneat-go/pkg/modules/datatug/api4datatug` — `POST /v0/datatug/projects/create_project?store=firestore` |
-| Ports | `sneat-go/pkg/modules/datatug/adapters.go` (`IDGenerator`) |
-| Extension registration | `sneat-go/pkg/modules/datatug/module.go`, composed in `pkg/sneatmain/sneat_main.go`'s `extraModules` |
+| HTTP endpoint | `api4datatug` (here) — `POST /v0/datatug/projects/create_project?store=firestore` |
+| Extension config | `datatugext.Extension(ids)` (here) |
+| `IDGenerator` adapter | the host: `sneat-go/pkg/modules/datatug/adapters.go` |
+| Route mounting | the host: `datatugext.Extension(...)` added to `pkg/sneatmain/sneat_main.go`'s `extraModules` |
 
 ## Build & test
 
