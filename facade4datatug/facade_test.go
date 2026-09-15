@@ -28,12 +28,12 @@ const testUserID = "user1"
 // emulator, no platform bootstrapping.
 func newTestFacade(t *testing.T, projectID string) Facade {
 	t.Helper()
-	return NewFacade(sneatcoretesting.NewMemoryDB(), fakeIDGenerator{next: projectID})
+	return NewFacade(sneatcoretesting.NewMemoryDB(), fakeIDGenerator{next: projectID}, nil)
 }
 
 func TestFacade_CreateProject(t *testing.T) {
 	db := sneatcoretesting.NewMemoryDB()
-	f := NewFacade(db, fakeIDGenerator{next: "proj1234"})
+	f := NewFacade(db, fakeIDGenerator{next: "proj1234"}, nil)
 	ctx := context.Background()
 
 	id, err := f.CreateProject(ctx, testUserID, models4datatug.FirestoreStoreID, "My project")
@@ -92,12 +92,12 @@ func TestFacade_CreateProject_keepsExistingBriefs(t *testing.T) {
 	db := sneatcoretesting.NewMemoryDB()
 	ctx := context.Background()
 
-	first, err := NewFacade(db, fakeIDGenerator{next: "proj0001"}).
+	first, err := NewFacade(db, fakeIDGenerator{next: "proj0001"}, nil).
 		CreateProject(ctx, testUserID, models4datatug.FirestoreStoreID, "First project")
 	if err != nil {
 		t.Fatalf("first CreateProject(): %v", err)
 	}
-	second, err := NewFacade(db, fakeIDGenerator{next: "proj0002"}).
+	second, err := NewFacade(db, fakeIDGenerator{next: "proj0002"}, nil).
 		CreateProject(ctx, testUserID, models4datatug.FirestoreStoreID, "Second project")
 	if err != nil {
 		t.Fatalf("second CreateProject(): %v", err)
@@ -144,7 +144,7 @@ func TestFacade_CreateProject_validation(t *testing.T) {
 
 func TestFacade_CreateProject_idGeneratorFailure(t *testing.T) {
 	genErr := errors.New("no ids left")
-	f := NewFacade(sneatcoretesting.NewMemoryDB(), fakeIDGenerator{err: genErr})
+	f := NewFacade(sneatcoretesting.NewMemoryDB(), fakeIDGenerator{err: genErr}, nil)
 
 	_, err := f.CreateProject(context.Background(), testUserID, models4datatug.FirestoreStoreID, "T")
 	if !errors.Is(err, genErr) {

@@ -58,7 +58,10 @@ type CreateProjectResponse struct {
 // Creating a project in a GitHub repo is deliberately not served here: the
 // client that holds the user's GitHub credential (datatug-apps, with a user
 // PAT) creates those files itself.
-func httpPostCreateProject(ids facade4datatug.IDGenerator) http.HandlerFunc {
+func httpPostCreateProject(
+	ids facade4datatug.IDGenerator,
+	githubOAuth facade4datatug.GithubOAuthExchanger,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var request CreateProjectRequest
 		request.StoreID = r.URL.Query().Get("store")
@@ -72,7 +75,7 @@ func httpPostCreateProject(ids facade4datatug.IDGenerator) http.HandlerFunc {
 			apicore.ReturnJSON(ctx, w, r, http.StatusCreated, err, nil)
 			return
 		}
-		f := facade4datatug.NewFacade(db, ids)
+		f := facade4datatug.NewFacade(db, ids, githubOAuth)
 		projectID, err := f.CreateProject(ctx, ctx.User().GetUserID(), request.StoreID, request.Title)
 		apicore.ReturnJSON(ctx, w, r, http.StatusCreated, err, &CreateProjectResponse{ID: projectID})
 	}

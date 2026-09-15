@@ -55,7 +55,10 @@ type RegisterGithubProjectResponse struct {
 //
 // The cloud never talks to GitHub: the client that holds the user's GitHub
 // credential creates the repository files, then registers them here.
-func httpPostRegisterGithubProject(ids facade4datatug.IDGenerator) http.HandlerFunc {
+func httpPostRegisterGithubProject(
+	ids facade4datatug.IDGenerator,
+	githubOAuth facade4datatug.GithubOAuthExchanger,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var request RegisterGithubProjectRequest
 		ctx, err := verifyAuthenticatedRequestAndDecodeBody(w, r, verify.DefaultJsonWithAuthRequired, &request)
@@ -68,7 +71,7 @@ func httpPostRegisterGithubProject(ids facade4datatug.IDGenerator) http.HandlerF
 			apicore.ReturnJSON(ctx, w, r, http.StatusCreated, err, nil)
 			return
 		}
-		f := facade4datatug.NewFacade(db, ids)
+		f := facade4datatug.NewFacade(db, ids, githubOAuth)
 		projectID, err := f.RegisterGithubProject(ctx, ctx.User().GetUserID(), facade4datatug.RegisterGithubProjectRequest{
 			Org:    request.Org,
 			Repo:   request.Repo,

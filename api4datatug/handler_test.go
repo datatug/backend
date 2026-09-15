@@ -15,6 +15,7 @@ import (
 	"github.com/sneat-co/sneat-go-core/sneatcoretesting"
 
 	"github.com/datatug/backend/const4datatug"
+	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/models4datatug"
 )
 
@@ -61,7 +62,7 @@ func TestHttpPostCreateProject_storeComesFromQuery(t *testing.T) {
 		strings.NewReader(`{"title":"My project"}`))
 	w := httptest.NewRecorder()
 
-	httpPostCreateProject(fakeIDs{next: "proj1234"})(w, r)
+	httpPostCreateProject(fakeIDs{next: "proj1234"}, nil)(w, r)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
@@ -102,7 +103,7 @@ func TestHttpPostCreateProject_rejectsUnsupportedStore(t *testing.T) {
 		strings.NewReader(`{"title":"My project"}`))
 	w := httptest.NewRecorder()
 
-	httpPostCreateProject(fakeIDs{next: "proj1234"})(w, r)
+	httpPostCreateProject(fakeIDs{next: "proj1234"}, nil)(w, r)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -123,7 +124,7 @@ func TestHttpPostCreateProject_requiresStore(t *testing.T) {
 		strings.NewReader(`{"title":"My project"}`))
 	w := httptest.NewRecorder()
 
-	httpPostCreateProject(fakeIDs{next: "proj1234"})(w, r)
+	httpPostCreateProject(fakeIDs{next: "proj1234"}, nil)(w, r)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
@@ -140,7 +141,7 @@ func TestHttpPostCreateProject_propagatesIDGeneratorFailure(t *testing.T) {
 		strings.NewReader(`{"title":"My project"}`))
 	w := httptest.NewRecorder()
 
-	httpPostCreateProject(fakeIDs{err: errors.New("no ids left")})(w, r)
+	httpPostCreateProject(fakeIDs{err: errors.New("no ids left")}, nil)(w, r)
 
 	if w.Code == http.StatusCreated {
 		t.Errorf("status = %d, want a failure status when the ID port fails", w.Code)
@@ -169,7 +170,7 @@ func TestHttpPostCreateProject_databaseFailure(t *testing.T) {
 		"/v0/datatug/projects/create_project?store="+models4datatug.FirestoreStoreID, body)
 	w := httptest.NewRecorder()
 
-	httpPostCreateProject(fakeIDs{next: "proj1234"})(w, r)
+	httpPostCreateProject(fakeIDs{next: "proj1234"}, nil)(w, r)
 
 	if w.Code == http.StatusCreated {
 		t.Errorf("status = %d, want a failure status when no database is available", w.Code)
@@ -183,11 +184,12 @@ func TestRegisterHttpRoutes(t *testing.T) {
 	var routes []route
 	RegisterHttpRoutes(func(method, path string, _ http.HandlerFunc) {
 		routes = append(routes, route{method, path})
-	}, fakeIDs{next: "proj1234"})
+	}, fakeIDs{next: "proj1234"}, nil)
 
 	want := []route{
 		{http.MethodPost, "/v0/datatug/projects/create_project"},
 		{http.MethodPost, "/v0/datatug/projects/register_github_project"},
+		{http.MethodPost, "/v0/datatug/github/oauth_token"},
 	}
 	if len(routes) != len(want) {
 		t.Fatalf("registered %d routes, want %d: %+v", len(routes), len(want), routes)
@@ -210,7 +212,7 @@ func TestHttpPostRegisterGithubProject_recordsGithubProject(t *testing.T) {
 		strings.NewReader(`{"org":"datatug","repo":"demo-projects","title":"My project"}`))
 	w := httptest.NewRecorder()
 
-	httpPostRegisterGithubProject(fakeIDs{})(w, r)
+	httpPostRegisterGithubProject(fakeIDs{}, nil)(w, r)
 
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
@@ -250,7 +252,63 @@ func TestHttpPostRegisterGithubProject_rejectsIncompleteRequest(t *testing.T) {
 		strings.NewReader(`{"repo":"demo-projects","title":"My project"}`))
 	w := httptest.NewRecorder()
 
-	httpPostRegisterGithubProject(fakeIDs{})(w, r)
+	httpPostRegisterGithubProject(fakeIDs{}, nil)(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// fakeGithubOAuth satisfies the domain's GithubOAuthExchanger port.
+type fakeGithubOAuth struct {
+	token facade4datatug.GithubOAuthToken
+	err   error
+}
+
+func (f fakeGithubOAuth) ExchangeCode(
+	context.Context, string, string,
+) (facade4datatug.GithubOAuthToken, error) {
+	return f.token, f.err
+}
+
+// The exchange endpoint returns the token the client calls GitHub with — the
+// client secret never leaves the server.
+func TestHttpPostExchangeGithubOAuthCode(t *testing.T) {
+	db := sneatcoretesting.NewMemoryDB()
+	stubVerification(t, db)
+
+	r := httptest.NewRequest(http.MethodPost, "/v0/datatug/github/oauth_token",
+		strings.NewReader(`{"code":"code1","redirectUri":"https://datatug.app/github/oauth/callback"}`))
+	w := httptest.NewRecorder()
+
+	port := fakeGithubOAuth{token: facade4datatug.GithubOAuthToken{AccessToken: "gho_test", TokenType: "bearer"}}
+	httpPostExchangeGithubOAuthCode(fakeIDs{}, port)(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var response struct {
+		AccessToken string `json:"accessToken"`
+		TokenType   string `json:"tokenType"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode response %q: %v", w.Body.String(), err)
+	}
+	if response.AccessToken != "gho_test" {
+		t.Errorf("accessToken = %q, want %q", response.AccessToken, "gho_test")
+	}
+}
+
+// A malformed exchange request is a client error.
+func TestHttpPostExchangeGithubOAuthCode_rejectsIncompleteRequest(t *testing.T) {
+	db := sneatcoretesting.NewMemoryDB()
+	stubVerification(t, db)
+
+	r := httptest.NewRequest(http.MethodPost, "/v0/datatug/github/oauth_token",
+		strings.NewReader(`{"code":"code1"}`))
+	w := httptest.NewRecorder()
+
+	httpPostExchangeGithubOAuthCode(fakeIDs{}, nil)(w, r)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
