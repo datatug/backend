@@ -176,7 +176,7 @@ func TestHttpPostCreateProject_databaseFailure(t *testing.T) {
 	}
 }
 
-// TestRegisterHttpRoutes pins the public path: route paths are literal in this
+// TestRegisterHttpRoutes pins the public paths: route paths are literal in this
 // framework (the host adds no prefix).
 func TestRegisterHttpRoutes(t *testing.T) {
 	type route struct{ method, path string }
@@ -185,8 +185,74 @@ func TestRegisterHttpRoutes(t *testing.T) {
 		routes = append(routes, route{method, path})
 	}, fakeIDs{next: "proj1234"})
 
-	want := route{http.MethodPost, "/v0/datatug/projects/create_project"}
-	if len(routes) != 1 || routes[0] != want {
-		t.Fatalf("registered routes = %+v, want exactly [%+v]", routes, want)
+	want := []route{
+		{http.MethodPost, "/v0/datatug/projects/create_project"},
+		{http.MethodPost, "/v0/datatug/projects/register_github_project"},
+	}
+	if len(routes) != len(want) {
+		t.Fatalf("registered %d routes, want %d: %+v", len(routes), len(want), routes)
+	}
+	for i, expected := range want {
+		if routes[i] != expected {
+			t.Errorf("route %d = %+v, want %+v", i, routes[i], expected)
+		}
+	}
+}
+
+// Registering a GitHub-hosted project records it in the user's index and
+// returns the id the client addresses it by (`repo@org@folder`).
+func TestHttpPostRegisterGithubProject_recordsGithubProject(t *testing.T) {
+	db := sneatcoretesting.NewMemoryDB()
+	stubVerification(t, db)
+
+	r := httptest.NewRequest(http.MethodPost,
+		"/v0/datatug/projects/register_github_project",
+		strings.NewReader(`{"org":"datatug","repo":"demo-projects","title":"My project"}`))
+	w := httptest.NewRecorder()
+
+	httpPostRegisterGithubProject(fakeIDs{})(w, r)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var response RegisterGithubProjectResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to decode response %q: %v", w.Body.String(), err)
+	}
+	const wantID = "demo-projects@datatug@datatug"
+	if response.ID != wantID {
+		t.Errorf("response id = %q, want %q", response.ID, wantID)
+	}
+
+	userExtRecord, userExt := models4datatug.NewUserExtRecord("user1", const4datatug.ExtensionID)
+	if err := db.Get(context.Background(), userExtRecord); err != nil {
+		t.Fatalf("failed to read back the user index record: %v", err)
+	}
+	store, ok := userExt.Stores[models4datatug.GithubStoreID]
+	if !ok {
+		t.Fatalf("user index is missing the %q store: %+v", models4datatug.GithubStoreID, userExt.Stores)
+	}
+	if store.Type != models4datatug.GithubStoreType {
+		t.Errorf("store type = %q, want %q", store.Type, models4datatug.GithubStoreType)
+	}
+	if _, ok := store.Projects[wantID]; !ok {
+		t.Errorf("user index is missing project %q: %+v", wantID, store.Projects)
+	}
+}
+
+// A malformed registration is a client error and must not touch the database.
+func TestHttpPostRegisterGithubProject_rejectsIncompleteRequest(t *testing.T) {
+	db := sneatcoretesting.NewMemoryDB()
+	stubVerification(t, db)
+
+	r := httptest.NewRequest(http.MethodPost,
+		"/v0/datatug/projects/register_github_project",
+		strings.NewReader(`{"repo":"demo-projects","title":"My project"}`))
+	w := httptest.NewRecorder()
+
+	httpPostRegisterGithubProject(fakeIDs{})(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
 	}
 }

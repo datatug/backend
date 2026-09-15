@@ -18,6 +18,6 @@ func (fakeIDs) NewID(context.Context) (string, error) { return "proj1234", nil }
 func TestExtension(t *testing.T) {
 	extension.AssertExtension(t, Extension(fakeIDs{}), extension.Expected{
 		ExtID:         const4datatug.ExtensionID,
-		HandlersCount: 1,
+		HandlersCount: 2,
 	})
 }

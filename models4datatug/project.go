@@ -32,6 +32,21 @@ const (
 	// FirestoreStoreTitle is the human-readable title of the cloud store.
 	FirestoreStoreTitle = "DataTug cloud"
 
+	// GithubStoreID is the store id of a project hosted in a GitHub repository —
+	// the id the web client's GitHub reader and navigation use.
+	GithubStoreID = "github.com"
+
+	// GithubStoreType is the store type reported for GitHub-hosted projects.
+	GithubStoreType = "github"
+
+	// GithubStoreTitle is the human-readable title of the GitHub store.
+	GithubStoreTitle = "GitHub"
+
+	// DefaultGithubProjectFolder is the repo folder a project lives in when the
+	// user does not name one — the same default the web client's
+	// parseGithubProjectId() applies.
+	DefaultGithubProjectFolder = "datatug"
+
 	// AccessPrivate means only the userIDs listed on the project can read it.
 	AccessPrivate = "private"
 )
@@ -94,4 +109,11 @@ func NewUserExtKey(userID, extID string) *record.Key {
 func NewUserExtRecord(userID, extID string) (record.Record, *UserExt) {
 	dbo := new(UserExt)
 	return record.NewRecordWithData(NewUserExtKey(userID, extID), dbo), dbo
+}
+
+// NewGithubProjectID builds the id a GitHub-hosted project is addressed by:
+// `repo@org@folder` — the format the web client's parseGithubProjectId()
+// expects.
+func NewGithubProjectID(org, repo, folder string) string {
+	return repo + "@" + org + "@" + folder
 }

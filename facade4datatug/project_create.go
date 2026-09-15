@@ -7,10 +7,7 @@ import (
 	"time"
 
 	"github.com/dal-go/dalgo/dal"
-	"github.com/dal-go/record"
-	"github.com/dal-go/record/update"
 
-	"github.com/datatug/backend/const4datatug"
 	"github.com/datatug/backend/models4datatug"
 )
 
@@ -67,11 +64,9 @@ func createProjectInTx(
 	// The user's index is read BEFORE the first write: Firestore (and the
 	// in-memory database the tests run against) requires every read in a
 	// transaction to precede any write.
-	userExtRecord, userExt := models4datatug.NewUserExtRecord(userID, const4datatug.ExtensionID)
-	readErr := tx.Get(ctx, userExtRecord)
-	indexExists := readErr == nil
-	if readErr != nil && !record.IsNotFound(readErr) {
-		return fmt.Errorf("failed to read user's DataTug index: %w", readErr)
+	userExtRecord, userExt, indexExists, err := readProjectIndex(ctx, tx, userID)
+	if err != nil {
+		return err
 	}
 
 	projectRecord, project := models4datatug.NewProjectRecord(projectID)
@@ -83,20 +78,7 @@ func createProjectInTx(
 		return fmt.Errorf("failed to insert project record: %w", err)
 	}
 
-	brief := &models4datatug.ProjectBrief{Title: title, Access: project.Access}
-	if indexExists {
-		return tx.Update(ctx, userExtRecord.Key(), []update.Update{
-			update.ByFieldPath([]string{"stores", storeID, "projects", projectID}, brief),
-		})
-	}
-	userExt.Stores = map[string]*models4datatug.StoreBrief{
-		storeID: {
-			Title: models4datatug.FirestoreStoreTitle,
-			Type:  storeID,
-			Projects: map[string]*models4datatug.ProjectBrief{
-				projectID: brief,
-			},
-		},
-	}
-	return tx.Insert(ctx, userExtRecord)
+	return writeProjectBrief(ctx, tx, userExtRecord, userExt, indexExists,
+		storeIndex{ID: storeID, Type: storeID, Title: models4datatug.FirestoreStoreTitle},
+		projectID, &models4datatug.ProjectBrief{Title: title, Access: project.Access})
 }
