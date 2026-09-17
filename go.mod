@@ -3,13 +3,13 @@ module github.com/datatug/backend
 go 1.26.0
 
 require (
-	github.com/dal-go/dalgo v0.80.4
+	github.com/dal-go/dalgo v0.80.5
 	github.com/sneat-co/sneat-go-core v0.70.5
 	github.com/strongo/validation v0.0.13
 )
 
 require (
-	github.com/RoaringBitmap/roaring/v2 v2.27.0 // indirect
+	github.com/RoaringBitmap/roaring/v2 v2.28.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.6 // indirect
 	github.com/crediterra/money v0.4.0 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
