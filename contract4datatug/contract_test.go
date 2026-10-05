@@ -1,8 +1,12 @@
-package contract4datatug
+package contract4datatug_test
 
-// This file is self-contained (standard library only) so that a repository
-// that copies the fixtures of testdata/contract copies this file with them and
-// checks its copies against the same CHECKSUMS file.
+// This file is self-contained (standard library only, and it reads nothing
+// outside testdata/contract) so that a repository that copies the fixtures of
+// testdata/contract copies this file with them, unchanged, and checks its
+// copies against the same CHECKSUMS file. The layout a copy needs: testdata/contract
+// at the repository root, and this file alone in a package directory one level
+// below the root. The check that the contract page names every fixture is in
+// page_test.go, which is not copied.
 
 import (
 	"crypto/sha256"
@@ -19,7 +23,6 @@ import (
 const (
 	fixturesDir   = "../testdata/contract"
 	checksumsName = "CHECKSUMS"
-	pagePath      = "../spec/features/plans-and-ai-metering/README.md"
 )
 
 // readChecksums parses a CHECKSUMS file: one line per fixture, the SHA-256 of
@@ -91,24 +94,6 @@ func verifyFixtures(dir string) error {
 func TestFixturesMatchChecksums(t *testing.T) {
 	if err := verifyFixtures(fixturesDir); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// Every fixture is described on the contract page, so a fixture cannot be
-// added, or renamed, without the page saying what it is.
-func TestPageNamesEveryFixture(t *testing.T) {
-	names, _, err := readChecksums(fixturesDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := os.ReadFile(pagePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range names {
-		if !strings.Contains(string(page), "`"+name+"`") {
-			t.Errorf("the contract page does not name the fixture `%s`", name)
-		}
 	}
 }
 

@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "invalid",
-    "message": "This question sends more of your schema than included AI accepts. Narrow the tables, or use your own key."
+    "message": "A full sentence for a person: what happened and what to do."
   },
   "limit": {
     "v": 1,

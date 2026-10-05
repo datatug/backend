@@ -1,7 +1,7 @@
 # SpecScore Repo Config Schema: https://specscore.md/repo-config
 
 project:
-    title: backend
+    title: DataTug backend
     host: github.com
     org: datatug
     repo: backend

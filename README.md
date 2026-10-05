@@ -24,6 +24,10 @@ Firestore emulator or platform bootstrapping is needed.
 | `facade4datatug` | `Facade` (injected `dal.DB` + ports) and the `CreateProject` command; `ports.go` holds the `IDGenerator` port |
 | `api4datatug` | The HTTP layer: `POST /v0/datatug/projects/create_project` |
 | `datatugext` | `Extension(ids)` — the extension config the host composes |
+| `contract4datatug` | The test that pins the fixtures of `testdata/contract` to their `CHECKSUMS`; the contract itself is the page under `spec/` |
+
+The specification tree is `spec/`; the contract of plans and AI metering, which clients read, is
+`spec/features/plans-and-ai-metering/README.md`, with its fixtures in `testdata/contract/`.
 
 Only `models4datatug` and `facade4datatug` are bound by the dal-go-only rule;
 `api4datatug` and `datatugext` are the thin HTTP/composition layer that

@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "quota",
-    "message": "Your included AI questions for this month are used up. They reset on 1 April (UTC). Your own AI key works now. Plans with more questions: https://example.com/pricing"
+    "message": "A full sentence for a person: what happened and what to do."
   },
   "limit": {
     "v": 1,

@@ -11,12 +11,16 @@ on:
       - '**/*.go'
       - go.mod
       - go.sum
+      - testdata/contract/**
+      - spec/features/plans-and-ai-metering/**
       - .github/workflows/backend-ci.yml
   pull_request:
     paths:
       - '**/*.go'
       - go.mod
       - go.sum
+      - testdata/contract/**
+      - spec/features/plans-and-ai-metering/**
       - .github/workflows/backend-ci.yml
 
 concurrency:

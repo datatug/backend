@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "invalid",
-    "message": "This model is not included in your plan. Any model works with your own key."
+    "message": "A full sentence for a person: what happened and what to do."
   },
   "limit": {
     "v": 1,

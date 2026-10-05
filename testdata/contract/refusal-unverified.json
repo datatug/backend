@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "invalid",
-    "message": "Free AI needs a confirmed email address. Confirm yours, or sign in with another provider. Your own AI key works now."
+    "message": "A full sentence for a person: what happened and what to do."
   },
   "limit": {
     "v": 1,

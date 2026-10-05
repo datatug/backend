@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "quota",
-    "message": "That is a lot of questions for one day. Included AI continues tomorrow (UTC). Your own AI key works now."
+    "message": "A full sentence for a person: what happened and what to do."
   },
   "limit": {
     "v": 1,

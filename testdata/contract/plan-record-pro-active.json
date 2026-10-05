@@ -10,7 +10,8 @@
     "projectGuests": 3,
     "aiQuestions": 11,
     "aiModelClasses": [
-      "fast"
+      "fast",
+      "standard"
     ],
     "aiPaysFor": "owner"
   },

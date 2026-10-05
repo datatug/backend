@@ -11,7 +11,8 @@
     "projectGuests": 0,
     "aiQuestions": 13,
     "aiModelClasses": [
-      "fast"
+      "fast",
+      "standard"
     ],
     "aiPaysFor": "contributors"
   },

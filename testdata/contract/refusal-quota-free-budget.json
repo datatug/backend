@@ -1,7 +1,7 @@
 {
   "error": {
     "code": "quota",
-    "message": "Free AI is used up for this month for everyone. Your own AI key works now. Plans with included AI: https://example.com/pricing"
+    "message": "A full sentence for a person: what happened and what to do."
   },
   "limit": {
     "v": 1,

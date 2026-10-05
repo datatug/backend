@@ -9,7 +9,7 @@
   "status": "active",
   "period": "month",
   "paidUntil": "2026-03-20T10:12:00Z",
-  "founding": true,
+  "founding": false,
   "limits": {
     "contributors": 1,
     "projectGuests": 3,
@@ -24,12 +24,12 @@
     "unit": "questions",
     "enforced": true,
     "periodId": "2026-03",
-    "used": 2,
+    "used": 10,
     "limit": 11,
-    "left": 9,
+    "left": 1,
     "resetsAt": "2026-04-01T00:00:00Z",
     "today": {
-      "used": 2,
+      "used": 4,
       "limit": 17
     },
     "blocked": null,

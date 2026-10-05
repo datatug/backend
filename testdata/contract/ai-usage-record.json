@@ -1,11 +1,11 @@
 {
   "v": 1,
   "periodId": "2026-03",
-  "used": 2,
+  "used": 4,
   "questions": 2,
   "byMember": {
     "u_alex": 1,
-    "u_sam": 1
+    "u_sam": 3
   },
   "resetsAt": "2026-04-01T00:00:00Z",
   "updatedAt": "2026-03-09T14:03:11Z"
