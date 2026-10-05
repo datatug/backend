@@ -209,13 +209,13 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 		left = limit - used
 	}
 	var blocked *string
-	if capped {
+	if config.Enforced && capped {
 		reason := "monthly"
 		blocked = &reason
-	} else if admission.TodayUsed >= config.DailyLimit {
+	} else if config.Enforced && (admission.TodayUsed >= config.DailyLimit || admission.Blocked == "daily") {
 		reason := "daily"
 		blocked = &reason
-	} else if admission.Blocked != "" {
+	} else if admission.Blocked == "free_budget" || admission.Blocked == "unverified" {
 		blocked = &admission.Blocked
 	}
 	response := PlanResponse{

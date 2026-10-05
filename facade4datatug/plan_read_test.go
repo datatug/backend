@@ -390,3 +390,39 @@ func TestPersonalPlanRejectsInvalidStoredGrantsAndAppliesDailyCeiling(t *testing
 		t.Fatal(got, err)
 	}
 }
+
+func TestPersonalPlanObservationPreservesCashGuard(t *testing.T) {
+	s, _, _, usage, admission, _ := validPlanTestService()
+	config := s.Config.(testConfigReader).config
+	config.Enforced = false
+	s.Config = testConfigReader{config: config}
+	usage.usage = &models4datatug.AIUsageRecord{V: 1, PeriodID: "2026-03", Used: 7, Capped: true}
+	admission.state.TodayUsed = 17
+	read := func() PlanResponse {
+		t.Helper()
+		got, err := s.Read(context.Background(), "caller", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	observed := read()
+	if observed.AI.Enforced || observed.AI.Left != 0 || observed.AI.Blocked != nil {
+		t.Fatal(observed)
+	}
+	admission.state.Blocked = "free_budget"
+	budget := read()
+	if budget.AI.Blocked == nil || *budget.AI.Blocked != "free_budget" {
+		t.Fatal(budget)
+	}
+	admission.state.Blocked = "unverified"
+	unverified := read()
+	if unverified.AI.Blocked == nil || *unverified.AI.Blocked != "unverified" {
+		t.Fatal(unverified)
+	}
+	admission.state.Blocked = "daily"
+	dailyObserved := read()
+	if dailyObserved.AI.Blocked != nil {
+		t.Fatal(dailyObserved)
+	}
+}
