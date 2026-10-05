@@ -7,13 +7,13 @@
   "offer": {
     "id": "datatug-founding",
     "applied": true,
-    "percentOff": 30,
+    "percentOff": 15,
     "left": 4
   },
   "amount": {
     "currency": "xts",
     "list": 700,
-    "due": 490,
+    "due": 595,
     "taxIncluded": true
   }
 }

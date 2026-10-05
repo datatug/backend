@@ -1,0 +1,147 @@
+{
+  "description": "Illustrative contract cases; no server implementation is asserted.",
+  "cases": [
+    {
+      "name": "lighter then heavier in one month",
+      "key": "11111111-1111-4111-8111-111111111111",
+      "generationId": "g-1",
+      "calls": [
+        {
+          "callId": "c-1",
+          "admittedAt": "2026-03-10T08:00:00Z",
+          "kind": "chat",
+          "modelWeight": 1,
+          "weightAdded": 1,
+          "questionsAdded": 1,
+          "periodId": "2026-03"
+        },
+        {
+          "callId": "c-2",
+          "admittedAt": "2026-03-10T08:01:00Z",
+          "kind": "chat",
+          "modelWeight": 3,
+          "weightAdded": 2,
+          "questionsAdded": 0,
+          "periodId": "2026-03"
+        },
+        {
+          "callId": "c-3",
+          "admittedAt": "2026-03-10T08:02:00Z",
+          "kind": "score",
+          "defaultWeight": 1,
+          "weightAdded": 0,
+          "questionsAdded": 0,
+          "periodId": "2026-03"
+        }
+      ],
+      "result": {
+        "heaviestWeight": 3,
+        "march": {
+          "questions": 1,
+          "used": 3
+        }
+      }
+    },
+    {
+      "name": "later weight difference belongs to its admission month",
+      "key": "22222222-2222-4222-8222-222222222222",
+      "generationId": "g-2",
+      "calls": [
+        {
+          "callId": "c-4",
+          "admittedAt": "2026-10-31T23:59:59Z",
+          "kind": "decision",
+          "defaultWeight": 1,
+          "weightAdded": 1,
+          "questionsAdded": 1,
+          "periodId": "2026-10"
+        },
+        {
+          "callId": "c-5",
+          "admittedAt": "2026-11-01T00:00:01Z",
+          "kind": "chat",
+          "modelWeight": 3,
+          "weightAdded": 2,
+          "questionsAdded": 0,
+          "periodId": "2026-11"
+        }
+      ],
+      "result": {
+        "heaviestWeight": 3,
+        "october": {
+          "questions": 1,
+          "used": 1
+        },
+        "november": {
+          "questions": 0,
+          "used": 2
+        }
+      }
+    },
+    {
+      "name": "current-month refusal has the next current-month reset",
+      "key": "22222222-2222-4222-8222-222222222222",
+      "generationId": "g-2",
+      "attempt": {
+        "at": "2026-11-01T00:01:00Z",
+        "modelWeight": 4,
+        "positiveDifference": 1,
+        "novemberLeft": 0
+      },
+      "refusal": {
+        "status": 429,
+        "reason": "monthly",
+        "periodId": "2026-11",
+        "resetsAt": "2026-12-01T00:00:00Z",
+        "questionsAdded": 0,
+        "weightAdded": 0
+      }
+    },
+    {
+      "name": "reused UUID after bounded lifetime starts a counted generation",
+      "key": "33333333-3333-4333-8333-333333333333",
+      "previous": {
+        "generationId": "g-3",
+        "firstAdmittedAt": "2026-03-10T08:00:00Z",
+        "payerAccountId": "personal-a",
+        "product": "datatug"
+      },
+      "next": {
+        "generationId": "g-4",
+        "admittedAt": "2026-03-10T08:11:00Z",
+        "payerAccountId": "team-b",
+        "product": "datatug",
+        "questionsAdded": 1,
+        "weightAdded": 1
+      },
+      "previousCallReferencesUnchanged": true
+    },
+    {
+      "name": "late settlement retains admission counters",
+      "call": {
+        "callId": "c-6",
+        "generationId": "g-5",
+        "admittedAt": "2026-10-31T23:59:59Z",
+        "periodId": "2026-10",
+        "dayId": "2026-10-31",
+        "countRef": "payer-a/aiUsage/2026-10",
+        "dayRef": "person-a/daily/2026-10-31",
+        "moneyRefs": [
+          "payer-a/money/2026-10",
+          "free-pool/money/2026-10"
+        ]
+      },
+      "settledAt": "2026-11-01T00:02:00Z",
+      "actualCostUnits": 2,
+      "after": {
+        "octoberMoneySpentUnits": 2,
+        "octoberReservationReleased": true,
+        "novemberMoneySpentUnits": 0,
+        "novemberReservedUnits": 0,
+        "octoberFreePoolSpentUnits": 2,
+        "novemberFreePoolSpentUnits": 0
+      },
+      "repeatSettlementChangesNothing": true
+    }
+  ]
+}
