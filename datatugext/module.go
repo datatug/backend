@@ -13,10 +13,15 @@ import (
 // Extension returns the DataTug extension config: its module identity, its HTTP
 // routes, and the host-supplied IDGenerator adapter.
 func Extension(ids facade4datatug.IDGenerator) extension.Config {
+	return ExtensionWithPlan(ids, api4datatug.PlanRouteOptions{})
+}
+
+// ExtensionWithPlan binds the host's trusted authentication and plan adapters.
+func ExtensionWithPlan(ids facade4datatug.IDGenerator, plan api4datatug.PlanRouteOptions) extension.Config {
 	return extension.NewExtension(
 		const4datatug.ExtensionID,
 		extension.RegisterRoutes(func(handle extension.HTTPHandleFunc) {
-			api4datatug.RegisterHttpRoutes(handle, ids)
+			api4datatug.RegisterHttpRoutesWithPlan(handle, ids, plan)
 		}),
 	)
 }

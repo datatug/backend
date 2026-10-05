@@ -19,6 +19,12 @@ A client (the web app, the CLI) has to show three things: which plan an account 
 
 This page fixes the shapes. The fixtures are copied into each client's repository together with `CHECKSUMS` and the test `contract4datatug/contract_test.go` of this repository, which is standard-library only and reads nothing but the fixtures; each copy is checked against the same digests, so a copy cannot drift unnoticed. The layout a copy needs is in [REQ:fixtures](#req-fixtures).
 
+### Current implementation availability
+
+The initial server implementation of `GET /v0/datatug/plan` serves the signed-in caller's **personal Free or Pro account only**. Its `accounts` list contains exactly that one proven personal account, and `payer` is `personal`. An explicit `account` other than that account receives the same non-disclosing 403 `not_a_member` answer whether it exists or not. A `project` hint cannot select or charge another account in this implementation. The account must be provisioned and the caller's ownership proved by the host; an unavailable or missing personal account produces the 503 `upstream` answer, not an invented Free account.
+
+Organisation selection, shared pools, additional paid tiers and their checkout flows below describe the wider version-1 wire contract and compatibility fixtures for future work. They are not available in this initial endpoint or purchase flow. The original fixtures remain valid examples of the version-1 shapes, not evidence that every example can be produced by this deployed slice. No client should offer an unavailable tier or infer its availability from a fixture.
+
 ## Behavior
 
 ### Words used
@@ -56,6 +62,7 @@ The plan of an account is the document `spaces/{accountId}/ext/datatug/plan/curr
 | `limits` | object | Absent when `plan` is `free`. See below. |
 | `limits.contributors` | number | The cap on contributors. |
 | `limits.projectGuests` | number | People besides the owner in each project of a personal account. |
+| `limits.projectContributors` | number, optional | Contributors in each project, including its owner. Additive to `projectGuests`, whose existing meaning is unchanged. A personal Pro grant may carry this field; a client that does not know it ignores it. |
 | `limits.aiQuestions` | number | Included AI questions per calendar month. `0` means none, never "no limit". |
 | `limits.aiModelClasses` | array of string | The model classes the plan includes: `fast` and `standard`. Others may be added, and a client tolerates an unknown class. A client offers only the models that `ai.models` lists ([REQ:models](#req-models)). |
 | `limits.aiPaysFor` | string | `owner` (the allowance is the owner's alone) or `contributors` (one pool for the contributors of the organisation). |
@@ -64,7 +71,7 @@ The plan of an account is the document `spaces/{accountId}/ext/datatug/plan/curr
 
 The record holds no payment-provider identifier, no amount, no email and no member list. A missing document, or `plan: free`, is the Free plan. The Free numbers are configuration: a reader takes them from `ai` and `limits` of the endpoint ([REQ:plan-endpoint-response](#req-plan-endpoint-response)), never from a constant and never from a document.
 
-Fixtures: `plan-record-pro-active.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json`.
+Fixtures: `plan-record-pro-active.json`, `plan-record-pro-project-contributors.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json`.
 
 #### REQ: usage-record
 
@@ -82,6 +89,8 @@ The count of an account for one month is the document `spaces/{accountId}/ext/da
 | `updatedAt` | timestamp | |
 
 `left` is defined as `capped ? 0 : max(0, limits.aiQuestions + aiExtraQuestions - used)`, with a missing count document meaning `used: 0`; a client takes `left` from the endpoint ([REQ:plan-endpoint-response](#req-plan-endpoint-response)) and does not compute it. The count starts again at the first instant of each UTC month, for every plan and every billing period; no job runs, a new document simply begins at 0. A change of plan moves no counter: `used` stays, and the new limit applies at once.
+
+For a personal Free account, the included question limit is runtime configuration with separate values for the UTC month of the person's **first admitted** hosted question and later UTC months. The meter records that month once, even if the first admission occurs while the person is on Pro; a refused or merely observed call does not start it. An empty marker means no question has yet been admitted and the first-month value still applies. The endpoint reads the same server-only marker by product, person and proved personal account before reporting a Free limit; if the marker cannot be read or is invalid, it answers 503. Neither account creation time nor the browser's calendar selects the allowance.
 
 Fixtures: `ai-usage-record.json`, `ai-usage-record-capped.json`.
 
@@ -130,7 +139,7 @@ The record follows the state of the subscription at the payment provider through
 | `refundedAt` | timestamp, optional | When. The function ignores it: it decides no row and no field of a record. |
 | `firstPaidAt` | timestamp, optional | The time of the first payment. The function ignores it as well; absent when the subscription was never paid. |
 | `founding` | boolean | The Founding discount is on the subscription. |
-| `grants` | object | The limits the plan allows: `contributors`, `projectGuests`, `aiQuestions`, `aiModelClasses`, `aiPaysFor`, as in `limits` of [REQ:plan-record](#req-plan-record). |
+| `grants` | object | The limits the plan allows: `contributors`, `projectGuests`, optional `projectContributors`, `aiQuestions`, `aiModelClasses`, `aiPaysFor`, as in `limits` of [REQ:plan-record](#req-plan-record). |
 
 It has three outcomes: write a record; leave the record as it is; refuse, with a reason, and leave the record as it is. A refusal is also reported to the operator, which this contract does not describe. `refundedAt` and `firstPaidAt` are passed so that a caller hands over what it read; no outcome depends on them. The outcomes are:
 
@@ -191,10 +200,15 @@ Fixtures: `plan-response-ended.json` (`ended`), `plan-response-stale.json` (`pas
 
 `GET /v0/datatug/plan`, on the API base the client is configured with ([REQ:ai-calls](#req-ai-calls)), answers for the account that would pay for the caller's next question, in the context the caller gives. It is called with a Firebase ID token, or with a DataTug CLI sign-in that holds the scope `datatug:projects:read`, as `Authorization: Bearer <token>`. A missing, expired or wrongly scoped credential answers 401. The contract gives a 401 no body: a client reads any 401, here and on every `/v0/ai/*` call, as "sign in again" and depends on nothing in its body.
 
+In the initial personal Free/Pro implementation, an injected host authenticator must verify the credential and return the caller; this route does not interpret a bearer string as proof. The host's production verifier and personal-account provisioner are separate deployment dependencies. Until they are bound, the route returns 503 instead of reporting a plan.
+All answers from this authenticated route, including refusals, carry `Cache-Control: no-store`.
+
 Optional query parameters:
 
 - `project=<cloud project ID>` has the meaning of `X-AI-Project` ([REQ:ai-headers](#req-ai-headers)): one the caller has no right to is ignored, and never answered with an error.
 - `account=<accountId>` is checked. An `account` the caller is not a member of answers 403, whatever the reason (it does not exist, or the caller is not a member): the body is `{"error": {"code": "not_a_member", "message": "..."}}`. The same answer, for the same reason, hides whether an account exists.
+
+For the initial personal-only implementation, only the proved personal account ID is accepted as `account`; any other value gets that 403 without reading the named account. A `project` value never selects another payer in this slice.
 
 A client passes `account` only with an `accountId` taken from `accounts` of an earlier answer. In a project of an account it is not a member of, it passes `project` or nothing. The answer is always for the account that would pay under [REQ:payer-rules](#req-payer-rules), so its `accountId` may differ from the `account` asked for: the client shows the account the answer names.
 
@@ -230,6 +244,8 @@ The answer is 200 and one JSON object of version 1. Every field below is always 
 | `supportEmail` | string, optional | A host setting. |
 | `accounts` | array | The accounts the caller can choose between, at most twenty: the caller's personal account, and every organisation account that has a DataTug plan record and of which the caller is a proven member. Each is `{accountId, kind, title, plan, role, pays}`, `kind` being `personal` or `organisation`; `plan` is the plan in force of that account (its `effectivePlan`, not the plan its record states); `pays` is `true` for every account that rule 4 of [REQ:payer-rules](#req-payer-rules) can charge when no usable project hint is given: each candidate, and the personal account when it is not a candidate and the number of candidates is not exactly one (it then pays, on Free, unless the client names a candidate); a client can ask the person which one. A space of another kind never appears. |
 
+In the initial personal-only implementation, `accounts` has exactly one entry: the caller's proved personal account, with `kind: personal`, `role: owner`, and `pays: true`. The broader enumeration and chooser rule above is reserved for future implementation; the current server does not produce an incomplete organisation list as if it were authoritative.
+
 `ai`:
 
 | Field | Type | Meaning |
@@ -245,7 +261,7 @@ The answer is 200 and one JSON object of version 1. Every field below is always 
 
 While `ai.enforced` is `true`, a person can start a question with a model of weight `w` when `ai.blocked` is `null` and `ai.left` is at least `w`. For an existing question, only a positive difference above its heaviest previously admitted weight needs room in `ai.left`; permission and the other guards still apply on every call. A client shows the plan, the account that pays, and `ai.left` of `ai.limit` with the reset date, and, while `ai.blocked` is not null, the reason. It does not compute any of those.
 
-Fixtures: `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`.
+Fixtures: `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-project-contributors.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`.
 
 #### REQ: models
 
@@ -287,7 +303,7 @@ A hint only selects among accounts the server has itself verified. It never give
 
 #### REQ: payer-rules
 
-The server decides in this order:
+For the initial personal Free/Pro implementation, the shared resolver used by this endpoint and the later AI meter returns only the caller's proved personal account. A project or account hint cannot shift its charge to another account. The wider organisation-capable implementation uses the following rules:
 
 1. **A project hint is present.** The server reads the project's account from its own records and checks the caller is in the project. If either fails, the hint is ignored (rule 4).
 2. **That account is an organisation with a paying plan, and the caller is a contributor of it:** the organisation's pool pays.
@@ -424,12 +440,13 @@ The answer is 200 with `clientSecret`, `sessionId` and `mode` (the mode the sess
 |---|---|---|
 | `accountId` | string, optional | The account the plan will land on. Absent for an organisation that is created when the payment completes. |
 | `accountKind` | string | `personal` or `organisation`. |
-| `offer` | object, optional | `{id, applied, percentOff, left}`. Absent when this offer does not apply to the plan. Present with `applied: false` when this offer applies to the plan but no place is available for this session; the client shows the quoted amount before it draws the form. Other adjustments may affect the amount independently of this field. |
+| `offer` | object, optional | `{id, applied, percentOff, left}`, with additive `reserved` and `duration` on newer answers. Absent when this launch offer does not apply to the plan. `applied: true` means its discount is currently payable; `reserved: true` means a contingent launch place is held for this payment form, not an earned grant. Thus an invitation can be the payable discount while the launch place is reserved (`applied: false`, `reserved: true`). `duration` is `forever` for the launch terms. Original answers without the additive fields remain valid. |
+| `appliedDiscount` | object, optional | The discount actually frozen into this payable quote: `{kind, percentOff, duration?, durationMonths?}`. `kind` is `none`, `launch` or `invitation`; `percentOff` is an integer. `duration` is `forever`, `repeating` or `once` when there is a discount; `durationMonths` is a positive integer only for `repeating`. A replay returns the same frozen quote. This field does not promise that a contingent launch reservation has become an entitlement. Original answers without it remain valid. |
 | `amount` | object | `{currency, list, due, taxIncluded}`: `currency` is an ISO 4217 code in lower case; `list` and `due` are integers in the currency's minor unit, `due` is what the form will charge for the first period, and `taxIncluded` says whether the amounts include tax. |
 
-A client shows `amount` and `offer` from the answer, not from its own tables, and never infers `amount.due` from `offer`. `amount.due` is always the amount this form charges.
+A client shows `amount`, `offer` and `appliedDiscount` from the answer, not from its own tables, and never infers `amount.due` from either discount object. `amount.due` is always the amount this form charges. If `offer.reserved` is true while `appliedDiscount.kind` is `invitation`, the page can explain the reserved launch place separately from the invitation discount that is currently payable; it never calls that reservation an earned lifetime grant before confirmed payment.
 
-Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`.
+Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-invitation-reserved.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`.
 
 #### REQ: session-errors
 
@@ -438,15 +455,16 @@ A checkout error is a JSON object with `code` and optionally `message`, with kno
 | Status | `code` | When |
 |---|---|---|
 | 401 | `sign_in_required` | No credential. Nothing was created. The page keeps the person's choice, asks them to sign in, and asks again. |
-| 503 | `not_available` | The server cannot check a buyer or an account. No provider was called. |
+| 503 | `not_available` | The server cannot establish the buyer or account, or cannot complete a required availability check. This request has not issued a new payable form; provider price or coupon reads, or confirmed Customer creation, may already have occurred, and an earlier open form may still exist. |
 | 403 | `not_account_admin` | The buyer may not buy for that space. The answer is identical for a space that does not exist. |
 | 400 | `plan_not_for_account` | The tier does not fit the kind of account (a tier for organisations for a personal account, or the reverse). |
 | 409 | `already_subscribed` | The account already has a live subscription. When the buyer's earlier payment form turns out to have been paid, the body also carries that form's `sessionId`, so the page can show the thank-you. |
 | 409 | `offer_busy` | The last Founding places are held by open payment forms. No form is made and nothing is charged; the person is told to try again in a few minutes. A `Retry-After` header gives the seconds. |
+| 409 | `checkout_resolving` | The buyer's frozen checkout operation has an ambiguous provider Customer or session result, or its confirmed result is not yet durably committed. No replacement payable form is issued. Repeat the same signed-in selection so the server can recover that operation; do not infer that no payment happened or start another operation. |
 
 A buyer has at most one open payment form. A replacement is issued only after the earlier form is confirmed terminal and unpaid; otherwise the server reuses the earlier form or keeps the request resolving. A merely elapsed local clock is not proof that the earlier form cannot be paid.
 
-Fixtures: `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json`.
+Fixtures: `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json`, `checkout-error-resolving.json`.
 
 #### REQ: after-payment
 
@@ -458,6 +476,8 @@ The payment form is drawn from `clientSecret`. Drawing the form and the thank-yo
 
 `testdata/contract/` holds one JSON fixture per shape of this page, each named in this page, and `CHECKSUMS`: one line per fixture, `<SHA-256 of the file as 64 lower-case hex digits>`, two spaces, the file name, sorted by name, ending with a line feed (`shasum -a 256 -c CHECKSUMS` reads it). The test of `contract4datatug/contract_test.go` fails when a fixture is not valid JSON, is not listed, is listed and missing, or does not match its digest. It reads nothing but the fixtures. A second test, `contract4datatug/page_test.go`, fails when a fixture is not named in this page; it checks this repository's own page and is not copied.
 
+The original fixture files and their digests remain unchanged as wider version-1 compatibility examples. New personal Pro `projectContributors`, `checkout_resolving` and frozen discount/reservation examples are additive; none changes an existing fixture's bytes.
+
 A repository that uses the fixtures copies the whole directory and `contract_test.go`, byte for byte, and runs the same test against its copy. The layout a copy needs:
 
 - `testdata/contract/` at the repository root, with `CHECKSUMS` inside it;
@@ -468,14 +488,14 @@ A fixture is changed here first, with `CHECKSUMS`, and then copied.
 
 | Group | Fixtures | What they show |
 |---|---|---|
-| Plan record | `plan-record-pro-active.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json` | The documents of [REQ:plan-record](#req-plan-record). |
+| Plan record | `plan-record-pro-active.json`, `plan-record-pro-project-contributors.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json` | The documents of [REQ:plan-record](#req-plan-record), including the additive personal project-contributor allowance. |
 | Count | `ai-usage-record.json`, `ai-usage-record-capped.json` | The documents of [REQ:usage-record](#req-usage-record); the first has `used` above `questions`. |
 | State table | `state-table.json` | The cases of [REQ:state-table](#req-state-table). |
-| Plan endpoint | `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model; a Pro owner with three models in two classes; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription, with an organisation whose plan ended among `accounts`; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
+| Plan endpoint | `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-project-contributors.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model; a Pro owner with three models in two classes; additive personal Pro project-contributor allowance; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription, with an organisation whose plan ended among `accounts`; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
 | Refusals | `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-question-context-changed.json`, `refusal-rate-limited.json`, `refusal-upstream.json` | One body per row of [REQ:refusal-body](#req-refusal-body). The status of each is in that table. |
 | Question admission | `question-admissions.json`, `question-context.json` | Heaviest weight, cross-month deltas and settlement, generation reuse, immutable payer and product, membership checks and refusal without a charge. |
 | Offer | `offer.json`, `offer-none-left.json` | [REQ:offer-endpoint](#req-offer-endpoint). |
-| Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
+| Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-invitation-reserved.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json`, `checkout-error-resolving.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
 
 #### REQ: numbers-are-configuration
 
@@ -615,11 +635,17 @@ Given the answer in `checkout-session-answer-list-price.json`
 When the page is about to draw the payment form
 Then it says before the form that the offer is taken and shows the quoted `amount.due`, without inferring it from `offer` or `amount.list`.
 
+### AC: invitation-with-reserved-launch-place
+
+Given `checkout-session-answer-invitation-reserved.json`
+When the page is about to draw the payment form
+Then it shows `amount.due` as quoted, names `appliedDiscount` as the payable invitation discount, and describes `offer.reserved` as a contingent launch place without calling it an earned grant or adding its percentage to the invitation.
+
 ### AC: purchase-refusals
 
-Given the seven bodies of the `checkout-error-` fixtures
+Given the bodies of the `checkout-error-` fixtures
 When a page receives each with its status from [REQ:session-errors](#req-session-errors)
-Then it shows the person a sentence for it, offers a retry only for `offer_busy`, offers sign-in only for `sign_in_required`, and shows the thank-you for `already_subscribed` only when the body carries a `sessionId` (`checkout-error-already-subscribed.json` does, `checkout-error-already-subscribed-no-session.json` does not).
+Then it shows the person a sentence for it, offers a later retry for `offer_busy`, offers a same-selection recovery retry for `checkout_resolving`, offers sign-in only for `sign_in_required`, and shows the thank-you for `already_subscribed` only when the body carries a `sessionId` (`checkout-error-already-subscribed.json` does, `checkout-error-already-subscribed-no-session.json` does not). A recovery retry never starts a second payable operation.
 
 ### AC: new-organisation-purchase
 
