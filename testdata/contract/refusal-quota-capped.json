@@ -1,0 +1,23 @@
+{
+  "error": {
+    "code": "quota",
+    "message": "Your included AI for this month has been stopped early because your questions have been much larger than usual. It resets on 1 April (UTC). Your own AI key works now."
+  },
+  "limit": {
+    "v": 1,
+    "reason": "monthly",
+    "capped": true,
+    "unit": "questions",
+    "payer": "personal",
+    "accountId": "p7Xk2",
+    "accountTitle": "Alex Example",
+    "plan": "pro",
+    "used": 3,
+    "limit": 11,
+    "left": 0,
+    "resetsAt": "2026-04-01T00:00:00Z",
+    "ownKeyWorks": true,
+    "canUpgrade": true,
+    "upgradeUrl": "https://example.com/pricing"
+  }
+}

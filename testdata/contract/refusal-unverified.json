@@ -1,0 +1,22 @@
+{
+  "error": {
+    "code": "invalid",
+    "message": "Free AI needs a confirmed email address. Confirm yours, or sign in with another provider. Your own AI key works now."
+  },
+  "limit": {
+    "v": 1,
+    "reason": "unverified",
+    "capped": false,
+    "unit": "questions",
+    "payer": "personal",
+    "accountId": "p7Xk2",
+    "accountTitle": "Alex Example",
+    "plan": "free",
+    "used": 0,
+    "limit": 7,
+    "left": 7,
+    "ownKeyWorks": true,
+    "canUpgrade": true,
+    "upgradeUrl": "https://example.com/pricing"
+  }
+}

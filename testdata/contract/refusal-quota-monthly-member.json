@@ -1,0 +1,23 @@
+{
+  "error": {
+    "code": "quota",
+    "message": "Your team's AI questions for this month are used up. They reset on 1 April (UTC). Your own AI key works now. An admin of Example Team can upgrade."
+  },
+  "limit": {
+    "v": 1,
+    "reason": "monthly",
+    "capped": false,
+    "unit": "questions",
+    "payer": "organisation",
+    "accountId": "t4Bq9",
+    "accountTitle": "Example Team",
+    "plan": "team",
+    "used": 13,
+    "limit": 13,
+    "left": 0,
+    "resetsAt": "2026-04-01T00:00:00Z",
+    "ownKeyWorks": true,
+    "canUpgrade": false,
+    "upgradeUrl": "https://example.com/pricing"
+  }
+}

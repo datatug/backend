@@ -1,0 +1,18 @@
+{
+  "clientSecret": "cs_example_secret_0002",
+  "sessionId": "cs_example_0002",
+  "mode": "live",
+  "accountKind": "organisation",
+  "offer": {
+    "id": "datatug-founding",
+    "applied": true,
+    "percentOff": 30,
+    "left": 4
+  },
+  "amount": {
+    "currency": "xts",
+    "list": 3100,
+    "due": 2170,
+    "taxIncluded": true
+  }
+}

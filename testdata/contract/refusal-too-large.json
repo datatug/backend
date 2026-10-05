@@ -1,0 +1,22 @@
+{
+  "error": {
+    "code": "invalid",
+    "message": "This question sends more of your schema than included AI accepts. Narrow the tables, or use your own key."
+  },
+  "limit": {
+    "v": 1,
+    "reason": "too_large",
+    "capped": false,
+    "unit": "questions",
+    "payer": "personal",
+    "accountId": "p7Xk2",
+    "accountTitle": "Alex Example",
+    "plan": "free",
+    "used": 3,
+    "limit": 7,
+    "left": 4,
+    "ownKeyWorks": true,
+    "canUpgrade": true,
+    "upgradeUrl": "https://example.com/pricing"
+  }
+}
