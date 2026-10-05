@@ -1,0 +1,19 @@
+{
+  "clientSecret": "cs_example_secret_0003",
+  "sessionId": "cs_example_0003",
+  "mode": "live",
+  "accountId": "p7Xk2",
+  "accountKind": "personal",
+  "offer": {
+    "id": "datatug-founding",
+    "applied": false,
+    "percentOff": 30,
+    "left": 0
+  },
+  "amount": {
+    "currency": "xts",
+    "list": 700,
+    "due": 700,
+    "taxIncluded": true
+  }
+}

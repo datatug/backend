@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "plan": "pro",
+  "status": "past_due",
+  "period": "month",
+  "paidUntil": "2026-03-20T10:12:00Z",
+  "founding": false,
+  "limits": {
+    "contributors": 1,
+    "projectGuests": 3,
+    "aiQuestions": 11,
+    "aiModelClasses": [
+      "fast",
+      "standard"
+    ],
+    "aiPaysFor": "owner"
+  },
+  "aiExtraQuestions": 0,
+  "updatedAt": "2026-03-20T10:15:00Z"
+}

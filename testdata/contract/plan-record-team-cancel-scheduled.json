@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "plan": "team",
+  "status": "active",
+  "period": "year",
+  "paidUntil": "2027-01-15T08:00:00Z",
+  "endsAt": "2027-01-15T08:00:00Z",
+  "founding": false,
+  "limits": {
+    "contributors": 5,
+    "projectGuests": 0,
+    "aiQuestions": 13,
+    "aiModelClasses": [
+      "fast",
+      "standard"
+    ],
+    "aiPaysFor": "contributors"
+  },
+  "aiExtraQuestions": 0,
+  "updatedAt": "2026-03-02T09:30:00Z"
+}
