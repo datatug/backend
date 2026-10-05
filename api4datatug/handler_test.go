@@ -188,6 +188,7 @@ func TestRegisterHttpRoutes(t *testing.T) {
 	want := []route{
 		{http.MethodPost, "/v0/datatug/projects/create_project"},
 		{http.MethodPost, "/v0/datatug/projects/register_github_project"},
+		{http.MethodGet, "/v0/datatug/plan"},
 	}
 	if len(routes) != len(want) {
 		t.Fatalf("registered %d routes, want %d: %+v", len(routes), len(want), routes)

@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "plan": "pro",
+  "status": "active",
+  "period": "month",
+  "paidUntil": "2026-03-20T10:12:00Z",
+  "founding": true,
+  "limits": {
+    "contributors": 1,
+    "projectGuests": 3,
+    "aiQuestions": 11,
+    "aiModelClasses": [
+      "fast",
+      "standard"
+    ],
+    "aiPaysFor": "owner",
+    "projectContributors": 5
+  },
+  "aiExtraQuestions": 0,
+  "updatedAt": "2026-02-20T10:12:30Z"
+}
