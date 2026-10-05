@@ -235,7 +235,7 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 		left = limit - used
 	}
 	var blocked *string
-	if config.Enforced && capped {
+	if capped {
 		reason := "monthly"
 		blocked = &reason
 	} else if config.Enforced && (admission.TodayUsed >= config.DailyLimit || admission.Blocked == "daily") {

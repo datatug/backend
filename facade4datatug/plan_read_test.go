@@ -433,8 +433,13 @@ func TestPersonalPlanObservationPreservesCashGuard(t *testing.T) {
 		return got
 	}
 	observed := read()
-	if observed.AI.Enforced || observed.AI.Left != 0 || observed.AI.Blocked != nil {
+	if observed.AI.Enforced || observed.AI.Left != 0 || observed.AI.Blocked == nil || *observed.AI.Blocked != "monthly" {
 		t.Fatal(observed)
+	}
+	usage.usage.Capped = false // ordinary count exhaustion is only observed
+	ordinary := read()
+	if ordinary.AI.Blocked != nil || ordinary.AI.Left != 0 {
+		t.Fatal(ordinary)
 	}
 	admission.state.Blocked = "free_budget"
 	budget := read()
