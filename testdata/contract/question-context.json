@@ -1,0 +1,128 @@
+{
+  "description": "Illustrative live-generation context checks before model admission.",
+  "cases": [
+    {
+      "name": "personal to team under the same live UUID",
+      "key": "44444444-4444-4444-8444-444444444444",
+      "generationId": "g-6",
+      "bound": {
+        "payerAccountId": "personal-a",
+        "product": "datatug"
+      },
+      "resolved": {
+        "payerAccountId": "team-b",
+        "product": "datatug",
+        "membership": "verified"
+      },
+      "result": {
+        "status": 409,
+        "code": "question_context_changed",
+        "hasLimit": false,
+        "modelCalled": false,
+        "countAdded": 0,
+        "moneyReserved": false
+      }
+    },
+    {
+      "name": "legacy digest with same product and changed payer",
+      "keyKind": "derived_digest",
+      "key": "illustrative-digest-of-user-product-and-message",
+      "generationId": "g-11",
+      "bound": {
+        "payerAccountId": "personal-a",
+        "product": "datatug"
+      },
+      "resolved": {
+        "payerAccountId": "team-b",
+        "product": "datatug",
+        "membership": "verified"
+      },
+      "result": {
+        "status": 409,
+        "code": "question_context_changed",
+        "hasLimit": false,
+        "modelCalled": false,
+        "countAdded": 0,
+        "moneyReserved": false
+      }
+    },
+    {
+      "name": "product switch under the same live UUID",
+      "key": "55555555-5555-4555-8555-555555555555",
+      "generationId": "g-7",
+      "bound": {
+        "payerAccountId": "personal-a",
+        "product": "datatug"
+      },
+      "resolved": {
+        "payerAccountId": "personal-a",
+        "product": "another-product",
+        "membership": "verified"
+      },
+      "result": {
+        "status": 409,
+        "code": "question_context_changed",
+        "hasLimit": false,
+        "modelCalled": false,
+        "countAdded": 0,
+        "moneyReserved": false
+      }
+    },
+    {
+      "name": "revoked membership cannot continue old team generation",
+      "key": "66666666-6666-4666-8666-666666666666",
+      "generationId": "g-8",
+      "bound": {
+        "payerAccountId": "team-b",
+        "product": "datatug"
+      },
+      "resolved": {
+        "payerAccountId": "personal-a",
+        "product": "datatug",
+        "membership": "revoked"
+      },
+      "result": {
+        "status": 409,
+        "code": "question_context_changed",
+        "hasLimit": false,
+        "modelCalled": false,
+        "countAdded": 0,
+        "moneyReserved": false
+      }
+    },
+    {
+      "name": "membership cannot be verified",
+      "key": "77777777-7777-4777-8777-777777777777",
+      "generationId": "g-9",
+      "bound": {
+        "payerAccountId": "team-b",
+        "product": "datatug"
+      },
+      "resolved": {
+        "membership": "unknown"
+      },
+      "result": {
+        "status": 503,
+        "code": "upstream",
+        "hasLimit": false,
+        "modelCalled": false,
+        "countAdded": 0,
+        "moneyReserved": false
+      }
+    },
+    {
+      "name": "new UUID binds newly selected payer",
+      "key": "88888888-8888-4888-8888-888888888888",
+      "generationId": "g-10",
+      "resolved": {
+        "payerAccountId": "team-b",
+        "product": "datatug",
+        "membership": "verified"
+      },
+      "result": {
+        "admitted": true,
+        "questionsAdded": 1
+      }
+    }
+  ]
+}

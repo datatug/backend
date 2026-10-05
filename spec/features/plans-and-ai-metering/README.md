@@ -37,7 +37,7 @@ Any field a client does not know is ignored, and any enum value a client does no
 
 ### Records
 
-Two documents per account, written by the server only. The plan changes on a money event (rare); the count changes on every question; they are separate so the two writers never contend.
+The two client-readable documents below are written by the server only. The plan changes on a money event (rare); the count changes on a question admission; they are separate so the two writers never contend. The per-call admission references in [REQ:question](#req-question) are internal accounting state, not fields that clients read from these documents.
 
 #### REQ: plan-record
 
@@ -74,8 +74,8 @@ The count of an account for one month is the document `spaces/{accountId}/ext/da
 |---|---|---|
 | `v` | number | `1` |
 | `periodId` | string | |
-| `used` | number | Questions used, each counted by its weight ([REQ:models](#req-models)). It is above `questions` once a question counted a weight above 1. |
-| `questions` | number | Questions asked, unweighted. |
+| `used` | number | Weighted use admitted in this UTC month ([REQ:models](#req-models)); a later positive weight difference can be admitted in a month after the question began. |
+| `questions` | number | Questions whose first call was admitted in this UTC month, unweighted; later calls do not add another question. |
 | `byMember` | map of user ID to number | Weighted use per member of an organisation, like `used`. Optional: a reader tolerates its absence. |
 | `capped` | boolean, optional | True when the server has stopped included AI for this account for the rest of the month because of what the questions cost. A reader treats it as nothing left. |
 | `resetsAt` | timestamp | The first instant of the next UTC month. |
@@ -91,7 +91,7 @@ A purchase made in the provider's test mode never writes `plan/current` in produ
 
 #### REQ: who-may-read
 
-Every member listed in the space's `userIDs` may read the two records of the account through the space's existing reading rule. On a personal account that is the owner alone. A person who works in a project without being a member of the account's space cannot read it and does not need to: their own personal account pays for them ([REQ:payer-rules](#req-payer-rules)).
+Every member listed in the space's `userIDs` may read the two records of the account through the space's existing reading rule. On a personal account that is the owner alone. A person who works in a project without being a member of the account's space cannot read that account's records and does not need to: [REQ:payer-rules](#req-payer-rules) decides who pays, and the plan endpoint called without `account` names that account.
 
 #### REQ: direct-readers
 
@@ -148,7 +148,7 @@ It has three outcomes: write a record; leave the record as it is; refuse, with a
 | `active`, `trialing` or `past_due` and the last paid invoice refunded in full | leave | | | no change: a refund alone ends nothing |
 | `tier` does not fit `accountKind` (a tier for organisations on a personal account, or the reverse) | refuse, reason `tier_not_for_account` | | | no change |
 | `tier` empty | refuse, reason `unknown_tier` | | | no change |
-| `providerStatus` is none of the eight listed | refuse, reason `unknown_status` | | | no change (never more than Free, [REQ:fail-towards-free](#req-fail-towards-free)) |
+| `providerStatus` is none of the eight listed | refuse, reason `unknown_status` | | | no change: nothing is written from a status nobody mapped; a record that exists holds only as long as [REQ:stale-rule](#req-stale-rule) lets it |
 
 The rows can overlap (an ending status with a tier that does not fit; `incomplete` with an empty tier). The function applies them in this order, and the first that matches decides:
 
@@ -162,11 +162,11 @@ The rows can overlap (an ending status with a tier that does not fit; `incomplet
 
 A refund is a reason an ended record carries, never a state of its own: a plan ends only when the subscription ends. The refund and the cancellation may arrive in either order; the function sees the same facts either way.
 
-A written record, in every row: `v` is `1`; `plan`, `status`, `period`, `paidUntil` (when the fact is present), `founding` and `limits` are as in the table; `limits` is the `grants` fact. An ended record has `plan: free`, `period: none`, `founding: false` and no `limits`, and carries `endedReason` and the `paidUntil` of the facts. The function does not set `updatedAt` or `aiExtraQuestions`: the writer stamps the first and keeps the second.
+A written record, in every row: `v` is `1`; `plan`, `status`, `period`, `paidUntil` (when the fact is present), `founding` and `limits` are as in the table; `limits` is the `grants` fact. `endsAt` is written when present in the facts of a non-ended record, and never on an ended record. An ended record has `plan: free`, `period: none`, `founding: false` and no `limits`, and carries `endedReason` and the `paidUntil` of the facts when present. The function does not set `updatedAt` or `aiExtraQuestions`: the writer stamps the first and keeps the second.
 
 Two things are neither facts nor rows of the function: a dispute opened against a payment changes no record (the operator is told and decides), and a second subscription paid for an account that already has one changes no record either. The caller handles both before it calls the function.
 
-Fixture: `state-table.json`: an object with a `cases` array; each case has `name`, `facts`, `outcome` (`write`, `leave` or `refuse`), and for `write` the written `record` (without `updatedAt` and `aiExtraQuestions`), for `refuse` the `reason`. There is a case for each row and for each overlap above (an unmapped status, a refund with an empty tier, an `unpaid` subscription refunded in full, an ended organisation), and some `grants` carry two model classes and one carries one. One test per case.
+Fixture: `state-table.json`: an object with a `cases` array; each case has `name`, `facts`, `outcome` (`write`, `leave` or `refuse`), and for `write` the written `record` (without `updatedAt` and `aiExtraQuestions`), for `refuse` the `reason`. There is a case for each row and for each overlap above (an unmapped status, a refund with an empty tier, an `unpaid` subscription refunded in full, an ended organisation), plus scheduled cancellation on `past_due`, an ended record with an obsolete `endsAt` fact, and a paying status without `paidUntil`. Some `grants` carry two model classes and one carries one. One test per case.
 
 ### What a status means for the person
 
@@ -243,7 +243,7 @@ The answer is 200 and one JSON object of version 1. Every field below is always 
 | `blocked` | string or null | The reason the next question would be refused by something other than the count, or `null`. The reasons are `daily`, `free_budget`, `unverified`, and `monthly` when the account is capped. `blocked` is `null` when nothing but the count could stop the next question, and so also when the month's count is simply used up (`left` is 0 and the account is not capped): `left` shows that. A client treats a value it does not know as "the next question will be refused". |
 | `models` | array | The models a client may request for this payer: `{id, class, weight, default}`. Exactly one has `default: true`; a client that names no model gets it. See [REQ:models](#req-models). |
 
-While `ai.enforced` is `true`, a person can ask a model of weight `w` now when `ai.blocked` is `null` and `ai.left` is at least `w`. A client shows the plan, the account that pays, and `ai.left` of `ai.limit` with the reset date, and, while `ai.blocked` is not null, the reason. It does not compute any of those.
+While `ai.enforced` is `true`, a person can start a question with a model of weight `w` when `ai.blocked` is `null` and `ai.left` is at least `w`. For an existing question, only a positive difference above its heaviest previously admitted weight needs room in `ai.left`; permission and the other guards still apply on every call. A client shows the plan, the account that pays, and `ai.left` of `ai.limit` with the reset date, and, while `ai.blocked` is not null, the reason. It does not compute any of those.
 
 Fixtures: `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`.
 
@@ -253,12 +253,12 @@ The models a payer may use are a list, `ai.models`, set by configuration and dif
 
 - **A client chooses from the list.** It offers the models of `ai.models`, preselects the one with `default: true`, and may show each weight (a model of weight 3 uses three questions of the allowance). It never offers a model that is not listed, and never computes cost or `left` from weights: it shows `left` from the server.
 - **A request names its model in the field `model`** of the chat request ([REQ:ai-calls](#req-ai-calls)): an `id` of the list. A request that names none, or names `auto`, runs on the default. An `id` is an opaque string a client never interprets; it is also the name a client shows for the model.
-- **A question counts a weight** against the allowance, in `used`; `questions` counts it once ([REQ:usage-record](#req-usage-record)). Every chat call of one question names the same model. A question whose first admitted call is a chat call counts the weight of the model that call names. A question whose first admitted call is a decision call, which names no model, counts the weight of the default model; when a chat call of the same question then names a heavier model, the difference in weight is counted at that call, and a chat call that names a lighter or the same model counts nothing more.
+- **A question counts its heaviest admitted weight** against the allowance, in `used`; `questions` counts it once, in the UTC month of its first admission ([REQ:usage-record](#req-usage-record)). The first call counts its full weight. A decision or score call stands for the default model, which has the lowest weight in `ai.models`. Each later call counts only a positive difference above the question's previous heaviest weight; a lighter or equal call adds no weight. That difference belongs to the UTC month in which the later call is admitted, even when the question began in an earlier month. A client names the same model on every chat call of one question; the server applies the heaviest-weight rule even if it does not. Every call, including one with no added weight, still passes its own admission and money guard.
 - **A model that is not in the list is refused** with reason `model_class` (403), whether its class is not included in the plan or the server does not know it. Nothing is counted.
-- **A call that would count more than `ai.left` is refused** with reason `monthly` (429) and nothing more is counted: a first call that names a model whose weight is above `left`, a decision call when the weight of the default model is above `left`, and a chat call whose model is heavier than the default one the question already counted, when `left` is below the difference. A model of lower weight is still admitted. The refusal carries `left`, so a client can offer a lighter model; the question already counted stays counted.
+- **A call that would count more than `ai.left` is refused** with reason `monthly` (429) and nothing more is counted: compare the first call's full weight, or a later call's positive difference, with the allowance of that call's UTC admission month. A zero-difference call still needs permission and money admission. The refusal carries that month's `left` and next `resetsAt`, so a client can offer a lighter model or the next reset; weight already admitted remains counted.
 - **Own key or own endpoint.** A person's own key or endpoint is no model of this list. The client calls it itself, from the person's machine or browser; it never sends the key or the address to this server, and a question answered this way is never counted or limited.
 
-Fixtures: `plan-response-free.json` (one model), `plan-response-pro.json` (three models in two classes, two weights, one default), `plan-response-pro-one-left.json` (`left` below the weight of one model), `refusal-model-class.json`, `refusal-quota-monthly-weight.json`.
+Fixtures: `plan-response-free.json` (one model), `plan-response-pro.json` (three models in two classes, two weights, one default), `plan-response-pro-one-left.json` (`left` below the weight of one model), `refusal-model-class.json`, `refusal-quota-monthly-weight.json`, `question-admissions.json` (later weight difference and month boundary).
 
 ### The AI calls
 
@@ -266,7 +266,7 @@ Fixtures: `plan-response-free.json` (one model), `plan-response-pro.json` (three
 
 The AI calls of a client are the public protocol of the package `ai/cloudproto` of `github.com/strongo/aichat`, on the API base the client is configured with (its origin, and the `/v0/` prefix). The base is given to a client outside this page, as a setting of the client, and no response of this contract carries it:
 
-- `POST /v0/ai/chat` (a stream of events), `POST /v0/ai/decision`, `POST /v0/ai/score`, `GET /v0/ai/usage`.
+- `POST /v0/ai/chat` (a stream of events), `POST /v0/ai/decision`, `POST /v0/ai/score`, `POST /v0/ai/interactions`, `GET /v0/ai/usage`. The interactions route records an interaction; it makes no model call and is never counted as a question or weight.
 - A client sends `X-AI-Product: datatug` on every `/v0/ai/*` call.
 - The model is the field `model` of the chat request body; `interactionId` is the field of the chat, decision and score request bodies that carries the question key ([REQ:question](#req-question)).
 - The allowance after an answer is in `usage.allowance` of the last event of a chat stream (`response.completed`) and in `allowance` of `GET /v0/ai/usage` ([REQ:allowance-on-the-wire](#req-allowance-on-the-wire)).
@@ -300,7 +300,7 @@ Security properties a client may rely on: a plan, a limit or a role is never rea
 
 #### REQ: account-header-needed
 
-A project may name the account it belongs to; where it names none, rule 4 applies, and a person with more than one candidate (their own paying plan and an organisation, or two organisations) draws on an organisation's pool only if the client names it. So a client sends `X-AI-Account: <the account in view>` on every `/v0/ai/*` call, when the account in view is one of `accounts` (a project of an account the person is not a member of has no header: the person's own account pays there), and a command-line client sends the account the person chose. `GET /v0/datatug/plan` lists the candidates in `accounts`, with `pays`, so that a client with no account in view can ask the person once and remember the answer.
+A project may name the account it belongs to; where it names none, rule 4 applies, and a person with more than one candidate (their own paying plan and an organisation, or two organisations) draws on an organisation's pool only if the client names it. So a client sends `X-AI-Account: <the account in view>` on every `/v0/ai/*` call, when the account in view is one of `accounts` (a project of an account the person is not a member of has no header: rule 4 decides the payer, which the plan endpoint called without `account` names), and a command-line client sends the account the person chose. `GET /v0/datatug/plan` lists the candidates in `accounts`, with `pays`, so that a client with no account in view can ask the person once and remember the answer.
 
 ### What a question is
 
@@ -309,15 +309,19 @@ A project may name the account it belongs to; where it names none, rule 4 applie
 One question is one request of a person: all the model calls that serve one message they sent, a decision call included. A score call (`POST /v0/ai/score`) is a decision call: it carries the `interactionId` of its question, and counts, or is refused, as a decision call does ([REQ:models](#req-models)).
 
 - The **question key** is the interaction ID of the request (the `interactionId` field, [REQ:ai-calls](#req-ai-calls)) when the client sends a valid one (a UUID). A client sends the same ID on the decision call, on every chat call, and on a retry of the same message. Without a valid ID the server derives the key from a digest of the user ID, the product and the question text (the last user message of a chat request, the text of a decision request); only the digest is kept, never the text.
-- The question is counted once, when its first model call is admitted. One key covers a bounded number of calls, within a bounded time of the first (both set by configuration); the next call under the same key starts, and counts, a new question.
+- The question is counted once, when its first model call is admitted. One key covers a bounded number of calls, within a bounded time of the first (both set by configuration); the next call under the same key starts, and counts, a new **generation** with a fresh payer and product binding. A reused UUID after that boundary therefore starts a fully counted question rather than an expiry error. Each generation has an immutable identity separate from its reusable key.
+- At first admission the server resolves and binds the payer account ID and product to that generation. On every later call of the live generation it re-resolves the payer and product and checks current permission. If either changes under the same live key, it refuses with 409 `question_context_changed`, without a `limit`, model call, count or money reservation; it never silently starts another generation under that key. A changed product can reuse the same key only when the client supplied an ID: the legacy digest includes product, so another product derives a different key and starts its own counted question. A payer change within the same product can keep a legacy digest and receives the 409. The message directs a UUID-capable client to start a new question with a fresh UUID for the newly selected payer, and says own-key use still works. A legacy digest client can send a genuinely new message/key or wait until the digest's bounded generation ends. An unverified permission or membership check fails closed with 503 `upstream`; a revoked member cannot continue drawing on the old account.
+- Every admitted model call has a stable call ID and stores the immutable generation ID, its UTC admission month and day, and exact references to the count, day and money counters charged or reserved. Settlement or a proven release uses those admission references, even if it completes in another day or month. A cancellation, crash or unknown usage does not release already spent liability. Repeating settlement for a call ID changes nothing after the first application.
 - **Not counted:** a request refused before any model call; a question whose only admitted call fails on our side or the provider's before any output (it is given back); anything answered with the person's own key.
 - **Counted:** a question the person aborts, cancels or disconnects from, at any moment; a question that fails mid-answer.
 
-**Two accepted cases for a client that sends no ID**, which are counted as written and not as errors: (1) when a first pass is empty and the client retries with a different user message, the retry is a second question; (2) the same text sent twice within the time above ("yes", "continue") is one key, so it is counted once until the call limit of the key is reached. A client that sends an ID with every question, and the same one on every call of it, has neither.
+**Two accepted cases for a client that sends no ID**, which are counted as written and not as errors: (1) when a first pass is empty and the client retries with a different user message, the retry is a second question; (2) the same text sent twice within the time above ("yes", "continue") is one key, so it is counted once until the call limit of the key is reached. A client that sends an ID with every question, and the same one on every call of it, has neither. A fresh generation under an old key never changes the identity or admission references of earlier calls.
+
+Fixtures: `question-admissions.json` (weight and period accounting, generation reuse and late settlement), `question-context.json` (payer and product binding, changed context and revoked membership), `refusal-question-context-changed.json`.
 
 #### REQ: allowance-on-the-wire
 
-The last event of a chat stream (in `usage.allowance`) and `GET /v0/ai/usage` (in `allowance`) carry the allowance as `{unit, used, limit, resetsAt}`. When `unit` is `questions`, a client shows `max(0, limit - used)` as what is left after each answer. The allowance on the wire shows neither `capped` nor `blocked`: a client calls `GET /v0/datatug/plan` again after any refusal, and, when it does not listen to the documents ([REQ:direct-readers](#req-direct-readers)), also after each answer. While `ai.enforced` is `false` the unit may be another one; a client shows the unit it is given, and never compares a `used` with a `limit` of another unit.
+The last event of a chat stream (in `usage.allowance`) and `GET /v0/ai/usage` (in `allowance`) carry the allowance as `{unit, used, limit, resetsAt}`. When `unit` is `questions`, a client shows `max(0, limit - used)` as what is left after each answer. The allowance on the wire shows neither `capped` nor `blocked`: after a refusal with `limit`, a client calls `GET /v0/datatug/plan` again; after an answer it may do so, but need not. While `ai.enforced` is `false` the unit may be another one; a client shows the unit it is given, and never compares a `used` with a `limit` of another unit.
 
 ### What a person is told when a question is refused
 
@@ -334,7 +338,7 @@ A refusal is an HTTP error with a JSON body:
 
 `error.code` and `error.message` are the same as a client already handles; `error.message` is always a complete sentence that says what happened, what the person can do, and that the person's own key works; where a reset or a plan would help, it says when and where. A client that knows nothing of `limit` shows `error.message`. A client that meets a `limit.v` other than 1 shows `error.message` only. A client that knows `limit` may build its own sentence from the fields, and then still names the own-key option. A client must never parse `error.message`. A 403 that carries `limit` is a refusal, not a sign-in problem: on the decision routes too, a client reads `limit.reason` before it treats a 403 as an authentication failure.
 
-`limit`, present for the reasons of the table and absent for `rate_limited` and `upstream`:
+`limit`, present for the named limit reasons of the table and absent for `question_context_changed`, `rate_limited` and `upstream`:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -359,26 +363,28 @@ A refusal is an HTTP error with a JSON body:
 | `unverified` | 403 | `invalid` | A Free allowance needs a trusted sign-in: a federated sign-in, or a verified email. Nothing was counted. |
 | `model_class` | 403 | `invalid` | The model that was asked for is not in the payer's `ai.models`: its class is not included in the plan, or it is not known. |
 | `too_large` | 413 | `invalid` | The question sends more than included AI accepts for one call: narrow the tables, or use the own key. |
+| none: `question_context_changed` | 409 | `question_context_changed` | The payer account or product differs from the live question's first admitted call. Start a new question with a fresh UUID for the newly chosen payer, or use an own key. A legacy digest client can send a genuinely new message or wait for the current digest generation to end. Nothing was sent to a model or reserved for this call. |
 | none: `rate_limited` | 429 | `rate_limited` | A race for the counter was lost, or requests came too fast. A `Retry-After` header gives the seconds to wait. Nothing was counted. |
-| none: `upstream` | 503 | `upstream` | The count cannot be read or written, or a money counter cannot be read, or the caller's personal account cannot be found. Nothing was sent to a model, nothing was counted. (A plan record that cannot be read is no refusal: the person gets Free, [REQ:fail-towards-free](#req-fail-towards-free).) |
+| none: `upstream` | 503 | `upstream` | The count or money counter cannot be read or written, the caller's personal account cannot be found, or current membership cannot be verified. Nothing was sent to a model, nothing was counted. (A plan record that cannot be read is no refusal: the person gets Free, [REQ:fail-towards-free](#req-fail-towards-free).) |
 
 At every refusal nothing was sent to a model and nothing was counted, except where a question was already running. Everything that is not AI continues to work.
 
-Fixtures: `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-rate-limited.json`, `refusal-upstream.json`. The `message` in each is a placeholder: the wording is the server's and is not part of the contract.
+Fixtures: `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-question-context-changed.json`, `refusal-rate-limited.json`, `refusal-upstream.json`. The `message` in each is a placeholder: the wording is the server's and is not part of the contract.
 
 ### The public count of Founding places
 
 #### REQ: offer-endpoint
 
-`GET /v0/checkout/offer?site=datatug&offer=datatug-founding&mode=live` answers 200 with:
+`GET /v0/checkout/offer?site=datatug&offer=datatug-founding&mode=live`, on the same configured API base as [REQ:plan-endpoint-request](#req-plan-endpoint-request), answers 200 with:
 
 ```json
-{"offer": "datatug-founding", "percentOff": 30, "places": 6, "left": 4, "open": true}
+{"offer": "datatug-founding", "percentOff": 15, "places": 6, "left": 4, "open": true}
 ```
 
 - `percentOff`, `places` and `left` are numbers set by the offer; the ones above are made up.
-- `left = places - held places`, never below 0. A held place is one that was paid for. An open payment form never lowers `left`, so a page can say "0 left" only when every place has been paid for.
-- `open` is `false` when no place is left or the offer is not running.
+- `left = max(0, places - activeBuyers)`, where `activeBuyers` is the number of distinct buyers with at least one qualifying live paid DataTug subscription, whether or not that subscription has this offer. A person with two qualifying subscriptions counts once; an invited buyer counts once. A fully refunded subscription that has not effectively ended remains active for this conservative count until its end is confirmed. When the count falls, new buyers may claim a newly available place while the offer is running. Existing subscription grants and already quoted payment forms keep their terms.
+- The public `left` is a snapshot of active buyers, not the number of unreserved payment forms. A checkout reservation protects an issued quote even while payment is pending; at the last available capacity a new request can receive `offer_busy` while public `left` is positive. A reservation is released only after its predecessor form is confirmed terminal and unpaid. The checkout answer, not this cached snapshot, decides whether a particular buyer gets the offer.
+- `open` is `false` when no place is left or the offer is not running. A previously issued full-price form does not gain a discount merely because the count later falls: its quoted amount remains authoritative. The buyer may keep that form or close and reconcile it as terminal and unpaid before starting a newly eligible checkout.
 - It needs no sign-in and reveals nothing about any customer. A browser may call it from the storefront's own origins. It answers with `Cache-Control: public` and a maximum age of one minute: the page shows a number, and the checkout decides. A person who presses Subscribe when the last place has just gone is told so before the payment form ([REQ:session-answer](#req-session-answer)).
 - A page sends `mode=live`. Test and live each have their own count.
 
@@ -390,7 +396,7 @@ A plan is bought after signing in, so a payment always lands on an account, and 
 
 #### REQ: session-request
 
-`POST /v0/checkout/session`, `Content-Type: application/json`, `Authorization: Bearer <Firebase ID token>`, body:
+`POST /v0/checkout/session`, on the same configured API base as [REQ:plan-endpoint-request](#req-plan-endpoint-request), `Content-Type: application/json`, `Authorization: Bearer <Firebase ID token>`, body:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -418,16 +424,16 @@ The answer is 200 with `clientSecret`, `sessionId` and `mode` (the mode the sess
 |---|---|---|
 | `accountId` | string, optional | The account the plan will land on. Absent for an organisation that is created when the payment completes. |
 | `accountKind` | string | `personal` or `organisation`. |
-| `offer` | object, optional | `{id, applied, percentOff, left}`. Absent when no offer applies to the plan: `amount.due` then equals `amount.list`. Present with `applied: false` when an offer applies to the plan but no Founding place is left; the session is then made at list price, and a client shows that before it draws the payment form. |
+| `offer` | object, optional | `{id, applied, percentOff, left}`. Absent when this offer does not apply to the plan. Present with `applied: false` when this offer applies to the plan but no place is available for this session; the client shows the quoted amount before it draws the form. Other adjustments may affect the amount independently of this field. |
 | `amount` | object | `{currency, list, due, taxIncluded}`: `currency` is an ISO 4217 code in lower case; `list` and `due` are integers in the currency's minor unit, `due` is what the form will charge for the first period, and `taxIncluded` says whether the amounts include tax. |
 
-A client shows `amount` and `offer` from the answer, not from its own tables.
+A client shows `amount` and `offer` from the answer, not from its own tables, and never infers `amount.due` from `offer`. `amount.due` is always the amount this form charges.
 
 Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`.
 
 #### REQ: session-errors
 
-A checkout error is a JSON object `{"code": "...", "message": "..."}`, with the status below. A client shows `message`, or its own sentence for a code it knows.
+A checkout error is a JSON object with `code` and optionally `message`, with known examples below. The table is not closed. A client shows `message` when present; otherwise it shows a general sentence. For an unknown code it offers neither a retry nor sign-in based on a guessed meaning.
 
 | Status | `code` | When |
 |---|---|---|
@@ -438,7 +444,7 @@ A checkout error is a JSON object `{"code": "...", "message": "..."}`, with the 
 | 409 | `already_subscribed` | The account already has a live subscription. When the buyer's earlier payment form turns out to have been paid, the body also carries that form's `sessionId`, so the page can show the thank-you. |
 | 409 | `offer_busy` | The last Founding places are held by open payment forms. No form is made and nothing is charged; the person is told to try again in a few minutes. A `Retry-After` header gives the seconds. |
 
-A buyer has at most one open payment form: a new request closes the earlier one, which then ends for its tab.
+A buyer has at most one open payment form. A replacement is issued only after the earlier form is confirmed terminal and unpaid; otherwise the server reuses the earlier form or keeps the request resolving. A merely elapsed local clock is not proof that the earlier form cannot be paid.
 
 Fixtures: `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json`.
 
@@ -466,7 +472,8 @@ A fixture is changed here first, with `CHECKSUMS`, and then copied.
 | Count | `ai-usage-record.json`, `ai-usage-record-capped.json` | The documents of [REQ:usage-record](#req-usage-record); the first has `used` above `questions`. |
 | State table | `state-table.json` | The cases of [REQ:state-table](#req-state-table). |
 | Plan endpoint | `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model; a Pro owner with three models in two classes; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription, with an organisation whose plan ended among `accounts`; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
-| Refusals | `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-rate-limited.json`, `refusal-upstream.json` | One body per row of [REQ:refusal-body](#req-refusal-body). The status of each is in that table. |
+| Refusals | `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-question-context-changed.json`, `refusal-rate-limited.json`, `refusal-upstream.json` | One body per row of [REQ:refusal-body](#req-refusal-body). The status of each is in that table. |
+| Question admission | `question-admissions.json`, `question-context.json` | Heaviest weight, cross-month deltas and settlement, generation reuse, immutable payer and product, membership checks and refusal without a charge. |
 | Offer | `offer.json`, `offer-none-left.json` | [REQ:offer-endpoint](#req-offer-endpoint). |
 | Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
 
@@ -499,6 +506,18 @@ Then for Free it offers the one model listed, and for Pro the three listed, pres
 Given the answer in `plan-response-pro-one-left.json` (`ai.left` is 1, one model has weight 3) and the body of `refusal-quota-monthly-weight.json`
 When a client shows what the person can ask
 Then it does not offer the model of weight 3 as available now, still offers the models of weight 1, and on the refusal of a model whose weight is above `limit.left` it says so and offers a lighter model; it computes none of the numbers.
+
+### AC: cross-month-question
+
+Given `question-admissions.json`
+When a later call of one live question names a heavier model after a UTC month boundary
+Then the first month keeps the one unweighted question and its first weight, the later month gets only the positive weight difference, and a refusal uses the later month's next reset. Settlement on the following day uses the call's stored admission references and leaves the new month's money counter unchanged. A later admitted call with no positive weight difference still passes its own money guard and creates its own reservation. Reusing the key after the bounded lifetime begins a new counted generation without changing old call references.
+
+### AC: question-context
+
+Given `question-context.json` and `refusal-question-context-changed.json`
+When a live question's resolved payer or product changes
+Then the call is refused with 409 and a complete next action, without a `limit`, model call, count or money reservation. This includes a same-product legacy digest whose payer changes; a product change derives another legacy digest and does not reuse the old key. A revoked or unverifiable membership never permits another call against the old payer; the client can use a new UUID for the newly selected payer. Every accepted call is checked again.
 
 ### AC: model-not-included
 
@@ -594,7 +613,7 @@ Then it receives the 401 of `checkout-error-sign-in-required.json`, keeps the ch
 
 Given the answer in `checkout-session-answer-list-price.json`
 When the page is about to draw the payment form
-Then it says before the form that the offer is taken and shows `amount.due`, which equals `amount.list`.
+Then it says before the form that the offer is taken and shows the quoted `amount.due`, without inferring it from `offer` or `amount.list`.
 
 ### AC: purchase-refusals
 
