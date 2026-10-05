@@ -31,7 +31,12 @@
           "defaultWeight": 1,
           "weightAdded": 0,
           "questionsAdded": 0,
-          "periodId": "2026-03"
+          "periodId": "2026-03",
+          "moneyGuardChecked": true,
+          "moneyReservation": {
+            "created": true,
+            "counterRef": "payer-a/money/2026-03"
+          }
         }
       ],
       "result": {

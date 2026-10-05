@@ -310,7 +310,7 @@ One question is one request of a person: all the model calls that serve one mess
 
 - The **question key** is the interaction ID of the request (the `interactionId` field, [REQ:ai-calls](#req-ai-calls)) when the client sends a valid one (a UUID). A client sends the same ID on the decision call, on every chat call, and on a retry of the same message. Without a valid ID the server derives the key from a digest of the user ID, the product and the question text (the last user message of a chat request, the text of a decision request); only the digest is kept, never the text.
 - The question is counted once, when its first model call is admitted. One key covers a bounded number of calls, within a bounded time of the first (both set by configuration); the next call under the same key starts, and counts, a new **generation** with a fresh payer and product binding. A reused UUID after that boundary therefore starts a fully counted question rather than an expiry error. Each generation has an immutable identity separate from its reusable key.
-- At first admission the server resolves and binds the payer account ID and product to that generation. On every later call of the live generation it re-resolves the payer and product and checks current permission. If either changes, it refuses with 409 `question_context_changed`, without a `limit`, model call, count or money reservation; it never silently starts another generation under the same live key. The message directs a UUID-capable client to start a new question with a fresh UUID for the newly selected payer, and says own-key use still works. A legacy digest client can send a genuinely new message/key or wait until the digest's bounded generation ends. An unverified permission or membership check fails closed with 503 `upstream`; a revoked member cannot continue drawing on the old account.
+- At first admission the server resolves and binds the payer account ID and product to that generation. On every later call of the live generation it re-resolves the payer and product and checks current permission. If either changes under the same live key, it refuses with 409 `question_context_changed`, without a `limit`, model call, count or money reservation; it never silently starts another generation under that key. A changed product can reuse the same key only when the client supplied an ID: the legacy digest includes product, so another product derives a different key and starts its own counted question. A payer change within the same product can keep a legacy digest and receives the 409. The message directs a UUID-capable client to start a new question with a fresh UUID for the newly selected payer, and says own-key use still works. A legacy digest client can send a genuinely new message/key or wait until the digest's bounded generation ends. An unverified permission or membership check fails closed with 503 `upstream`; a revoked member cannot continue drawing on the old account.
 - Every admitted model call has a stable call ID and stores the immutable generation ID, its UTC admission month and day, and exact references to the count, day and money counters charged or reserved. Settlement or a proven release uses those admission references, even if it completes in another day or month. A cancellation, crash or unknown usage does not release already spent liability. Repeating settlement for a call ID changes nothing after the first application.
 - **Not counted:** a request refused before any model call; a question whose only admitted call fails on our side or the provider's before any output (it is given back); anything answered with the person's own key.
 - **Counted:** a question the person aborts, cancels or disconnects from, at any moment; a question that fails mid-answer.
@@ -511,13 +511,13 @@ Then it does not offer the model of weight 3 as available now, still offers the 
 
 Given `question-admissions.json`
 When a later call of one live question names a heavier model after a UTC month boundary
-Then the first month keeps the one unweighted question and its first weight, the later month gets only the positive weight difference, and a refusal uses the later month's next reset. Settlement on the following day uses the call's stored admission references and leaves the new month's money counter unchanged. Reusing the key after the bounded lifetime begins a new counted generation without changing old call references.
+Then the first month keeps the one unweighted question and its first weight, the later month gets only the positive weight difference, and a refusal uses the later month's next reset. Settlement on the following day uses the call's stored admission references and leaves the new month's money counter unchanged. A later admitted call with no positive weight difference still passes its own money guard and creates its own reservation. Reusing the key after the bounded lifetime begins a new counted generation without changing old call references.
 
 ### AC: question-context
 
 Given `question-context.json` and `refusal-question-context-changed.json`
 When a live question's resolved payer or product changes
-Then the call is refused with 409 and a complete next action, without a `limit`, model call, count or money reservation. A revoked or unverifiable membership never permits another call against the old payer; the client can use a new UUID for the newly selected payer. Every accepted call is checked again.
+Then the call is refused with 409 and a complete next action, without a `limit`, model call, count or money reservation. This includes a same-product legacy digest whose payer changes; a product change derives another legacy digest and does not reuse the old key. A revoked or unverifiable membership never permits another call against the old payer; the client can use a new UUID for the newly selected payer. Every accepted call is checked again.
 
 ### AC: model-not-included
 
@@ -613,7 +613,7 @@ Then it receives the 401 of `checkout-error-sign-in-required.json`, keeps the ch
 
 Given the answer in `checkout-session-answer-list-price.json`
 When the page is about to draw the payment form
-Then it says before the form that the offer is taken and shows `amount.due`, which equals `amount.list`.
+Then it says before the form that the offer is taken and shows the quoted `amount.due`, without inferring it from `offer` or `amount.list`.
 
 ### AC: purchase-refusals
 

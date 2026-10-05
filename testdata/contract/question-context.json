@@ -24,6 +24,29 @@
       }
     },
     {
+      "name": "legacy digest with same product and changed payer",
+      "keyKind": "derived_digest",
+      "key": "illustrative-digest-of-user-product-and-message",
+      "generationId": "g-11",
+      "bound": {
+        "payerAccountId": "personal-a",
+        "product": "datatug"
+      },
+      "resolved": {
+        "payerAccountId": "team-b",
+        "product": "datatug",
+        "membership": "verified"
+      },
+      "result": {
+        "status": 409,
+        "code": "question_context_changed",
+        "hasLimit": false,
+        "modelCalled": false,
+        "countAdded": 0,
+        "moneyReserved": false
+      }
+    },
+    {
       "name": "product switch under the same live UUID",
       "key": "55555555-5555-4555-8555-555555555555",
       "generationId": "g-7",
