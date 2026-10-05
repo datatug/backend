@@ -23,6 +23,7 @@ type PlanRouteOptions struct {
 
 func httpGetPlan(options PlanRouteOptions) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		if options.Verifier == nil {
 			planError(w, http.StatusServiceUnavailable, "upstream")
 			return

@@ -60,11 +60,30 @@ func (a *testAdmissionReader) ReadAdmission(_ context.Context, _ string, now tim
 }
 
 type testConfigReader struct {
-	config PlanConfig
-	err    error
+	config  PlanConfig
+	err     error
+	observe func(string, time.Time)
 }
 
-func (c testConfigReader) ReadPlanConfig(context.Context) (PlanConfig, error) { return c.config, c.err }
+func (c testConfigReader) ReadPlanConfig(_ context.Context, accountID string, now time.Time) (PlanConfig, error) {
+	if c.observe != nil {
+		c.observe(accountID, now)
+	}
+	return c.config, c.err
+}
+
+type testFirstMonthReader struct {
+	month                    string
+	err                      error
+	calls                    int
+	product, caller, account string
+}
+
+func (f *testFirstMonthReader) ReadFirstAdmittedMonth(_ context.Context, product, caller, account string) (string, error) {
+	f.calls++
+	f.product, f.caller, f.account = product, caller, account
+	return f.month, f.err
+}
 
 type testClock struct {
 	now   time.Time
@@ -82,8 +101,10 @@ func validPlanTestService() (PersonalPlanService, *testDirectory, *testPlanReade
 	u := &testUsageReader{}
 	a := &testAdmissionReader{}
 	c := &testClock{now: time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC)}
-	config := PlanConfig{FreeLimits: free, ProLimits: pro, FreeModels: []PlanModel{{ID: "fast", Class: "fast", Weight: 1, Default: true}}, ProModels: []PlanModel{{ID: "fast", Class: "fast", Weight: 1, Default: true}, {ID: "standard", Class: "standard", Weight: 3}}, DailyLimit: 17, ActiveGrace: time.Hour, PastDueGrace: 72 * time.Hour, Enforced: true, UpgradeURL: "https://example.com/pro", ManageURL: "https://example.com/manage"}
-	return PersonalPlanService{Directory: d, Plans: p, Usage: u, Admission: a, Config: testConfigReader{config: config}, Clock: c}, d, p, u, a, c
+	later := free
+	later.AIQuestions = 4
+	config := PlanConfig{FreeFirstMonthLimits: free, FreeLaterMonthLimits: later, ProLimits: pro, FreeModels: []PlanModel{{ID: "fast", Class: "fast", Weight: 1, Default: true}}, ProModels: []PlanModel{{ID: "fast", Class: "fast", Weight: 1, Default: true}, {ID: "standard", Class: "standard", Weight: 3}}, DailyLimit: 17, ActiveGrace: time.Hour, PastDueGrace: 72 * time.Hour, Enforced: true, UpgradeURL: "https://example.com/pro", ManageURL: "https://example.com/manage"}
+	return PersonalPlanService{Directory: d, Plans: p, Usage: u, Admission: a, Config: testConfigReader{config: config}, Clock: c, FirstMonth: &testFirstMonthReader{}}, d, p, u, a, c
 }
 
 func TestPersonalPlanFreeProEndedAndRollover(t *testing.T) {
@@ -154,6 +175,9 @@ func TestPersonalPlanFailuresAndBoundaries(t *testing.T) {
 	})
 	t.Run("unreadable plan grants free", func(t *testing.T) {
 		s, _, p, _, _, _ := validPlanTestService()
+		pro := s.Config.(testConfigReader).config.ProLimits
+		paid := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)
+		p.record = &models4datatug.PlanRecord{V: 1, Plan: "pro", Status: "active", PaidUntil: &paid, Limits: &pro}
 		p.err = errors.New("read")
 		got, err := s.Read(context.Background(), "caller", "", "")
 		if err != nil || got.EffectivePlan != "free" {
@@ -268,7 +292,9 @@ func TestPersonalPlanConfigAndInputsFailClosed(t *testing.T) {
 		alter func(*PlanConfig)
 	}{
 		{"daily", func(c *PlanConfig) { c.DailyLimit = 0 }},
-		{"free limits", func(c *PlanConfig) { c.FreeLimits.Contributors = 0 }},
+		{"free limits", func(c *PlanConfig) { c.FreeFirstMonthLimits.Contributors = 0 }},
+		{"later free limits", func(c *PlanConfig) { c.FreeLaterMonthLimits.Contributors = 0 }},
+		{"later free model class", func(c *PlanConfig) { c.FreeLaterMonthLimits.AIModelClasses = []string{"standard"} }},
 		{"pro limits", func(c *PlanConfig) { c.ProLimits.AIQuestions = -1 }},
 		{"pro project contributors", func(c *PlanConfig) { c.ProLimits.ProjectContributors = nil }},
 		{"free models", func(c *PlanConfig) { c.FreeModels = nil }},
@@ -424,5 +450,65 @@ func TestPersonalPlanObservationPreservesCashGuard(t *testing.T) {
 	dailyObserved := read()
 	if dailyObserved.AI.Blocked != nil {
 		t.Fatal(dailyObserved)
+	}
+}
+
+func TestPersonalPlanUsesAuthoritativeFirstAdmittedMonth(t *testing.T) {
+	s, _, p, _, _, clock := validPlanTestService()
+	marker := s.FirstMonth.(*testFirstMonthReader)
+	var configAccount string
+	var configAt time.Time
+	config := s.Config.(testConfigReader)
+	config.observe = func(account string, at time.Time) { configAccount, configAt = account, at }
+	s.Config = config
+	read := func() PlanResponse {
+		t.Helper()
+		got, err := s.Read(context.Background(), "caller", "", "ignored-project")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	initial := read()
+	if initial.AI.Limit != 7 || marker.product != "datatug" || marker.caller != "caller" || marker.account != "personal-1" || configAccount != "personal-1" || !configAt.Equal(clock.now) || clock.calls != 1 {
+		t.Fatal(initial, marker, configAccount, configAt, clock.calls)
+	}
+	marker.month = "2026-03"
+	first := read()
+	if first.AI.Limit != 7 {
+		t.Fatal(first)
+	}
+	clock.now = time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	later := read()
+	if later.AI.Limit != 4 || later.AI.PeriodID != "2026-04" || !later.AI.ResetsAt.Equal(time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)) || !configAt.Equal(clock.now) {
+		t.Fatal(later, configAt)
+	}
+	marker.month = ""
+	stillInitial := read() // a calendar rollover does not start the first-admitted month
+	if stillInitial.AI.Limit != 7 {
+		t.Fatal(stillInitial)
+	}
+	pro := config.config.ProLimits
+	p.record = &models4datatug.PlanRecord{V: 1, Plan: "pro", Status: "active", PaidUntil: timePtr(clock.now.Add(time.Hour)), Limits: &pro}
+	marker.err = errors.New("marker down")
+	proResponse := read()
+	if proResponse.EffectivePlan != "pro" || marker.calls != 4 {
+		t.Fatal(proResponse, marker.calls)
+	}
+	p.record.Status = "ended"
+	if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) {
+		t.Fatal(err)
+	}
+	marker.err = nil
+	for _, invalid := range []string{"2026-4", "later", "2026-05"} {
+		marker.month = invalid
+		if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) {
+			t.Fatal(invalid, err)
+		}
+	}
+	marker.month = "2026-03"
+	ended := read()
+	if ended.AI.Limit != 4 {
+		t.Fatal(ended)
 	}
 }

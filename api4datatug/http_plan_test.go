@@ -57,7 +57,7 @@ func (planAdmission) ReadAdmission(context.Context, string, time.Time) (facade4d
 
 type planSettings struct{ config facade4datatug.PlanConfig }
 
-func (s planSettings) ReadPlanConfig(context.Context) (facade4datatug.PlanConfig, error) {
+func (s planSettings) ReadPlanConfig(context.Context, string, time.Time) (facade4datatug.PlanConfig, error) {
 	return s.config, nil
 }
 
@@ -65,16 +65,22 @@ type planTime struct{ now time.Time }
 
 func (c planTime) Now() time.Time { return c.now }
 
+type planFirstMonth struct{}
+
+func (planFirstMonth) ReadFirstAdmittedMonth(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+
 func TestPlanHTTPFreeProEndedAndForeignAccount(t *testing.T) {
 	five := int64(5)
 	free := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 2, AIQuestions: 7, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
 	pro := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 3, ProjectContributors: &five, AIQuestions: 11, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
-	config := facade4datatug.PlanConfig{FreeLimits: free, ProLimits: pro, FreeModels: []facade4datatug.PlanModel{{ID: "model", Class: "fast", Weight: 1, Default: true}}, ProModels: []facade4datatug.PlanModel{{ID: "model", Class: "fast", Weight: 1, Default: true}}, DailyLimit: 17, ActiveGrace: time.Hour, PastDueGrace: 72 * time.Hour, Enforced: true, UpgradeURL: "https://example.com/pro"}
+	config := facade4datatug.PlanConfig{FreeFirstMonthLimits: free, FreeLaterMonthLimits: free, ProLimits: pro, FreeModels: []facade4datatug.PlanModel{{ID: "model", Class: "fast", Weight: 1, Default: true}}, ProModels: []facade4datatug.PlanModel{{ID: "model", Class: "fast", Weight: 1, Default: true}}, DailyLimit: 17, ActiveGrace: time.Hour, PastDueGrace: 72 * time.Hour, Enforced: true, UpgradeURL: "https://example.com/pro"}
 	d := &planDirectory{}
 	p := &planStore{}
 	u := &usageStore{}
 	now := time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC)
-	service := facade4datatug.PersonalPlanService{Directory: d, Plans: p, Usage: u, Admission: planAdmission{}, Config: planSettings{config}, Clock: planTime{now}}
+	service := facade4datatug.PersonalPlanService{Directory: d, Plans: p, Usage: u, Admission: planAdmission{}, Config: planSettings{config}, Clock: planTime{now}, FirstMonth: planFirstMonth{}}
 	routes := map[string]http.HandlerFunc{}
 	RegisterHttpRoutesWithPlan(func(method, path string, h http.HandlerFunc) { routes[method+" "+path] = h }, fakeIDs{}, PlanRouteOptions{Verifier: planVerifier{caller: "user-1"}, Service: service})
 	handler := routes["GET /v0/datatug/plan"]
@@ -85,6 +91,9 @@ func TestPlanHTTPFreeProEndedAndForeignAccount(t *testing.T) {
 		t.Helper()
 		w := httptest.NewRecorder()
 		handler(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if got := w.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control = %q", got)
+		}
 		var out facade4datatug.PlanResponse
 		if w.Code == 200 {
 			if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -135,16 +144,25 @@ func TestPlanHTTPRequiresHostVerifierAndDependencies(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/v0/datatug/plan", nil)
 	httpGetPlan(PlanRouteOptions{})(w, r)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatal(got)
+	}
 	if w.Code != 503 {
 		t.Fatal(w.Code)
 	}
 	w = httptest.NewRecorder()
 	httpGetPlan(PlanRouteOptions{Verifier: planVerifier{err: errors.New("expired")}})(w, r)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatal(got)
+	}
 	if w.Code != 401 || w.Body.Len() != 0 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
 	httpGetPlan(PlanRouteOptions{Verifier: planVerifier{caller: "user-1"}})(w, r)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatal(got)
+	}
 	if w.Code != 503 {
 		t.Fatal(w.Code)
 	}

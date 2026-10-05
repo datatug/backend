@@ -90,6 +90,8 @@ The count of an account for one month is the document `spaces/{accountId}/ext/da
 
 `left` is defined as `capped ? 0 : max(0, limits.aiQuestions + aiExtraQuestions - used)`, with a missing count document meaning `used: 0`; a client takes `left` from the endpoint ([REQ:plan-endpoint-response](#req-plan-endpoint-response)) and does not compute it. The count starts again at the first instant of each UTC month, for every plan and every billing period; no job runs, a new document simply begins at 0. A change of plan moves no counter: `used` stays, and the new limit applies at once.
 
+For a personal Free account, the included question limit is runtime configuration with separate values for the UTC month of the person's **first admitted** hosted question and later UTC months. The meter records that month once, even if the first admission occurs while the person is on Pro; a refused or merely observed call does not start it. An empty marker means no question has yet been admitted and the first-month value still applies. The endpoint reads the same server-only marker by product, person and proved personal account before reporting a Free limit; if the marker cannot be read or is invalid, it answers 503. Neither account creation time nor the browser's calendar selects the allowance.
+
 Fixtures: `ai-usage-record.json`, `ai-usage-record-capped.json`.
 
 #### REQ: test-record
@@ -199,6 +201,7 @@ Fixtures: `plan-response-ended.json` (`ended`), `plan-response-stale.json` (`pas
 `GET /v0/datatug/plan`, on the API base the client is configured with ([REQ:ai-calls](#req-ai-calls)), answers for the account that would pay for the caller's next question, in the context the caller gives. It is called with a Firebase ID token, or with a DataTug CLI sign-in that holds the scope `datatug:projects:read`, as `Authorization: Bearer <token>`. A missing, expired or wrongly scoped credential answers 401. The contract gives a 401 no body: a client reads any 401, here and on every `/v0/ai/*` call, as "sign in again" and depends on nothing in its body.
 
 In the initial personal Free/Pro implementation, an injected host authenticator must verify the credential and return the caller; this route does not interpret a bearer string as proof. The host's production verifier and personal-account provisioner are separate deployment dependencies. Until they are bound, the route returns 503 instead of reporting a plan.
+All answers from this authenticated route, including refusals, carry `Cache-Control: no-store`.
 
 Optional query parameters:
 
@@ -437,12 +440,13 @@ The answer is 200 with `clientSecret`, `sessionId` and `mode` (the mode the sess
 |---|---|---|
 | `accountId` | string, optional | The account the plan will land on. Absent for an organisation that is created when the payment completes. |
 | `accountKind` | string | `personal` or `organisation`. |
-| `offer` | object, optional | `{id, applied, percentOff, left}`. Absent when this offer does not apply to the plan. Present with `applied: false` when this offer applies to the plan but no place is available for this session; the client shows the quoted amount before it draws the form. Other adjustments may affect the amount independently of this field. |
+| `offer` | object, optional | `{id, applied, percentOff, left}`, with additive `reserved` and `duration` on newer answers. Absent when this launch offer does not apply to the plan. `applied: true` means its discount is currently payable; `reserved: true` means a contingent launch place is held for this payment form, not an earned grant. Thus an invitation can be the payable discount while the launch place is reserved (`applied: false`, `reserved: true`). `duration` is `forever` for the launch terms. Original answers without the additive fields remain valid. |
+| `appliedDiscount` | object, optional | The discount actually frozen into this payable quote: `{kind, percentOff, duration?, durationMonths?}`. `kind` is `none`, `launch` or `invitation`; `percentOff` is an integer. `duration` is `forever`, `repeating` or `once` when there is a discount; `durationMonths` is a positive integer only for `repeating`. A replay returns the same frozen quote. This field does not promise that a contingent launch reservation has become an entitlement. Original answers without it remain valid. |
 | `amount` | object | `{currency, list, due, taxIncluded}`: `currency` is an ISO 4217 code in lower case; `list` and `due` are integers in the currency's minor unit, `due` is what the form will charge for the first period, and `taxIncluded` says whether the amounts include tax. |
 
-A client shows `amount` and `offer` from the answer, not from its own tables, and never infers `amount.due` from `offer`. `amount.due` is always the amount this form charges.
+A client shows `amount`, `offer` and `appliedDiscount` from the answer, not from its own tables, and never infers `amount.due` from either discount object. `amount.due` is always the amount this form charges. If `offer.reserved` is true while `appliedDiscount.kind` is `invitation`, the page can explain the reserved launch place separately from the invitation discount that is currently payable; it never calls that reservation an earned lifetime grant before confirmed payment.
 
-Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`.
+Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-invitation-reserved.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`.
 
 #### REQ: session-errors
 
@@ -472,7 +476,7 @@ The payment form is drawn from `clientSecret`. Drawing the form and the thank-yo
 
 `testdata/contract/` holds one JSON fixture per shape of this page, each named in this page, and `CHECKSUMS`: one line per fixture, `<SHA-256 of the file as 64 lower-case hex digits>`, two spaces, the file name, sorted by name, ending with a line feed (`shasum -a 256 -c CHECKSUMS` reads it). The test of `contract4datatug/contract_test.go` fails when a fixture is not valid JSON, is not listed, is listed and missing, or does not match its digest. It reads nothing but the fixtures. A second test, `contract4datatug/page_test.go`, fails when a fixture is not named in this page; it checks this repository's own page and is not copied.
 
-The original fixture files and their digests remain unchanged as wider version-1 compatibility examples. New personal Pro `projectContributors` and `checkout_resolving` examples are additive; neither changes an existing fixture's bytes.
+The original fixture files and their digests remain unchanged as wider version-1 compatibility examples. New personal Pro `projectContributors`, `checkout_resolving` and frozen discount/reservation examples are additive; none changes an existing fixture's bytes.
 
 A repository that uses the fixtures copies the whole directory and `contract_test.go`, byte for byte, and runs the same test against its copy. The layout a copy needs:
 
@@ -491,7 +495,7 @@ A fixture is changed here first, with `CHECKSUMS`, and then copied.
 | Refusals | `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-question-context-changed.json`, `refusal-rate-limited.json`, `refusal-upstream.json` | One body per row of [REQ:refusal-body](#req-refusal-body). The status of each is in that table. |
 | Question admission | `question-admissions.json`, `question-context.json` | Heaviest weight, cross-month deltas and settlement, generation reuse, immutable payer and product, membership checks and refusal without a charge. |
 | Offer | `offer.json`, `offer-none-left.json` | [REQ:offer-endpoint](#req-offer-endpoint). |
-| Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json`, `checkout-error-resolving.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
+| Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-invitation-reserved.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json`, `checkout-error-resolving.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
 
 #### REQ: numbers-are-configuration
 
@@ -631,11 +635,17 @@ Given the answer in `checkout-session-answer-list-price.json`
 When the page is about to draw the payment form
 Then it says before the form that the offer is taken and shows the quoted `amount.due`, without inferring it from `offer` or `amount.list`.
 
+### AC: invitation-with-reserved-launch-place
+
+Given `checkout-session-answer-invitation-reserved.json`
+When the page is about to draw the payment form
+Then it shows `amount.due` as quoted, names `appliedDiscount` as the payable invitation discount, and describes `offer.reserved` as a contingent launch place without calling it an earned grant or adding its percentage to the invitation.
+
 ### AC: purchase-refusals
 
-Given the seven bodies of the `checkout-error-` fixtures
+Given the bodies of the `checkout-error-` fixtures
 When a page receives each with its status from [REQ:session-errors](#req-session-errors)
-Then it shows the person a sentence for it, offers a retry only for `offer_busy`, offers sign-in only for `sign_in_required`, and shows the thank-you for `already_subscribed` only when the body carries a `sessionId` (`checkout-error-already-subscribed.json` does, `checkout-error-already-subscribed-no-session.json` does not).
+Then it shows the person a sentence for it, offers a later retry for `offer_busy`, offers a same-selection recovery retry for `checkout_resolving`, offers sign-in only for `sign_in_required`, and shows the thank-you for `already_subscribed` only when the body carries a `sessionId` (`checkout-error-already-subscribed.json` does, `checkout-error-already-subscribed-no-session.json` does not). A recovery retry never starts a second payable operation.
 
 ### AC: new-organisation-purchase
 

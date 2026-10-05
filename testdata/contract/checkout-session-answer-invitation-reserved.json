@@ -1,0 +1,27 @@
+{
+  "clientSecret": "cs_example_secret_new",
+  "sessionId": "cs_example_new",
+  "mode": "test",
+  "accountId": "p7Xk2",
+  "accountKind": "personal",
+  "offer": {
+    "id": "example-launch",
+    "applied": false,
+    "reserved": true,
+    "percentOff": 13,
+    "duration": "forever",
+    "left": 4
+  },
+  "appliedDiscount": {
+    "kind": "invitation",
+    "percentOff": 21,
+    "duration": "repeating",
+    "durationMonths": 4
+  },
+  "amount": {
+    "currency": "xts",
+    "list": 700,
+    "due": 553,
+    "taxIncluded": true
+  }
+}

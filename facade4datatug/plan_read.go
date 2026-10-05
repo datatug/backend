@@ -51,25 +51,38 @@ type PlanModel struct {
 	Default bool   `json:"default"`
 }
 
-// PlanConfig is supplied by the host, rather than encoded in plan policy.
+// PlanConfig is supplied by the host, rather than encoded in plan policy. The
+// two Free grants differ by the month of the first admitted question, which is
+// independently read from the meter's server-only marker.
 type PlanConfig struct {
-	FreeLimits   models4datatug.PlanLimits
-	ProLimits    models4datatug.PlanLimits
-	FreeModels   []PlanModel
-	ProModels    []PlanModel
-	DailyLimit   int64
-	ActiveGrace  time.Duration
-	PastDueGrace time.Duration
-	Enforced     bool
-	UpgradeURL   string
-	ManageURL    string
-	SupportEmail string
+	FreeFirstMonthLimits models4datatug.PlanLimits
+	FreeLaterMonthLimits models4datatug.PlanLimits
+	ProLimits            models4datatug.PlanLimits
+	FreeModels           []PlanModel
+	ProModels            []PlanModel
+	DailyLimit           int64
+	ActiveGrace          time.Duration
+	PastDueGrace         time.Duration
+	Enforced             bool
+	UpgradeURL           string
+	ManageURL            string
+	SupportEmail         string
 }
 
+// PlanConfigReader receives the proved account and the one UTC instant sampled
+// for this response; settings can change at runtime without implicit context.
 type PlanConfigReader interface {
-	ReadPlanConfig(context.Context) (PlanConfig, error)
+	ReadPlanConfig(context.Context, string, time.Time) (PlanConfig, error)
 }
 type PlanClock interface{ Now() time.Time }
+
+// FirstAdmittedMonthReader reads the same immutable, server-only first-admission
+// marker used by the AI meter. Empty means no question has been admitted yet.
+// It is keyed by product and caller, with the proved personal account included
+// so the host can reject a mismatched binding.
+type FirstAdmittedMonthReader interface {
+	ReadFirstAdmittedMonth(context.Context, string, string, string) (string, error)
+}
 
 // PersonalPayer is shared by plan reads and the later AI adapter. A foreign
 // account hint is refused before any plan or usage read for that hint.
@@ -135,34 +148,38 @@ type PlanResponse struct {
 
 // PersonalPlanService composes ports without depending on transport or store.
 type PersonalPlanService struct {
-	Directory PersonalAccountDirectory
-	Plans     PlanReader
-	Usage     UsageReader
-	Admission AdmissionReader
-	Config    PlanConfigReader
-	Clock     PlanClock
+	Directory  PersonalAccountDirectory
+	Plans      PlanReader
+	Usage      UsageReader
+	Admission  AdmissionReader
+	Config     PlanConfigReader
+	Clock      PlanClock
+	FirstMonth FirstAdmittedMonthReader
 }
 
 func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ string) (PlanResponse, error) {
-	if s.Directory == nil || s.Plans == nil || s.Usage == nil || s.Admission == nil || s.Config == nil || s.Clock == nil {
+	if s.Directory == nil || s.Plans == nil || s.Usage == nil || s.Admission == nil || s.Config == nil || s.Clock == nil || s.FirstMonth == nil {
 		return PlanResponse{}, ErrPlanUnavailable
 	}
 	account, err := ResolvePersonalPayer(ctx, callerID, accountHint, s.Directory)
 	if err != nil {
 		return PlanResponse{}, err
 	}
-	config, err := s.Config.ReadPlanConfig(ctx)
+	now := s.Clock.Now().UTC()
+	config, err := s.Config.ReadPlanConfig(ctx, account.ID, now)
 	if err != nil || validateConfig(config) != nil {
 		return PlanResponse{}, ErrPlanUnavailable
 	}
-	now := s.Clock.Now().UTC()
 	periodID := now.Format("2006-01")
 	reset := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
-	record, _ := s.Plans.ReadCurrentPlan(ctx, account.ID) // an unreadable plan is Free
+	record, planReadErr := s.Plans.ReadCurrentPlan(ctx, account.ID)
+	if planReadErr != nil {
+		record = nil
+	} // discard even a partial value on error
 	plan, effective, status, billingPeriod := "free", "free", "none", "none"
 	var paidUntil *time.Time
 	founding := false
-	limits := config.FreeLimits
+	limits := config.FreeFirstMonthLimits
 	models := config.FreeModels
 	var extra int64
 	if record != nil && record.V == 1 {
@@ -186,6 +203,15 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 				models = config.ProModels
 				extra = record.AIExtraQuestions
 			}
+		}
+	}
+	if effective == "free" {
+		firstMonth, err := s.FirstMonth.ReadFirstAdmittedMonth(ctx, "datatug", callerID, account.ID)
+		if err != nil || !validFirstAdmittedMonth(firstMonth, periodID) {
+			return PlanResponse{}, ErrPlanUnavailable
+		}
+		if firstMonth != "" && firstMonth != periodID {
+			limits = config.FreeLaterMonthLimits
 		}
 	}
 	limit := limits.AIQuestions + extra
@@ -297,7 +323,10 @@ func validateConfig(config PlanConfig) error {
 	if config.DailyLimit <= 0 || config.ActiveGrace < 0 || config.PastDueGrace <= config.ActiveGrace || config.UpgradeURL == "" {
 		return ErrPlanUnavailable
 	}
-	if err := validateLimits(config.FreeLimits); err != nil {
+	if err := validateLimits(config.FreeFirstMonthLimits); err != nil {
+		return err
+	}
+	if err := validateLimits(config.FreeLaterMonthLimits); err != nil {
 		return err
 	}
 	if err := validateLimits(config.ProLimits); err != nil {
@@ -306,13 +335,24 @@ func validateConfig(config PlanConfig) error {
 	if config.ProLimits.ProjectContributors == nil {
 		return ErrPlanUnavailable
 	}
-	if err := validateModels(config.FreeModels, config.FreeLimits); err != nil {
+	if err := validateModels(config.FreeModels, config.FreeFirstMonthLimits); err != nil {
+		return err
+	}
+	if err := validateModels(config.FreeModels, config.FreeLaterMonthLimits); err != nil {
 		return err
 	}
 	if err := validateModels(config.ProModels, config.ProLimits); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validFirstAdmittedMonth(firstMonth, periodID string) bool {
+	if firstMonth == "" {
+		return true
+	}
+	month, err := time.Parse("2006-01", firstMonth)
+	return err == nil && month.Format("2006-01") == firstMonth && firstMonth <= periodID
 }
 func validBlocked(reason string) bool {
 	switch reason {
