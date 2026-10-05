@@ -53,6 +53,14 @@
       "plan": "free",
       "role": "owner",
       "pays": true
+    },
+    {
+      "accountId": "t9Zr3",
+      "kind": "organisation",
+      "title": "Example Old Team",
+      "plan": "free",
+      "role": "admin",
+      "pays": false
     }
   ]
 }

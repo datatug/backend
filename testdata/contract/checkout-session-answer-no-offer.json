@@ -1,0 +1,13 @@
+{
+  "clientSecret": "cs_example_secret_0004",
+  "sessionId": "cs_example_0004",
+  "mode": "live",
+  "accountId": "p7Xk2",
+  "accountKind": "personal",
+  "amount": {
+    "currency": "xts",
+    "list": 700,
+    "due": 700,
+    "taxIncluded": true
+  }
+}

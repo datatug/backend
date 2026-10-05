@@ -24,8 +24,8 @@ This page fixes the shapes. The fixtures are copied into each client's repositor
 ### Words used
 
 - **Account**: the thing that holds a plan. An account is a Sneat space, and `accountId` is the ID of that space. A **personal account** is a person's personal space. An **organisation account** is a space of type `company`. Membership and roles are the space's own; this contract stores no owner or member list.
-- **Plan**: one of `free`, `pro`, `team`, `business`, `company`, `enterprise`. A personal account is on `free` or `pro`. An organisation account is on `team`, `business` or `company`. `enterprise` is reserved; it is not sold through checkout. A client must show a plan it does not know by its name and must not fail on it.
-- **Question**: what the allowance counts, defined in [REQ:question](#req-question).
+- **Plan**: one of `free`, `pro`, `team`, `business`, `company`, `enterprise`. A personal account is on `free` or `pro`. An organisation account is on `team`, `business` or `company`, or on `free` once its plan has ended. `enterprise` is reserved; it is not sold through checkout. A client must show a plan it does not know by its name and must not fail on it.
+- **Question**: what the allowance counts, defined in [REQ:question](#req-question). Every count of questions (`used`, `questions`, `limit`, `left`, `aiQuestions`, `aiExtraQuestions`, and a model's `weight`) is a whole number.
 - **Payer**: the account whose allowance a question is counted against.
 - **Buyer**: the signed-in person who pays for a plan.
 - **Place**: one of the limited places of the Founding offer ([REQ:offer-endpoint](#req-offer-endpoint)).
@@ -57,7 +57,7 @@ The plan of an account is the document `spaces/{accountId}/ext/datatug/plan/curr
 | `limits.contributors` | number | The cap on contributors. |
 | `limits.projectGuests` | number | People besides the owner in each project of a personal account. |
 | `limits.aiQuestions` | number | Included AI questions per calendar month. `0` means none, never "no limit". |
-| `limits.aiModelClasses` | array of string | The model classes the plan includes: `fast` (in every plan) and `standard`. Others may be added, and a client tolerates an unknown class. A client offers only the models that `ai.models` lists ([REQ:models](#req-models)). |
+| `limits.aiModelClasses` | array of string | The model classes the plan includes: `fast` and `standard`. Others may be added, and a client tolerates an unknown class. A client offers only the models that `ai.models` lists ([REQ:models](#req-models)). |
 | `limits.aiPaysFor` | string | `owner` (the allowance is the owner's alone) or `contributors` (one pool for the contributors of the organisation). |
 | `aiExtraQuestions` | number | Extra capacity on top of `limits.aiQuestions`. |
 | `updatedAt` | timestamp | |
@@ -74,14 +74,14 @@ The count of an account for one month is the document `spaces/{accountId}/ext/da
 |---|---|---|
 | `v` | number | `1` |
 | `periodId` | string | |
-| `used` | number | Questions used, each counted by the weight of the model it ran on ([REQ:models](#req-models)). It is above `questions` once a question ran on a model whose weight is above 1. |
+| `used` | number | Questions used, each counted by its weight ([REQ:models](#req-models)). It is above `questions` once a question counted a weight above 1. |
 | `questions` | number | Questions asked, unweighted. |
 | `byMember` | map of user ID to number | Weighted use per member of an organisation, like `used`. Optional: a reader tolerates its absence. |
 | `capped` | boolean, optional | True when the server has stopped included AI for this account for the rest of the month because of what the questions cost. A reader treats it as nothing left. |
 | `resetsAt` | timestamp | The first instant of the next UTC month. |
 | `updatedAt` | timestamp | |
 
-A reader computes `left = capped ? 0 : max(0, limits.aiQuestions + aiExtraQuestions - used)`, with a missing count document meaning `used: 0`. The count starts again at the first instant of each UTC month, for every plan and every billing period; no job runs, a new document simply begins at 0. A change of plan moves no counter: `used` stays, and the new limit applies at once.
+`left` is defined as `capped ? 0 : max(0, limits.aiQuestions + aiExtraQuestions - used)`, with a missing count document meaning `used: 0`; a client takes `left` from the endpoint ([REQ:plan-endpoint-response](#req-plan-endpoint-response)) and does not compute it. The count starts again at the first instant of each UTC month, for every plan and every billing period; no job runs, a new document simply begins at 0. A change of plan moves no counter: `used` stays, and the new limit applies at once.
 
 Fixtures: `ai-usage-record.json`, `ai-usage-record-capped.json`.
 
@@ -95,7 +95,7 @@ Every member listed in the space's `userIDs` may read the two records of the acc
 
 #### REQ: direct-readers
 
-A client may listen to the two documents for live updates, but must use them only to notice a change:
+A client may listen to the two documents for live updates, but must use them only to notice a change, except as item 4 allows:
 
 1. Call `GET /v0/datatug/plan` first, again whenever the account in view changes, and again at `ai.resetsAt`.
 2. Then it may listen to `plan/current` and to `aiUsage/{ai.periodId}` of that account. The month in the document ID comes from the server's `ai.periodId`, never from the browser's clock.
@@ -123,7 +123,7 @@ The record follows the state of the subscription at the payment provider through
 | `accountKind` | `personal` or `organisation` | The kind of the account the subscription belongs to. |
 | `tier` | string | The tier of the current price: `pro`, `team`, `business`, `company`; empty when the price is not one the catalogue knows. |
 | `period` | `month` or `year` | The billing interval. |
-| `providerStatus` | string | The provider's subscription status: `active`, `trialing`, `past_due`, `unpaid`, `canceled`, `paused`, `incomplete`, `incomplete_expired`. |
+| `providerStatus` | string | The provider's subscription status: `active`, `trialing`, `past_due`, `unpaid`, `canceled`, `paused`, `incomplete`, `incomplete_expired`. A value outside this list is refused. |
 | `paidUntil` | timestamp, optional | The end of the last paid period. |
 | `endsAt` | timestamp, optional | A scheduled cancellation. |
 | `lastInvoiceRefundedInFull` | boolean | Whether the last paid invoice was refunded in full. |
@@ -148,6 +148,7 @@ It has three outcomes: write a record; leave the record as it is; refuse, with a
 | `active`, `trialing` or `past_due` and the last paid invoice refunded in full | leave | | | no change: a refund alone ends nothing |
 | `tier` does not fit `accountKind` (a tier for organisations on a personal account, or the reverse) | refuse, reason `tier_not_for_account` | | | no change |
 | `tier` empty | refuse, reason `unknown_tier` | | | no change |
+| `providerStatus` is none of the eight listed | refuse, reason `unknown_status` | | | no change (never more than Free, [REQ:fail-towards-free](#req-fail-towards-free)) |
 
 The rows can overlap (an ending status with a tier that does not fit; `incomplete` with an empty tier). The function applies them in this order, and the first that matches decides:
 
@@ -156,7 +157,8 @@ The rows can overlap (an ending status with a tier that does not fit; `incomplet
 3. `tier` is empty: refuse, `unknown_tier`.
 4. `tier` does not fit `accountKind`: refuse, `tier_not_for_account`.
 5. `providerStatus` is `active`, `trialing` or `past_due` and `lastInvoiceRefundedInFull` is true: leave.
-6. Otherwise: write.
+6. `providerStatus` is `active`, `trialing` or `past_due`: write.
+7. Any other `providerStatus`: refuse, reason `unknown_status`.
 
 A refund is a reason an ended record carries, never a state of its own: a plan ends only when the subscription ends. The refund and the cancellation may arrive in either order; the function sees the same facts either way.
 
@@ -164,7 +166,7 @@ A written record, in every row: `v` is `1`; `plan`, `status`, `period`, `paidUnt
 
 Two things are neither facts nor rows of the function: a dispute opened against a payment changes no record (the operator is told and decides), and a second subscription paid for an account that already has one changes no record either. The caller handles both before it calls the function.
 
-Fixture: `state-table.json`: an object with a `cases` array; each case has `name`, `facts`, `outcome` (`write`, `leave` or `refuse`), and for `write` the written `record` (without `updatedAt` and `aiExtraQuestions`), for `refuse` the `reason`. There is a case for each row and for each overlap above, and some `grants` carry two model classes and one carries one. One test per case.
+Fixture: `state-table.json`: an object with a `cases` array; each case has `name`, `facts`, `outcome` (`write`, `leave` or `refuse`), and for `write` the written `record` (without `updatedAt` and `aiExtraQuestions`), for `refuse` the `reason`. There is a case for each row and for each overlap above (an unmapped status, a refund with an empty tier, an `unpaid` subscription refunded in full, an ended organisation), and some `grants` carry two model classes and one carries one. One test per case.
 
 ### What a status means for the person
 
@@ -198,7 +200,7 @@ A client passes `account` only with an `accountId` taken from `accounts` of an e
 
 When the server cannot read the count, the answer is 503 with the `upstream` body of [REQ:refusal-body](#req-refusal-body); a client then shows no number and says so.
 
-A client that meets a `v` other than 1 in the answer shows no number, says that the app is out of date and that the person's own key still works, and calls nothing else of this contract.
+A client that meets a `v` other than 1 in the answer shows no number, says that the app is out of date and that the person's own key still works; its AI calls still work, and at a refusal it shows `error.message`.
 
 Fixture: `plan-error-not-a-member.json`.
 
@@ -226,7 +228,7 @@ The answer is 200 and one JSON object of version 1. Every field below is always 
 | `upgradeUrl` | string | Where to get a plan. A host setting. |
 | `manageUrl` | string, optional | Where to manage the subscription (the payment provider's portal sign-in link). Present only for the owner or an admin of an account with a subscription. A host setting. |
 | `supportEmail` | string, optional | A host setting. |
-| `accounts` | array | The accounts the caller can choose between, at most twenty: the caller's personal account, and every organisation account that has a DataTug plan record and of which the caller is a proven member. Each is `{accountId, kind, title, plan, role, pays}`, `kind` being `personal` or `organisation`; `plan` is the plan in force of that account (its `effectivePlan`, not the plan its record states); `pays` marks the candidates of rule 4 of [REQ:payer-rules](#req-payer-rules), the accounts that could pay for the caller's questions when no usable project hint is given, so a client can ask the person which one. A space of another kind never appears. |
+| `accounts` | array | The accounts the caller can choose between, at most twenty: the caller's personal account, and every organisation account that has a DataTug plan record and of which the caller is a proven member. Each is `{accountId, kind, title, plan, role, pays}`, `kind` being `personal` or `organisation`; `plan` is the plan in force of that account (its `effectivePlan`, not the plan its record states); `pays` is `true` for every account that rule 4 of [REQ:payer-rules](#req-payer-rules) can charge when no usable project hint is given: each candidate, and the personal account when it is not a candidate and the number of candidates is not exactly one (it then pays, on Free, unless the client names a candidate); a client can ask the person which one. A space of another kind never appears. |
 
 `ai`:
 
@@ -237,23 +239,23 @@ The answer is 200 and one JSON object of version 1. Every field below is always 
 | `periodId` | string | The UTC month the numbers are for, `YYYY-MM`. |
 | `used`, `limit`, `left` | number | `used` is the weighted use of the month ([REQ:usage-record](#req-usage-record)). `limit` is the effective `limits.aiQuestions` plus `aiExtraQuestions`. `left` is `max(0, limit - used)`, or 0 when the account is capped. |
 | `resetsAt` | timestamp | The first instant of the next UTC month. |
-| `today` | object | `{used, limit}`: the caller's own questions today (UTC) against the per-person daily ceiling, whichever account pays. The ceiling is set by configuration. |
+| `today` | object | `{used, limit}`: the caller's own questions today (UTC) against the per-person daily ceiling, whichever account pays. The ceiling is set by configuration. `today.used` counts the questions admitted today, each once whatever the weight of its model; a question that was given back still counts toward the day. |
 | `blocked` | string or null | The reason the next question would be refused by something other than the count, or `null`. The reasons are `daily`, `free_budget`, `unverified`, and `monthly` when the account is capped. `blocked` is `null` when nothing but the count could stop the next question, and so also when the month's count is simply used up (`left` is 0 and the account is not capped): `left` shows that. A client treats a value it does not know as "the next question will be refused". |
 | `models` | array | The models a client may request for this payer: `{id, class, weight, default}`. Exactly one has `default: true`; a client that names no model gets it. See [REQ:models](#req-models). |
 
-A person can ask a model of weight `w` now when `ai.blocked` is `null` and `ai.left` is at least `w`. A client shows the plan, the account that pays, and `ai.left` of `ai.limit` with the reset date, and, while `ai.blocked` is not null, the reason. It does not compute any of those.
+While `ai.enforced` is `true`, a person can ask a model of weight `w` now when `ai.blocked` is `null` and `ai.left` is at least `w`. A client shows the plan, the account that pays, and `ai.left` of `ai.limit` with the reset date, and, while `ai.blocked` is not null, the reason. It does not compute any of those.
 
 Fixtures: `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`.
 
 #### REQ: models
 
-The models a payer may use are a list, `ai.models`, set by configuration and different for different payers. It may hold several models. Each has a `class` and a `weight` (a positive number), and `ai.models` holds only models whose class is in `limits.aiModelClasses`. The rules:
+The models a payer may use are a list, `ai.models`, set by configuration and different for different payers. It may hold several models. Each has a `class` and a `weight` (a positive integer), and `ai.models` holds only models whose class is in `limits.aiModelClasses`. The rules:
 
 - **A client chooses from the list.** It offers the models of `ai.models`, preselects the one with `default: true`, and may show each weight (a model of weight 3 uses three questions of the allowance). It never offers a model that is not listed, and never computes cost or `left` from weights: it shows `left` from the server.
-- **A request names its model in the field `model`** of the chat request ([REQ:ai-calls](#req-ai-calls)): an `id` of the list. A request that names none, or names `auto`, runs on the default. An `id` is an opaque string a client never interprets.
-- **A question counts the weight of the model it ran on** against the allowance, in `used`; `questions` counts it once ([REQ:usage-record](#req-usage-record)).
+- **A request names its model in the field `model`** of the chat request ([REQ:ai-calls](#req-ai-calls)): an `id` of the list. A request that names none, or names `auto`, runs on the default. An `id` is an opaque string a client never interprets; it is also the name a client shows for the model.
+- **A question counts a weight** against the allowance, in `used`; `questions` counts it once ([REQ:usage-record](#req-usage-record)). Every chat call of one question names the same model. A question whose first admitted call is a chat call counts the weight of the model that call names. A question whose first admitted call is a decision call, which names no model, counts the weight of the default model; when a chat call of the same question then names a heavier model, the difference in weight is counted at that call, and a chat call that names a lighter or the same model counts nothing more.
 - **A model that is not in the list is refused** with reason `model_class` (403), whether its class is not included in the plan or the server does not know it. Nothing is counted.
-- **A model whose weight is above `ai.left` is refused** with reason `monthly` (429) and nothing is counted; a model of lower weight is still admitted. The refusal carries `left`, so a client can offer a lighter model.
+- **A call that would count more than `ai.left` is refused** with reason `monthly` (429) and nothing more is counted: a first call that names a model whose weight is above `left`, a decision call when the weight of the default model is above `left`, and a chat call whose model is heavier than the default one the question already counted, when `left` is below the difference. A model of lower weight is still admitted. The refusal carries `left`, so a client can offer a lighter model; the question already counted stays counted.
 - **Own key or own endpoint.** A person's own key or endpoint is no model of this list. The client calls it itself, from the person's machine or browser; it never sends the key or the address to this server, and a question answered this way is never counted or limited.
 
 Fixtures: `plan-response-free.json` (one model), `plan-response-pro.json` (three models in two classes, two weights, one default), `plan-response-pro-one-left.json` (`left` below the weight of one model), `refusal-model-class.json`, `refusal-quota-monthly-weight.json`.
@@ -262,10 +264,10 @@ Fixtures: `plan-response-free.json` (one model), `plan-response-pro.json` (three
 
 #### REQ: ai-calls
 
-The AI calls of a client are the public protocol of the package `ai/cloudproto` of `github.com/strongo/aichat`, on the API base the client is configured with (its origin, and the `/v0/` prefix; `GET /v0/datatug/plan` and `/v0/checkout/...` are on the same origin):
+The AI calls of a client are the public protocol of the package `ai/cloudproto` of `github.com/strongo/aichat`, on the API base the client is configured with (its origin, and the `/v0/` prefix). The base is given to a client outside this page, as a setting of the client, and no response of this contract carries it:
 
-- `POST /v0/ai/chat` (a stream of events), `POST /v0/ai/decision`, `GET /v0/ai/usage`.
-- A client sends `X-AI-Product: datatug` on every `/v0/ai/*` call; without it the DataTug allowance does not apply.
+- `POST /v0/ai/chat` (a stream of events), `POST /v0/ai/decision`, `POST /v0/ai/score`, `GET /v0/ai/usage`.
+- A client sends `X-AI-Product: datatug` on every `/v0/ai/*` call.
 - The model is the field `model` of the chat request body; `interactionId` is the field of the chat, decision and score request bodies that carries the question key ([REQ:question](#req-question)).
 - The allowance after an answer is in `usage.allowance` of the last event of a chat stream (`response.completed`) and in `allowance` of `GET /v0/ai/usage` ([REQ:allowance-on-the-wire](#req-allowance-on-the-wire)).
 - An error is an HTTP error with the body `{"error": {"code", "message"}}`, plus `limit` at a refusal ([REQ:refusal-body](#req-refusal-body)).
@@ -298,13 +300,13 @@ Security properties a client may rely on: a plan, a limit or a role is never rea
 
 #### REQ: account-header-needed
 
-A project may name the account it belongs to; where it names none, rule 4 applies, and a person with more than one candidate (their own paying plan and an organisation, or two organisations) draws on an organisation's pool only if the client names it. So a client sends `X-AI-Account: <the account in view>` on every `/v0/ai/*` call, when the account in view is one of `accounts` (a project of an account the person is not a member of has no header: the person's own account pays there), and a command-line client sends the account the person chose. `GET /v0/datatug/plan` lists the candidates in `accounts`, with `pays`, so that a client can ask the person once and remember the answer.
+A project may name the account it belongs to; where it names none, rule 4 applies, and a person with more than one candidate (their own paying plan and an organisation, or two organisations) draws on an organisation's pool only if the client names it. So a client sends `X-AI-Account: <the account in view>` on every `/v0/ai/*` call, when the account in view is one of `accounts` (a project of an account the person is not a member of has no header: the person's own account pays there), and a command-line client sends the account the person chose. `GET /v0/datatug/plan` lists the candidates in `accounts`, with `pays`, so that a client with no account in view can ask the person once and remember the answer.
 
 ### What a question is
 
 #### REQ: question
 
-One question is one request of a person: all the model calls that serve one message they sent, a decision call included.
+One question is one request of a person: all the model calls that serve one message they sent, a decision call included. A score call (`POST /v0/ai/score`) is a decision call: it carries the `interactionId` of its question, and counts, or is refused, as a decision call does ([REQ:models](#req-models)).
 
 - The **question key** is the interaction ID of the request (the `interactionId` field, [REQ:ai-calls](#req-ai-calls)) when the client sends a valid one (a UUID). A client sends the same ID on the decision call, on every chat call, and on a retry of the same message. Without a valid ID the server derives the key from a digest of the user ID, the product and the question text (the last user message of a chat request, the text of a decision request); only the digest is kept, never the text.
 - The question is counted once, when its first model call is admitted. One key covers a bounded number of calls, within a bounded time of the first (both set by configuration); the next call under the same key starts, and counts, a new question.
@@ -315,7 +317,7 @@ One question is one request of a person: all the model calls that serve one mess
 
 #### REQ: allowance-on-the-wire
 
-The last event of a chat stream (in `usage.allowance`) and `GET /v0/ai/usage` (in `allowance`) carry the allowance as `{unit, used, limit, resetsAt}`. When `unit` is `questions`, a client shows `limit - used` as what is left after each answer. While `ai.enforced` is `false` the unit may be another one; a client shows the unit it is given, and never compares a `used` with a `limit` of another unit.
+The last event of a chat stream (in `usage.allowance`) and `GET /v0/ai/usage` (in `allowance`) carry the allowance as `{unit, used, limit, resetsAt}`. When `unit` is `questions`, a client shows `max(0, limit - used)` as what is left after each answer. The allowance on the wire shows neither `capped` nor `blocked`: a client calls `GET /v0/datatug/plan` again after any refusal, and, when it does not listen to the documents ([REQ:direct-readers](#req-direct-readers)), also after each answer. While `ai.enforced` is `false` the unit may be another one; a client shows the unit it is given, and never compares a `used` with a `limit` of another unit.
 
 ### What a person is told when a question is refused
 
@@ -330,7 +332,7 @@ A refusal is an HTTP error with a JSON body:
 }
 ```
 
-`error.code` and `error.message` are the same as a client already handles; `error.message` is always a complete sentence that says what happened, what the person can do, and that the person's own key works; where a reset or a plan would help, it says when and where. A client that knows nothing of `limit` shows `error.message`. A client that meets a `limit.v` other than 1 shows `error.message` only. A client that knows `limit` may build its own sentence from the fields, and then still names the own-key option. A client must never parse `error.message`.
+`error.code` and `error.message` are the same as a client already handles; `error.message` is always a complete sentence that says what happened, what the person can do, and that the person's own key works; where a reset or a plan would help, it says when and where. A client that knows nothing of `limit` shows `error.message`. A client that meets a `limit.v` other than 1 shows `error.message` only. A client that knows `limit` may build its own sentence from the fields, and then still names the own-key option. A client must never parse `error.message`. A 403 that carries `limit` is a refusal, not a sign-in problem: on the decision routes too, a client reads `limit.reason` before it treats a 403 as an authentication failure.
 
 `limit`, present for the reasons of the table and absent for `rate_limited` and `upstream`:
 
@@ -421,7 +423,7 @@ The answer is 200 with `clientSecret`, `sessionId` and `mode` (the mode the sess
 
 A client shows `amount` and `offer` from the answer, not from its own tables.
 
-Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`.
+Fixtures: `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`.
 
 #### REQ: session-errors
 
@@ -442,7 +444,7 @@ Fixtures: `checkout-error-sign-in-required.json`, `checkout-error-not-available.
 
 #### REQ: after-payment
 
-The payment form is drawn from `clientSecret`; the checkout's own documentation covers drawing the form and the thank-you. The plan record follows the provider's event a moment later, so after the form completes the page calls `GET /v0/datatug/plan` every few seconds, for a bounded time, until the entry of `accounts` for the account bought for carries the bought plan (for the personal account or an existing organisation, the entry with that `accountId`; for a new organisation, until an organisation entry that was not there before appears), and says the plan is on its way if it still does not. A purchase made in test mode never changes the endpoint ([REQ:test-record](#req-test-record)). A person who bought for a new organisation learns its `accountId` from `accounts` of that answer.
+The payment form is drawn from `clientSecret`. Drawing the form and the thank-you is outside this contract: it is done by the checkout component of the page that hosts the purchase, and this page gives only the fields of the answer. The plan record follows the provider's event a moment later, so after the form completes the page calls `GET /v0/datatug/plan` every few seconds, for a bounded time, until the entry of `accounts` for the account bought for carries the bought plan (for the personal account or an existing organisation, the entry with that `accountId`; for a new organisation, until an organisation entry that was not there before appears), and says the plan is on its way if it still does not. A purchase made in test mode never changes the endpoint ([REQ:test-record](#req-test-record)). A person who bought for a new organisation learns its `accountId` from `accounts` of that answer.
 
 ### The fixtures
 
@@ -463,10 +465,10 @@ A fixture is changed here first, with `CHECKSUMS`, and then copied.
 | Plan record | `plan-record-pro-active.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json` | The documents of [REQ:plan-record](#req-plan-record). |
 | Count | `ai-usage-record.json`, `ai-usage-record-capped.json` | The documents of [REQ:usage-record](#req-usage-record); the first has `used` above `questions`. |
 | State table | `state-table.json` | The cases of [REQ:state-table](#req-state-table). |
-| Plan endpoint | `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model; a Pro owner with three models in two classes; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
+| Plan endpoint | `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model; a Pro owner with three models in two classes; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription, with an organisation whose plan ended among `accounts`; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
 | Refusals | `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-rate-limited.json`, `refusal-upstream.json` | One body per row of [REQ:refusal-body](#req-refusal-body). The status of each is in that table. |
 | Offer | `offer.json`, `offer-none-left.json` | [REQ:offer-endpoint](#req-offer-endpoint). |
-| Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
+| Purchase | `checkout-session-request-personal.json`, `checkout-session-request-organisation-new.json`, `checkout-session-request-organisation-existing.json`, `checkout-session-answer-personal.json`, `checkout-session-answer-organisation-new.json`, `checkout-session-answer-list-price.json`, `checkout-session-answer-no-offer.json`, `checkout-error-sign-in-required.json`, `checkout-error-not-available.json`, `checkout-error-not-account-admin.json`, `checkout-error-plan-not-for-account.json`, `checkout-error-already-subscribed.json`, `checkout-error-already-subscribed-no-session.json`, `checkout-error-offer-busy.json` | [REQ:session-request](#req-session-request), [REQ:session-answer](#req-session-answer), [REQ:session-errors](#req-session-errors). The status of each error is in that table. |
 
 #### REQ: numbers-are-configuration
 
@@ -512,8 +514,8 @@ Then it shows that the organisation's pool pays, shows `ai.left` of the pool, do
 
 ### AC: several-accounts
 
-Given the answer in `plan-response-several-accounts.json`, where two entries of `accounts` have `pays: true`
-When a client is about to send its first AI call
+Given a client with no account in view and the answer in `plan-response-several-accounts.json`, where two entries of `accounts` have `pays: true`
+When the client is about to send its first AI call
 Then it asks the person once which account should pay, remembers the answer, and sends it as `X-AI-Account` on every `/v0/ai/*` call; it passes `account` to the plan endpoint only with an `accountId` taken from `accounts`.
 
 ### AC: bad-account
