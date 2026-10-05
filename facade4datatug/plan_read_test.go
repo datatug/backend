@@ -256,12 +256,12 @@ func TestPersonalPlanConfigAndInputsFailClosed(t *testing.T) {
 	if _, err := ResolvePersonalPayer(context.Background(), "", "", nil); !errors.Is(err, ErrPersonalAccountUnavailable) {
 		t.Fatal(err)
 	}
-	s, _, p, u, a, _ := validPlanTestService()
+	s, _, _, _, _, _ := validPlanTestService()
 	s.Directory = nil
 	if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) {
 		t.Fatal(err)
 	}
-	s, _, p, u, a, _ = validPlanTestService()
+	s, _, p, u, a, _ := validPlanTestService()
 	base := s.Config.(testConfigReader).config
 	badConfigs := []struct {
 		name  string
