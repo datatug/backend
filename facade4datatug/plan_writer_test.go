@@ -294,8 +294,15 @@ func TestAccountPlanWriterRejectsMalformedAndObsolete(t *testing.T) {
 	if got, err = f.writer.Apply(context.Background(), f.effect); err == nil || got != "" {
 		t.Fatal(got, err)
 	}
-	if _, err := f.db.Exists(context.Background(), models4datatug.NewCurrentPlanKey("personal-1")); err != nil {
-		t.Fatal(err)
+	for _, key := range []*record.Key{
+		models4datatug.NewCurrentPlanKey("personal-1"),
+		models4datatug.NewPlanApplicationKey("live", "datatug", "personal-1"),
+		models4datatug.NewPaidMoneyMonthKey("live", "datatug", "personal-1", "2026-10"),
+	} {
+		exists, err := f.db.Exists(context.Background(), key)
+		if err != nil || exists {
+			t.Fatal(key, exists, err)
+		}
 	}
 }
 
