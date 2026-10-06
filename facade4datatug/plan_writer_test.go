@@ -152,8 +152,12 @@ type planWriterFixture struct {
 
 func newPlanWriterFixture(t *testing.T) *planWriterFixture {
 	t.Helper()
+	return newPlanWriterFixtureWithDB(t, dalgo2memory.New(dalgo2memory.FirestoreProfile()))
+}
+
+func newPlanWriterFixtureWithDB(t *testing.T, db dal.DB) *planWriterFixture {
+	t.Helper()
 	ctx := context.Background()
-	db := dalgo2memory.New(dalgo2memory.FirestoreProfile())
 	fence := PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "personal-1", OwnerSubscriptionID: "sub-A", OwnerGeneration: 1, SubscriptionRevision: 1}
 	if err := db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		return tx.Set(ctx, record.NewRecordWithData(planOwnerTestKey(), &planOwnerTestRecord{Fence: fence, Money: PlanMoneyFence{IngestEpoch: 0, Unresolved: true}, Buyer: "buyer-A", Allowed: true}))
