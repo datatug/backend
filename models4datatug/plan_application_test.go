@@ -2,7 +2,6 @@ package models4datatug
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -19,9 +18,9 @@ func TestPrivatePlanKeysAndPayload(t *testing.T) {
 			t.Fatal("private key collision", other)
 		}
 	}
-	if strings.Contains(app.String(), "/spaces/") || strings.Contains(month.String(), "/spaces/") ||
-		strings.Contains(app.String(), "/users/") || strings.Contains(month.String(), "/users/") {
-		t.Fatal(app, month)
+	if app.Parent() != nil || month.Parent() != nil ||
+		app.Collection() != PlanApplicationCollection || month.Collection() != PaidMoneyMonthCollection {
+		t.Fatal("private records must use dedicated root collections", app, month)
 	}
 	for _, v := range []any{
 		PlanApplication{V: 1, Mode: "live", Family: "datatug", AccountID: "space-A"},
