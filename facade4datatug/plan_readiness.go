@@ -39,7 +39,7 @@ func (r PurchaseReadiness) ReadyForPurchase(ctx context.Context, req PurchaseRea
 		return false, nil
 	}
 	config, err := r.Config.ReadPlanConfig(ctx, req.AccountID, now)
-	if err != nil || validateConfig(config) != nil {
+	if err != nil || ValidatePlanConfig(config) != nil {
 		return false, err
 	}
 	var ready bool

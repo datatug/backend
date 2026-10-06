@@ -177,7 +177,7 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 	}
 	now := s.Clock.Now().UTC()
 	config, err := s.Config.ReadPlanConfig(ctx, account.ID, now)
-	if err != nil || validateConfig(config) != nil {
+	if err != nil || ValidatePlanConfig(config) != nil {
 		return PlanResponse{}, ErrPlanUnavailable
 	}
 	periodID := now.Format("2006-01")
@@ -334,6 +334,13 @@ func validateModels(models []PlanModel, limits models4datatug.PlanLimits) error 
 	}
 	return nil
 }
+
+// ValidatePlanConfig checks the shared plan settings before they are used for
+// plan reads, purchase readiness, or checkout activation.
+func ValidatePlanConfig(config PlanConfig) error {
+	return validateConfig(config)
+}
+
 func validateConfig(config PlanConfig) error {
 	if config.DailyLimit <= 0 || config.ActiveGrace < 0 || config.PastDueGrace <= config.ActiveGrace || config.UpgradeURL == "" {
 		return ErrPlanUnavailable

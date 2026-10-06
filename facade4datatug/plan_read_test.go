@@ -290,6 +290,33 @@ func TestPersonalPlanPaidAccessBoundaries(t *testing.T) {
 	assertPlan("free")
 }
 
+func TestValidatePlanConfig(t *testing.T) {
+	service, _, _, _, _, _ := validPlanTestService()
+	valid := service.Config.(testConfigReader).config
+	if err := ValidatePlanConfig(valid); err != nil {
+		t.Fatalf("valid config: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		alter func(*PlanConfig)
+	}{
+		{"daily", func(c *PlanConfig) { c.DailyLimit = 0 }},
+		{"free", func(c *PlanConfig) { c.FreeFirstMonthLimits.Contributors = 0 }},
+		{"later free", func(c *PlanConfig) { c.FreeLaterMonthLimits.AIQuestions = -1 }},
+		{"pro", func(c *PlanConfig) { c.ProLimits.ProjectContributors = nil }},
+		{"free models", func(c *PlanConfig) { c.FreeModels = nil }},
+		{"pro models", func(c *PlanConfig) { c.ProModels = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := valid
+			tc.alter(&config)
+			if err := ValidatePlanConfig(config); !errors.Is(err, ErrPlanUnavailable) {
+				t.Fatalf("want plan unavailable, got %v", err)
+			}
+		})
+	}
+}
+
 func TestPersonalPlanConfigAndInputsFailClosed(t *testing.T) {
 	if _, err := ResolvePersonalPayer(context.Background(), "", "", nil); !errors.Is(err, ErrPersonalAccountUnavailable) {
 		t.Fatal(err)
