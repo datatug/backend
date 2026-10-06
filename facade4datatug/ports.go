@@ -23,6 +23,8 @@ type IDGenerator interface {
 // independently bind it to that context when preparing Space authority.
 type SharedProjectCreateBinding struct {
 	ActorID, SpaceID, CommandID, RequestDigest string
+	// Paid binding is server-resolved. Legacy ownership-only commands leave it empty.
+	PayerID, Mode, Product string
 }
 
 // SharedProjectCreateAuthority is supplied by the host using released Core

@@ -53,6 +53,7 @@ type SharedProjectService struct {
 	ids       IDGenerator
 	authority SharedProjectCreateAuthority
 	now       func() time.Time
+	paid      *PaidSharedProjectOptions
 }
 
 func sharedProjectPortAbsent(v any) bool {
@@ -87,6 +88,17 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.CommandID,
 		RequestDigest: models4datatug.SharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title),
 	}
+	if s.paid != nil {
+		account, err := ResolvePersonalPayer(ctx, command.ActorID, "", s.paid.Directory)
+		if err != nil {
+			return result, ErrSharedProjectUnauthorized
+		}
+		if models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
+			return result, ErrSharedProjectUnauthorized
+		}
+		binding.PayerID, binding.Mode, binding.Product = account.ID, s.paid.Mode, s.paid.Product
+		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
+	}
 	prepared, err := s.authority.PrepareSharedProjectCreate(ctx, binding)
 	if err != nil {
 		return result, fmt.Errorf("%w: %w", ErrSharedProjectUnauthorized, err)
@@ -110,6 +122,14 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		if err := prepared.Validator.ValidateSharedProjectCreateInTransaction(txCtx, tx, binding, observedAt); err != nil {
 			return fmt.Errorf("%w: %w", ErrSharedProjectUnauthorized, err)
 		}
+		var admission *projectAdmissionState
+		if s.paid != nil {
+			var err error
+			admission, err = s.readPaidAdmission(txCtx, tx, binding, observedAt)
+			if err != nil {
+				return err
+			}
+		}
 		receiptRecord, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(command.SpaceID, command.CommandID)
 		if err := tx.Get(txCtx, receiptRecord); err != nil && !record.IsNotFound(err) {
 			return err
@@ -121,6 +141,14 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			if receipt.SpaceID != command.SpaceID || receipt.CommandID != command.CommandID || receipt.ActorID != command.ActorID || receipt.RequestDigest != binding.RequestDigest {
 				return ErrSharedProjectConflict
 			}
+			if receipt.PayerID != binding.PayerID || receipt.Mode != binding.Mode || receipt.Product != binding.Product {
+				return ErrSharedProjectConflict
+			}
+			if admission != nil {
+				if err := admission.verifyReplay(txCtx, tx, binding, receipt.ProjectID); err != nil {
+					return err
+				}
+			}
 			result = models4datatug.SharedProjectRef{StoreID: models4datatug.FirestoreStoreID, SpaceID: receipt.SpaceID, ProjectID: receipt.ProjectID}
 			return nil
 		}
@@ -128,6 +156,11 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		// so a temporary entropy failure must not prevent response-loss recovery.
 		if idErr != nil {
 			return fmt.Errorf("generate shared project ID: %w", idErr)
+		}
+		if admission != nil {
+			if err := admission.readNewAllocation(txCtx, tx, binding, projectID); err != nil {
+				return err
+			}
 		}
 		// All authority and command reads precede the first write. No user index
 		// or Space/module record is mutated by this domain command.
@@ -138,12 +171,18 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		*receipt = models4datatug.SharedProjectCreateReceipt{
 			Version: 1, ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.CommandID,
 			Title: command.Title, RequestDigest: binding.RequestDigest, ProjectID: projectID, CreatedAt: observedAt,
+			PayerID: binding.PayerID, Mode: binding.Mode, Product: binding.Product,
 		}
 		if err := tx.Insert(txCtx, projectRecord); err != nil {
 			return fmt.Errorf("insert shared project: %w", err)
 		}
 		if err := tx.Insert(txCtx, receiptRecord); err != nil {
 			return fmt.Errorf("insert shared project create receipt: %w", err)
+		}
+		if admission != nil {
+			if err := admission.writeAllocation(txCtx, tx, binding, projectID, observedAt); err != nil {
+				return err
+			}
 		}
 		result = models4datatug.SharedProjectRef{StoreID: models4datatug.FirestoreStoreID, SpaceID: command.SpaceID, ProjectID: projectID}
 		return nil
