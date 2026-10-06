@@ -54,6 +54,20 @@ type testAdmissionReader struct {
 	instants []time.Time
 }
 
+type testCallerAdmissionReader struct {
+	state               AdmissionState
+	err                 error
+	callerID, accountID string
+	instant             time.Time
+	calls               int
+}
+
+func (a *testCallerAdmissionReader) ReadAdmissionForCaller(_ context.Context, callerID, accountID string, now time.Time) (AdmissionState, error) {
+	a.calls++
+	a.callerID, a.accountID, a.instant = callerID, accountID, now
+	return a.state, a.err
+}
+
 func (a *testAdmissionReader) ReadAdmission(_ context.Context, _ string, now time.Time) (AdmissionState, error) {
 	a.instants = append(a.instants, now)
 	return a.state, a.err
@@ -515,5 +529,45 @@ func TestPersonalPlanUsesAuthoritativeFirstAdmittedMonth(t *testing.T) {
 	ended := read()
 	if ended.AI.Limit != 4 {
 		t.Fatal(ended)
+	}
+}
+
+func TestPersonalPlanCallerAdmissionBinding(t *testing.T) {
+	s, _, plans, _, legacy, clock := validPlanTestService()
+	caller := &testCallerAdmissionReader{state: AdmissionState{TodayUsed: 9}}
+	s.CallerAdmission = caller
+	clock.now = time.Date(2026, 3, 20, 10, 0, 0, 230000000, time.FixedZone("offset", 3600))
+	got, err := s.Read(context.Background(), "caller", "personal-1", "")
+	if err != nil || got.AI.Today.Used != 9 || caller.calls != 1 || caller.callerID != "caller" || caller.accountID != "personal-1" || !caller.instant.Equal(clock.now.UTC()) || caller.instant.Location() != time.UTC || len(legacy.instants) != 0 {
+		t.Fatal(got, err, caller, legacy.instants)
+	}
+	if _, err := s.Read(context.Background(), "caller", "foreign", ""); !errors.Is(err, ErrForeignAccount) || caller.calls != 1 || len(plans.ids) != 1 {
+		t.Fatal(err, caller.calls, plans.ids)
+	}
+
+	caller.err = errors.New("daily count unavailable")
+	if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) || len(legacy.instants) != 0 {
+		t.Fatal(err, legacy.instants)
+	}
+	caller.err = nil
+	caller.state.TodayUsed = -1
+	if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) {
+		t.Fatal(err)
+	}
+	caller.state.TodayUsed = 17
+	got, err = s.Read(context.Background(), "caller", "", "")
+	if err != nil || got.AI.Today.Used != 17 || got.AI.Blocked == nil || *got.AI.Blocked != "daily" {
+		t.Fatal(got, err)
+	}
+
+	s.CallerAdmission, s.Admission = nil, nil
+	if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) {
+		t.Fatal(err)
+	}
+	s.Admission = legacy // Published legacy consumers still use the old port.
+	legacy.state.TodayUsed = 5
+	got, err = s.Read(context.Background(), "caller", "", "")
+	if err != nil || got.AI.Today.Used != 5 || len(legacy.instants) != 1 {
+		t.Fatal(got, err, legacy.instants)
 	}
 }
