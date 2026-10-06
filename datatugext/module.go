@@ -25,3 +25,14 @@ func ExtensionWithPlan(ids facade4datatug.IDGenerator, plan api4datatug.PlanRout
 		}),
 	)
 }
+
+// ExtensionWithOptions is a separate, additive composition surface. Existing
+// hosts using ExtensionWithPlan keep shared creation unregistered.
+func ExtensionWithOptions(ids facade4datatug.IDGenerator, options api4datatug.RouteOptions) extension.Config {
+	return extension.NewExtension(
+		const4datatug.ExtensionID,
+		extension.RegisterRoutes(func(handle extension.HTTPHandleFunc) {
+			api4datatug.RegisterHttpRoutesWithOptions(handle, ids, options)
+		}),
+	)
+}
