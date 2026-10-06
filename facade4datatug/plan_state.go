@@ -15,6 +15,7 @@ type PlanFacts struct {
 	PaidUntil                 *time.Time                 `json:"paidUntil,omitempty"`
 	EndsAt                    *time.Time                 `json:"endsAt,omitempty"`
 	LastInvoiceRefundedInFull bool                       `json:"lastInvoiceRefundedInFull"`
+	TerminalFullRefund        bool                       `json:"terminalFullRefund,omitempty"`
 	RefundedAt                *time.Time                 `json:"refundedAt,omitempty"`
 	FirstPaidAt               *time.Time                 `json:"firstPaidAt,omitempty"`
 	Founding                  bool                       `json:"founding"`
@@ -33,6 +34,15 @@ type PlanStateResult struct {
 // This slice grants paid access only to personal Pro; ended states remain
 // mappable even when a provider reports a now-unsupported tier.
 func PlanStateFor(f PlanFacts) PlanStateResult {
+	if f.AccountKind == "personal" && f.Tier == "pro" && f.TerminalFullRefund {
+		switch f.ProviderStatus {
+		case "active", "trialing", "past_due", "unpaid", "paused", "canceled":
+			return PlanStateResult{Outcome: "write", Record: &models4datatug.PlanRecord{
+				V: 1, Plan: "free", Status: "ended", Period: "none", PaidUntil: f.PaidUntil,
+				EndedReason: "refunded", Founding: false,
+			}}
+		}
+	}
 	ended := ""
 	switch f.ProviderStatus {
 	case "unpaid":
@@ -65,7 +75,10 @@ func PlanStateFor(f PlanFacts) PlanStateResult {
 	}
 	if f.ProviderStatus == "active" || f.ProviderStatus == "trialing" || f.ProviderStatus == "past_due" {
 		if f.LastInvoiceRefundedInFull {
-			return PlanStateResult{Outcome: "leave"}
+			return PlanStateResult{Outcome: "write", Record: &models4datatug.PlanRecord{
+				V: 1, Plan: "free", Status: "ended", Period: "none", PaidUntil: f.PaidUntil,
+				EndedReason: "refunded", Founding: false,
+			}}
 		}
 		return PlanStateResult{Outcome: "write", Record: &models4datatug.PlanRecord{
 			V: 1, Plan: "pro", Status: f.ProviderStatus, Period: f.Period,

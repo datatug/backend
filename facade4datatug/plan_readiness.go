@@ -84,9 +84,9 @@ func effectiveProForPurchase(plan models4datatug.PlanRecord, config PlanConfig, 
 	if plan.Plan != "pro" || plan.Limits == nil || plan.AIExtraQuestions < 0 || !paidAccessHolds(&plan, now, config) {
 		return false
 	}
-	limits := clonePlanLimits(*plan.Limits)
-	if limits.ProjectContributors == nil {
-		limits.ProjectContributors = config.ProLimits.ProjectContributors
+	limits, err := resolvedProLimits(*plan.Limits, config.ProLimits)
+	if err != nil {
+		return false
 	}
 	return limits.AIQuestions <= math.MaxInt64-plan.AIExtraQuestions &&
 		validateLimits(limits) == nil && validateModels(config.ProModels, limits) == nil

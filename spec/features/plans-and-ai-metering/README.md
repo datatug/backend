@@ -63,6 +63,8 @@ The plan of an account is the document `spaces/{accountId}/ext/datatug/plan/curr
 | `limits.contributors` | number | The cap on contributors. |
 | `limits.projectGuests` | number | People besides the owner in each project of a personal account. |
 | `limits.projectContributors` | number, optional | Contributors in each project, including its owner. Additive to `projectGuests`, whose existing meaning is unchanged. A personal Pro grant may carry this field; a client that does not know it ignores it. |
+| `limits.protectedProjects` | number, optional | Maximum invite-only protected projects. Free is `0`; personal Pro is supplied by reviewed configuration. Absent in an older Pro record means the server resolves the complete pair from that configuration. |
+| `limits.protectedProjectUsers` | number, optional | Maximum authenticated users per protected project, including its owner. It is paired with `protectedProjects`; a partial or invalid stored pair is refused. A complete valid historical Pro pair remains authoritative when current configuration later changes. |
 | `limits.aiQuestions` | number | Included AI questions per calendar month. `0` means none, never "no limit". |
 | `limits.aiModelClasses` | array of string | The model classes the plan includes: `fast` and `standard`. Others may be added, and a client tolerates an unknown class. A client offers only the models that `ai.models` lists ([REQ:models](#req-models)). |
 | `limits.aiPaysFor` | string | `owner` (the allowance is the owner's alone) or `contributors` (one pool for the contributors of the organisation). |
@@ -71,7 +73,9 @@ The plan of an account is the document `spaces/{accountId}/ext/datatug/plan/curr
 
 The record holds no payment-provider identifier, no amount, no email and no member list. A missing document, or `plan: free`, is the Free plan. The Free numbers are configuration: a reader takes them from `ai` and `limits` of the endpoint ([REQ:plan-endpoint-response](#req-plan-endpoint-response)), never from a constant and never from a document.
 
-Fixtures: `plan-record-pro-active.json`, `plan-record-pro-project-contributors.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json`.
+The current personal Pro catalogue grants five protected projects and five authenticated users per protected project, including the owner; Free grants zero of each. The older `contributors`, `projectGuests` and `projectContributors` fields remain readable for compatibility; they do not define the protected-project quota. Private projects are owner-only and public projects have no project-count or editing-user cap. These plan fields describe entitlements; project access and membership enforcement are separate server work.
+
+Fixtures: `plan-record-pro-active.json`, `plan-record-pro-project-contributors.json`, `plan-record-pro-protected.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json`.
 
 #### REQ: usage-record
 
@@ -136,10 +140,11 @@ The record follows the state of the subscription at the payment provider through
 | `paidUntil` | timestamp, optional | The end of the last paid period. |
 | `endsAt` | timestamp, optional | A scheduled cancellation. |
 | `lastInvoiceRefundedInFull` | boolean | Whether the last paid invoice was refunded in full. |
+| `terminalFullRefund` | boolean, optional | Durable proof that the current source subscription was fully refunded. Once true, a later paid invoice on that subscription does not restore Pro. The accepted effect and its owner are verified in one transaction before applying it. |
 | `refundedAt` | timestamp, optional | When. The function ignores it: it decides no row and no field of a record. |
 | `firstPaidAt` | timestamp, optional | The time of the first payment. The function ignores it as well; absent when the subscription was never paid. |
 | `founding` | boolean | The Founding discount is on the subscription. |
-| `grants` | object | The limits the plan allows: `contributors`, `projectGuests`, optional `projectContributors`, `aiQuestions`, `aiModelClasses`, `aiPaysFor`, as in `limits` of [REQ:plan-record](#req-plan-record). |
+| `grants` | object | The limits the plan allows: legacy `contributors`, `projectGuests`, optional `projectContributors`, paired optional `protectedProjects` and `protectedProjectUsers`, `aiQuestions`, `aiModelClasses`, `aiPaysFor`, as in `limits` of [REQ:plan-record](#req-plan-record). |
 
 It has three outcomes: write a record; leave the record as it is; refuse, with a reason, and leave the record as it is. A refusal is also reported to the operator, which this contract does not describe. `refundedAt` and `firstPaidAt` are passed so that a caller hands over what it read; no outcome depends on them. The outcomes are:
 
@@ -154,22 +159,23 @@ It has three outcomes: write a record; leave the record as it is; refuse, with a
 | `canceled`, last paid invoice refunded in full | write | `ended`, `endedReason: refunded` | `free` | Free |
 | `paused` | write | `ended`, `endedReason: paused` | `free` | Free |
 | `incomplete`, `incomplete_expired` | leave | | | no change (never paid) |
-| `active`, `trialing` or `past_due` and the last paid invoice refunded in full | leave | | | no change: a refund alone ends nothing |
+| `active`, `trialing` or `past_due` and the last paid invoice refunded in full, or a latched `terminalFullRefund` | write | `ended`, `endedReason: refunded` | `free` | Free immediately |
 | `tier` does not fit `accountKind` (a tier for organisations on a personal account, or the reverse) | refuse, reason `tier_not_for_account` | | | no change |
 | `tier` empty | refuse, reason `unknown_tier` | | | no change |
 | `providerStatus` is none of the eight listed | refuse, reason `unknown_status` | | | no change: nothing is written from a status nobody mapped; a record that exists holds only as long as [REQ:stale-rule](#req-stale-rule) lets it |
 
 The rows can overlap (an ending status with a tier that does not fit; `incomplete` with an empty tier). The function applies them in this order, and the first that matches decides:
 
-1. `providerStatus` is `unpaid`, `canceled` or `paused`: write the ended record, whatever the tier. The reason is `refunded` only for `canceled` with the last paid invoice refunded in full; `unpaid` and `paused` keep their own reason.
-2. `providerStatus` is `incomplete` or `incomplete_expired`: leave.
-3. `tier` is empty: refuse, `unknown_tier`.
-4. `tier` does not fit `accountKind`: refuse, `tier_not_for_account`.
-5. `providerStatus` is `active`, `trialing` or `past_due` and `lastInvoiceRefundedInFull` is true: leave.
-6. `providerStatus` is `active`, `trialing` or `past_due`: write.
-7. Any other `providerStatus`: refuse, reason `unknown_status`.
+1. A personal Pro subscription with latched `terminalFullRefund` in a mapped paid or ended provider status: write Free/ended/refunded, regardless of a later invoice.
+2. `providerStatus` is `unpaid`, `canceled` or `paused`: write the ended record, whatever the tier. Without a terminal latch, the reason is `refunded` only for `canceled` with the last paid invoice refunded in full; `unpaid` and `paused` keep their own reason.
+3. `providerStatus` is `incomplete` or `incomplete_expired`: leave.
+4. `tier` is empty: refuse, `unknown_tier`.
+5. `tier` does not fit `accountKind`: refuse, `tier_not_for_account`.
+6. `providerStatus` is `active`, `trialing` or `past_due` and `lastInvoiceRefundedInFull` is true: write Free/ended/refunded.
+7. `providerStatus` is `active`, `trialing` or `past_due`: write.
+8. Any other `providerStatus`: refuse, reason `unknown_status`.
 
-A refund is a reason an ended record carries, never a state of its own: a plan ends only when the subscription ends. The refund and the cancellation may arrive in either order; the function sees the same facts either way.
+A complete full refund ends Pro access immediately, even if the provider still reports an active subscription. A partial or unproved refund does not. The terminal latch retains this result through later subscription snapshots. This public mapping does not cancel a provider subscription or discharge money liabilities.
 
 A written record, in every row: `v` is `1`; `plan`, `status`, `period`, `paidUntil` (when the fact is present), `founding` and `limits` are as in the table; `limits` is the `grants` fact. `endsAt` is written when present in the facts of a non-ended record, and never on an ended record. An ended record has `plan: free`, `period: none`, `founding: false` and no `limits`, and carries `endedReason` and the `paidUntil` of the facts when present. The function does not set `updatedAt` or `aiExtraQuestions`: the writer stamps the first and keeps the second.
 
@@ -261,7 +267,7 @@ In the initial personal-only implementation, `accounts` has exactly one entry: t
 
 While `ai.enforced` is `true`, a person can start a question with a model of weight `w` when `ai.blocked` is `null` and `ai.left` is at least `w`. For an existing question, only a positive difference above its heaviest previously admitted weight needs room in `ai.left`; permission and the other guards still apply on every call. A client shows the plan, the account that pays, and `ai.left` of `ai.limit` with the reset date, and, while `ai.blocked` is not null, the reason. It does not compute any of those.
 
-Fixtures: `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-project-contributors.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`.
+Fixtures: `plan-response-free.json`, `plan-response-free-protected.json`, `plan-response-pro.json`, `plan-response-pro-project-contributors.json`, `plan-response-pro-protected.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`.
 
 #### REQ: models
 
@@ -398,7 +404,7 @@ Fixtures: `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`
 ```
 
 - `percentOff`, `places` and `left` are numbers set by the offer; the ones above are made up.
-- `left = max(0, places - activeBuyers)`, where `activeBuyers` is the number of distinct buyers with at least one qualifying live paid DataTug subscription, whether or not that subscription has this offer. A person with two qualifying subscriptions counts once; an invited buyer counts once. A fully refunded subscription that has not effectively ended remains active for this conservative count until its end is confirmed. When the count falls, new buyers may claim a newly available place while the offer is running. Existing subscription grants and already quoted payment forms keep their terms.
+- `left = max(0, places - activeBuyers)`, where `activeBuyers` is the number of distinct buyers with at least one qualifying live paid DataTug subscription, whether or not that subscription has this offer. A person with two qualifying subscriptions counts once; an invited buyer counts once. A proved full refund ends that subscription's Pro service immediately for this count, even if the provider still reports it active; a partial or unproved refund does not. Another qualifying paid subscription keeps the buyer counted. When the count falls, new buyers may claim a newly available place while the offer is running. Existing subscription grants and already quoted payment forms keep their terms.
 - The public `left` is a snapshot of active buyers, not the number of unreserved payment forms. A checkout reservation protects an issued quote even while payment is pending; at the last available capacity a new request can receive `offer_busy` while public `left` is positive. A reservation is released only after its predecessor form is confirmed terminal and unpaid. The checkout answer, not this cached snapshot, decides whether a particular buyer gets the offer.
 - `open` is `false` when no place is left or the offer is not running. A previously issued full-price form does not gain a discount merely because the count later falls: its quoted amount remains authoritative. The buyer may keep that form or close and reconcile it as terminal and unpaid before starting a newly eligible checkout.
 - It needs no sign-in and reveals nothing about any customer. A browser may call it from the storefront's own origins. It answers with `Cache-Control: public` and a maximum age of one minute: the page shows a number, and the checkout decides. A person who presses Subscribe when the last place has just gone is told so before the payment form ([REQ:session-answer](#req-session-answer)).
@@ -476,7 +482,7 @@ The payment form is drawn from `clientSecret`. The checkout page draws the form 
 
 `testdata/contract/` holds one JSON fixture per shape of this page, each named in this page, and `CHECKSUMS`: one line per fixture, `<SHA-256 of the file as 64 lower-case hex digits>`, two spaces, the file name, sorted by name, ending with a line feed (`shasum -a 256 -c CHECKSUMS` reads it). The test of `contract4datatug/contract_test.go` fails when a fixture is not valid JSON, is not listed, is listed and missing, or does not match its digest. It reads nothing but the fixtures. A second test, `contract4datatug/page_test.go`, fails when a fixture is not named in this page; it checks this repository's own page and is not copied.
 
-The original fixture files and their digests remain unchanged as wider version-1 compatibility examples. New personal Pro `projectContributors`, `checkout_resolving` and frozen discount/reservation examples are additive; none changes an existing fixture's bytes.
+The original plan and checkout example fixtures remain version-1 compatibility examples. The `state-table.json` fixture changes with the full-refund policy; its digest changes accordingly. New personal Pro `projectContributors`, protected-project, `checkout_resolving` and frozen discount/reservation examples are additive.
 
 A repository that uses the fixtures copies the whole directory and `contract_test.go`, byte for byte, and runs the same test against its copy. The layout a copy needs:
 
@@ -488,10 +494,10 @@ A fixture is changed here first, with `CHECKSUMS`, and then copied.
 
 | Group | Fixtures | What they show |
 |---|---|---|
-| Plan record | `plan-record-pro-active.json`, `plan-record-pro-project-contributors.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json` | The documents of [REQ:plan-record](#req-plan-record), including the additive personal project-contributor allowance. |
+| Plan record | `plan-record-pro-active.json`, `plan-record-pro-project-contributors.json`, `plan-record-pro-protected.json`, `plan-record-team-cancel-scheduled.json`, `plan-record-pro-past-due.json`, `plan-record-ended-refunded.json` | The documents of [REQ:plan-record](#req-plan-record), including the paired protected-project allowance. |
 | Count | `ai-usage-record.json`, `ai-usage-record-capped.json` | The documents of [REQ:usage-record](#req-usage-record); the first has `used` above `questions`. |
 | State table | `state-table.json` | The cases of [REQ:state-table](#req-state-table). |
-| Plan endpoint | `plan-response-free.json`, `plan-response-pro.json`, `plan-response-pro-project-contributors.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model; a Pro owner with three models in two classes; additive personal Pro project-contributor allowance; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription, with an organisation whose plan ended among `accounts`; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
+| Plan endpoint | `plan-response-free.json`, `plan-response-free-protected.json`, `plan-response-pro.json`, `plan-response-pro-project-contributors.json`, `plan-response-pro-protected.json`, `plan-response-pro-one-left.json`, `plan-response-team-member.json`, `plan-response-several-accounts.json`, `plan-response-capped.json`, `plan-response-used-up.json`, `plan-response-unverified.json`, `plan-response-ended.json`, `plan-response-stale.json`, `plan-response-observing.json`, `plan-error-not-a-member.json` | A Free person with one model and an explicit zero protected-project pair; a Pro owner with three models in two classes and an explicit protected-project pair; legacy project-contributor allowance; a Pro owner with one question left; a member of an organisation; a person with two accounts that could pay; an account stopped for the month; a Free month used up (`blocked` is `null`); a sign-in that is not trusted; an ended subscription, with an organisation whose plan ended among `accounts`; a record that no longer holds (`effectivePlan` differs); a server that only observes (`ai.enforced` false); the 403. |
 | Refusals | `refusal-quota-monthly-free.json`, `refusal-quota-monthly-member.json`, `refusal-quota-monthly-weight.json`, `refusal-quota-capped.json`, `refusal-quota-daily.json`, `refusal-quota-free-budget.json`, `refusal-unverified.json`, `refusal-model-class.json`, `refusal-too-large.json`, `refusal-question-context-changed.json`, `refusal-rate-limited.json`, `refusal-upstream.json` | One body per row of [REQ:refusal-body](#req-refusal-body). The status of each is in that table. |
 | Question admission | `question-admissions.json`, `question-context.json` | Heaviest weight, cross-month deltas and settlement, generation reuse, immutable payer and product, membership checks and refusal without a charge. |
 | Offer | `offer.json`, `offer-none-left.json` | [REQ:offer-endpoint](#req-offer-endpoint). |

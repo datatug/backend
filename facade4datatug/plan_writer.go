@@ -116,7 +116,7 @@ func (w AccountPlanWriter) Apply(ctx context.Context, effect AccountPlanEffect) 
 				if w.Limits == nil {
 					return ErrPlanEffectUnproved
 				}
-				snapshot, resolveErr := w.Limits.ResolveProLimits(effect.PlanID, effect.Grants)
+				snapshot, resolveErr := w.Limits.ResolveProLimits(effect.PlanID, clonePlanEffectGrants(effect.Grants))
 				if resolveErr != nil {
 					return resolveErr
 				}
@@ -275,12 +275,16 @@ func mapPlanEffect(effect AccountPlanEffect, previous models4datatug.PlanApplica
 		}
 		return PlanStateResult{Outcome: "leave"}, nil
 	}
-	fullRefund, err := provedLastServiceRefund(effect)
-	if err != nil {
-		return PlanStateResult{}, err
+	fullRefund := false
+	if !effect.TerminalFullRefund {
+		var err error
+		fullRefund, err = provedLastServiceRefund(effect)
+		if err != nil {
+			return PlanStateResult{}, ErrPlanEffectUnproved
+		}
 	}
 	facts := PlanFacts{AccountKind: effect.AccountKind, Tier: effect.Tier, Period: effect.Period,
-		ProviderStatus: effect.Status, LastInvoiceRefundedInFull: fullRefund, Founding: effect.LaunchGrant}
+		ProviderStatus: effect.Status, LastInvoiceRefundedInFull: fullRefund, TerminalFullRefund: effect.TerminalFullRefund, Founding: effect.LaunchGrant}
 	if !effect.LastPaidEnd.IsZero() {
 		facts.PaidUntil = &effect.LastPaidEnd
 	}
@@ -325,6 +329,14 @@ func clonePlanLimits(in models4datatug.PlanLimits) models4datatug.PlanLimits {
 	if in.ProjectContributors != nil {
 		value := *in.ProjectContributors
 		out.ProjectContributors = &value
+	}
+	if in.ProtectedProjects != nil {
+		value := *in.ProtectedProjects
+		out.ProtectedProjects = &value
+	}
+	if in.ProtectedProjectUsers != nil {
+		value := *in.ProtectedProjectUsers
+		out.ProtectedProjectUsers = &value
 	}
 	out.AIModelClasses = append([]string(nil), in.AIModelClasses...)
 	return out

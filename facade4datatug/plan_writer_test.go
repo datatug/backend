@@ -1,7 +1,9 @@
 package facade4datatug
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"reflect"
@@ -124,13 +126,17 @@ func (a *planAllocatorTestPort) AllocatePaidMonths(p PlanPayment, family string)
 }
 
 type planLimitsTestPort struct {
-	snapshot ProLimitsSnapshot
-	calls    int
-	err      error
+	snapshot  ProLimitsSnapshot
+	calls     int
+	err       error
+	onResolve func(PlanEffectGrants)
 }
 
-func (l *planLimitsTestPort) ResolveProLimits(_ string, _ PlanEffectGrants) (ProLimitsSnapshot, error) {
+func (l *planLimitsTestPort) ResolveProLimits(_ string, grants PlanEffectGrants) (ProLimitsSnapshot, error) {
 	l.calls++
+	if l.onResolve != nil {
+		l.onResolve(grants)
+	}
 	return l.snapshot, l.err
 }
 
@@ -155,7 +161,8 @@ func newPlanWriterFixture(t *testing.T) *planWriterFixture {
 		t.Fatal(err)
 	}
 	pj := int64(3)
-	limits := &planLimitsTestPort{snapshot: ProLimitsSnapshot{Version: "v1", ProjectGuestsKnown: true, Limits: models4datatug.PlanLimits{Contributors: 2, ProjectGuests: 0, ProjectContributors: &pj, AIQuestions: 10, AIModelClasses: []string{"fast", "standard"}, AIPaysFor: "owner"}}}
+	protected := int64(5)
+	limits := &planLimitsTestPort{snapshot: ProLimitsSnapshot{Version: "v1", ProjectGuestsKnown: true, Limits: models4datatug.PlanLimits{Contributors: 2, ProjectGuests: 0, ProjectContributors: &pj, ProtectedProjects: &protected, ProtectedProjectUsers: &protected, AIQuestions: 10, AIModelClasses: []string{"fast", "standard"}, AIPaysFor: "owner"}}}
 	owner := &planOwnerTestPort{authority: PlanEffectCurrent}
 	personal := &planPersonalTestPort{}
 	allocator := &planAllocatorTestPort{values: map[string]map[string]int64{"pay-A": {"2026-10": 1000}}}
@@ -309,21 +316,27 @@ func TestAccountPlanWriterRejectsMalformedAndObsolete(t *testing.T) {
 func TestAccountPlanWriterFreezesUntrustedLimits(t *testing.T) {
 	f := newPlanWriterFixture(t)
 	projectContributors := f.limits.snapshot.Limits.ProjectContributors
+	protectedProjects := f.limits.snapshot.Limits.ProtectedProjects
+	protectedUsers := f.limits.snapshot.Limits.ProtectedProjectUsers
 	classes := f.limits.snapshot.Limits.AIModelClasses
 	f.owner.onReconcile = func() {
 		*projectContributors = 99
+		*protectedProjects = 99
+		*protectedUsers = 99
 		classes[0] = "wrong"
 	}
 	if _, err := f.writer.Apply(context.Background(), f.effect); err != nil {
 		t.Fatal(err)
 	}
 	plan := f.publicPlan(t)
-	if plan.Limits == nil || *plan.Limits.ProjectContributors != 3 || !reflect.DeepEqual(plan.Limits.AIModelClasses, []string{"fast", "standard"}) {
+	if plan.Limits == nil || *plan.Limits.ProjectContributors != 3 || *plan.Limits.ProtectedProjects != 5 || *plan.Limits.ProtectedProjectUsers != 5 || !reflect.DeepEqual(plan.Limits.AIModelClasses, []string{"fast", "standard"}) {
 		t.Fatal(plan.Limits)
 	}
 	bad := []func(*ProLimitsSnapshot){
 		func(s *ProLimitsSnapshot) { s.ProjectGuestsKnown = false },
 		func(s *ProLimitsSnapshot) { s.Limits.ProjectContributors = nil },
+		func(s *ProLimitsSnapshot) { s.Limits.ProtectedProjects = nil },
+		func(s *ProLimitsSnapshot) { s.Limits.ProtectedProjects = timeInt64(0) },
 		func(s *ProLimitsSnapshot) { s.Limits.AIQuestions++ },
 		func(s *ProLimitsSnapshot) { s.Limits.AIModelClasses = nil },
 	}
@@ -340,6 +353,28 @@ func TestAccountPlanWriterFreezesUntrustedLimits(t *testing.T) {
 				t.Fatal(exists, err)
 			}
 		})
+	}
+}
+
+func TestAccountPlanWriterResolverCannotMutateAcceptedProtectedGrants(t *testing.T) {
+	f := newPlanWriterFixture(t)
+	f.effect.Grants.ProtectedProjects = timeInt64(5)
+	f.effect.Grants.ProtectedProjectUsers = timeInt64(5)
+	f.limits.onResolve = func(grants PlanEffectGrants) {
+		*grants.ProtectedProjects = 99
+		*grants.ProtectedProjectUsers = 99
+	}
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatal(got, err)
+	}
+	if *f.effect.Grants.ProtectedProjects != 5 || *f.effect.Grants.ProtectedProjectUsers != 5 {
+		t.Fatal(f.effect.Grants)
+	}
+	if plan := f.publicPlan(t); plan.Limits == nil || *plan.Limits.ProtectedProjects != 5 || *plan.Limits.ProtectedProjectUsers != 5 {
+		t.Fatal(plan)
+	}
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanIdempotent {
+		t.Fatal(got, err)
 	}
 }
 
@@ -426,10 +461,11 @@ func TestPurchaseReadinessBoundToOwnerAndAppliedPro(t *testing.T) {
 	assertReady(false)
 }
 
-func TestAccountPlanWriterFullRefundLeaveThenBasisOnly(t *testing.T) {
+func TestAccountPlanWriterFullRefundEndsThenBasisOnly(t *testing.T) {
 	f := newPlanWriterFixture(t)
 	refunded := true
 	f.effect.LastServiceRefund.RefundedInFull = refunded
+	f.effect.TerminalFullRefund = true
 	f.effect.Payments = nil
 	got, err := f.writer.Apply(context.Background(), f.effect)
 	if err != nil || got != PlanApplied {
@@ -438,9 +474,15 @@ func TestAccountPlanWriterFullRefundLeaveThenBasisOnly(t *testing.T) {
 	if a := f.application(t); a.LastFullEffectRevision != 1 || a.LastProQuoteKey != "" {
 		t.Fatal(a)
 	}
-	exists, err := f.db.Exists(context.Background(), models4datatug.NewCurrentPlanKey("personal-1"))
-	if err != nil || exists {
-		t.Fatal(exists, err)
+	plan := f.publicPlan(t)
+	if plan.Plan != "free" || plan.Status != "ended" || plan.EndedReason != "refunded" || plan.Limits != nil {
+		t.Fatal(plan)
+	}
+	svc, _, _, _, _, _ := validPlanTestService()
+	readiness := PurchaseReadiness{DB: f.db, Owner: f.owner, Personal: f.personal, Config: svc.Config, Clock: f.writer.Clock}
+	ready, err := readiness.ReadyForPurchase(context.Background(), PurchaseReadinessRequest{BuyerID: "buyer-A", Mode: "live", SiteID: "datatug", Family: "datatug", AccountID: "personal-1", SubscriptionID: "sub-A", QuoteKey: "quote-A", SessionID: "session-A", PlanID: "datatug-pro-monthly"})
+	if err != nil || ready {
+		t.Fatal(ready, err)
 	}
 	f.effect.Fence.SubscriptionRevision = 2
 	f.effect.SourceRevision = 2
@@ -453,9 +495,93 @@ func TestAccountPlanWriterFullRefundLeaveThenBasisOnly(t *testing.T) {
 	if a := f.application(t); a.SubscriptionRevision != 2 || a.LastFullEffectRevision != 1 || a.LastProQuoteKey != "" {
 		t.Fatal(a)
 	}
-	exists, err = f.db.Exists(context.Background(), models4datatug.NewCurrentPlanKey("personal-1"))
-	if err != nil || exists {
-		t.Fatal(exists, err)
+	plan = f.publicPlan(t)
+	if plan.Plan != "free" || plan.EndedReason != "refunded" {
+		t.Fatal(plan)
+	}
+}
+
+func TestAccountPlanWriterActiveProImmediatelyEndsOnFullRefund(t *testing.T) {
+	f := newPlanWriterFixture(t)
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatal(got, err)
+	}
+	if plan := f.publicPlan(t); plan.Plan != "pro" || plan.Limits == nil || *plan.Limits.ProtectedProjects != 5 {
+		t.Fatal(plan)
+	}
+	f.effect.Fence.SubscriptionRevision = 2
+	f.effect.SourceRevision = 2
+	f.effect.MoneyIngestEpoch = 1
+	f.effect.TerminalFullRefund = true
+	f.effect.LastServiceRefund.RefundedInFull = true
+	f.effect.Payments = nil
+	f.setAuthority(t, f.effect.Fence, 1, true)
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatal(got, err)
+	}
+	if plan := f.publicPlan(t); plan.Plan != "free" || plan.Status != "ended" || plan.EndedReason != "refunded" || plan.Limits != nil {
+		t.Fatal(plan)
+	}
+	if app := f.application(t); app.LastProQuoteKey != "" || app.LastFullEffectRevision != 2 {
+		t.Fatal(app)
+	}
+}
+
+func TestAccountPlanWriterLegacyRefundAndLatchedRenewal(t *testing.T) {
+	f := newPlanWriterFixture(t)
+	f.effect.LastServiceRefund.RefundedInFull = true // accepted before the additive latch existed
+	f.effect.Payments = nil
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatal(got, err)
+	}
+	if plan := f.publicPlan(t); plan.Plan != "free" || plan.EndedReason != "refunded" {
+		t.Fatal(plan)
+	}
+	f.effect.Fence.SubscriptionRevision = 2
+	f.effect.SourceRevision = 2
+	f.effect.MoneyIngestEpoch = 1
+	f.effect.TerminalFullRefund = true
+	f.effect.LastServiceRefund = nil // a newer paid invoice does not erase the durable source latch
+	f.effect.LastPaidEnd = f.effect.LastPaidEnd.AddDate(0, 1, 0)
+	f.effect.Payments = []PlanPayment{{Mode: "live", Provider: "fake", PaymentID: "pay-A", AccountID: "personal-1"}}
+	f.setAuthority(t, f.effect.Fence, 1, true)
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatal(got, err)
+	}
+	if plan := f.publicPlan(t); plan.Plan != "free" || plan.EndedReason != "refunded" {
+		t.Fatal(plan)
+	}
+	if app := f.application(t); app.LastProQuoteKey != "" || app.LastFullEffectRevision != 2 || len(app.BasisPeriods) != 1 {
+		t.Fatal(app)
+	}
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanIdempotent {
+		t.Fatal(got, err)
+	}
+}
+
+func TestAccountPlanWriterLatchedRefundWithUnknownMoneyStillEndsPro(t *testing.T) {
+	f := newPlanWriterFixture(t)
+	f.effect.TerminalFullRefund = true
+	f.effect.CashBasisKnown = false
+	f.effect.LastServiceRefund = nil
+	f.effect.Payments = nil
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatal(got, err)
+	}
+	if plan := f.publicPlan(t); plan.Plan != "free" || plan.EndedReason != "refunded" {
+		t.Fatal(plan)
+	}
+	if err := f.db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		money, err := f.owner.ReadMoneyFence(ctx, tx, "live", "datatug", "personal-1")
+		if err != nil {
+			return err
+		}
+		if !money.Unresolved || money.IngestEpoch != 0 {
+			t.Fatal(money)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -515,9 +641,49 @@ func TestConfiguredProLimitsChecksSnapshotAndCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	*f.limits.snapshot.Limits.ProjectContributors = 9
+	*f.limits.snapshot.Limits.ProtectedProjects = 9
 	f.limits.snapshot.Limits.AIModelClasses[0] = "changed"
-	if *snapshot.Limits.ProjectContributors != 3 || snapshot.Limits.AIModelClasses[0] != "fast" {
+	if *snapshot.Limits.ProjectContributors != 3 || *snapshot.Limits.ProtectedProjects != 5 || snapshot.Limits.AIModelClasses[0] != "fast" {
 		t.Fatal(snapshot)
+	}
+}
+
+func TestProtectedGrantsAndLegacyEffectDigest(t *testing.T) {
+	f := newPlanWriterFixture(t)
+	legacy, err := json.Marshal(f.effect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(legacy, []byte("protectedProjects")) || bytes.Contains(legacy, []byte("terminalFullRefund")) {
+		t.Fatal(string(legacy))
+	}
+	first, err := planEffectDigest(f.effect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.effect.ObservedAt = time.Now()
+	second, err := planEffectDigest(f.effect)
+	if err != nil || first != second {
+		t.Fatal(first, second, err)
+	}
+	for _, tc := range []struct {
+		name            string
+		projects, users *int64
+		valid           bool
+	}{
+		{"explicit", timeInt64(5), timeInt64(5), true},
+		{"partial", timeInt64(5), nil, false},
+		{"wrong count", timeInt64(6), timeInt64(5), false},
+		{"zero", timeInt64(0), timeInt64(0), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := f.effect.Grants
+			g.ProtectedProjects, g.ProtectedProjectUsers = tc.projects, tc.users
+			_, err := checkedProLimits(f.limits.snapshot, g)
+			if (err == nil) != tc.valid {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
