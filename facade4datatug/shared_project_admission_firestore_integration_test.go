@@ -15,15 +15,20 @@ import (
 	"time"
 
 	"cloud.google.com/go/firestore"
+	"cloud.google.com/go/firestore/apiv1/firestorepb"
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2firestore"
 	"github.com/datatug/backend/models4datatug"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // Follow Core's owned demo emulator contract; never fall back to cloud/ADC.
 // The project suffix isolates each case; emulators:exec owns teardown.
-func paidFirestore(t *testing.T) (dal.DB, *firestore.Client, context.Context, string) {
+func paidFirestore(t *testing.T, extra ...option.ClientOption) (dal.DB, *firestore.Client, context.Context, string) {
 	t.Helper()
 	host, project := os.Getenv("FIRESTORE_EMULATOR_HOST"), os.Getenv("GCLOUD_PROJECT")
 	hostname, _, err := net.SplitHostPort(host)
@@ -33,7 +38,7 @@ func paidFirestore(t *testing.T) (dal.DB, *firestore.Client, context.Context, st
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	project = fmt.Sprintf("%s-%d", project, time.Now().UnixNano())
-	client, err := firestore.NewClient(ctx, project, option.WithoutAuthentication())
+	client, err := firestore.NewClient(ctx, project, append([]option.ClientOption{option.WithoutAuthentication()}, extra...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,6 +189,70 @@ func TestPaidSharedProjectFirestoreRoundtrip(t *testing.T) {
 			t.Fatalf("ended replay %v", err)
 		}
 	})
+	t.Run("injected-sdk-commit-abort-retries", func(t *testing.T) {
+		var armed atomic.Bool
+		var injected, attempts atomic.Int32
+		// Return one synthetic commit-conflict response before sending that
+		// commit. The actual SDK owns retry and the emulator owns the final
+		// transaction; this is transport fault injection, not server contention.
+		interceptor := func(ctx context.Context, method string, req, reply any, conn *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			if method == "/google.firestore.v1.Firestore/Commit" && armed.CompareAndSwap(true, false) {
+				injected.Add(1)
+				// A genuine server abort releases its locks. Our synthetic
+				// response must do the same before the SDK begins its retry.
+				commit, ok := req.(*firestorepb.CommitRequest)
+				if !ok || len(commit.Transaction) == 0 {
+					return status.Error(codes.Internal, "expected transactional commit")
+				}
+				if _, err := firestorepb.NewFirestoreClient(conn).Rollback(ctx, &firestorepb.RollbackRequest{Database: commit.Database, Transaction: commit.Transaction}); err != nil {
+					return err
+				}
+				return status.Error(codes.Aborted, "injected commit abort")
+			}
+			return invoke(ctx, method, req, reply, conn, opts...)
+		}
+		// Emulator mode creates its own connection, so DialOption alone is
+		// ignored by this SDK. Supply the explicitly intercepted loopback conn.
+		host := os.Getenv("FIRESTORE_EMULATOR_HOST")
+		hostname, _, err := net.SplitHostPort(host)
+		if err != nil || (hostname != "127.0.0.1" && hostname != "localhost") {
+			t.Fatal("owned loopback emulator required")
+		}
+		conn, err := grpc.NewClient("passthrough:///"+host, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithChainUnaryInterceptor(interceptor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		db, client, ctx, _ := paidFirestore(t, option.WithGRPCConn(conn))
+		_, s, _ := paidCreateFixtureWithDB(t, db)
+		s.db = sharedFaultDB{DB: db, wrap: func(tx dal.ReadwriteTransaction) dal.ReadwriteTransaction { attempts.Add(1); return tx }}
+		armed.Store(true) // Only Create can consume the fault; seed commits are complete.
+		ref, err := s.Create(ctx, sharedCommand())
+		if err != nil || injected.Load() != 1 || attempts.Load() != 2 {
+			t.Fatalf("SDK retry ref=%+v error=%v injected=%d attempts=%d", ref, err, injected.Load(), attempts.Load())
+		}
+		q := paidQuota(t, db)
+		if q.Allocated != 1 || q.Revision != 2 {
+			t.Fatalf("retry double-counted %+v", q)
+		}
+		project, _ := models4datatug.NewSharedProjectRecord("space", ref.ProjectID)
+		receipt, _ := models4datatug.NewSharedProjectCreateReceiptRecord("space", "command")
+		for _, collection := range []string{project.Key().Collection(), receipt.Key().Collection(), models4datatug.ProjectAdmissionCollection} {
+			docs, err := client.CollectionGroup(collection).Documents(ctx).GetAll()
+			if err != nil || len(docs) != 1 {
+				t.Fatalf("retry %s committed=%d err=%v", collection, len(docs), err)
+			}
+		}
+		if got := mustReadSharedReceipt(t, db, sharedCommand()); got.ProjectID != ref.ProjectID {
+			t.Fatal("retry receipt binding changed")
+		}
+		s.ids = fakeIDGenerator{err: errors.New("replay must not allocate")}
+		replay, err := s.Create(ctx, sharedCommand())
+		if err != nil || replay != ref || paidQuota(t, db) != q {
+			t.Fatalf("retry replay %+v %v", replay, err)
+		}
+	})
+
 	t.Run("concurrent-cap-across-spaces", func(t *testing.T) {
 		db, client, ctx, _ := paidFirestore(t)
 		_, s, _ := paidCreateFixtureWithDB(t, db)
@@ -225,7 +294,7 @@ func TestPaidSharedProjectFirestoreRoundtrip(t *testing.T) {
 				t.Fatalf("%s committed=%d err=%v", collection, len(docs), err)
 			}
 		}
-		t.Logf("real SDK transaction attempts=%d for 6 concurrent commands", attempts.Load())
+		t.Logf("concurrent cap SDK attempts=%d (informational, retries are separately fault-tested)", attempts.Load())
 
 	})
 }
