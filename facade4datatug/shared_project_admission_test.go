@@ -49,7 +49,11 @@ func (paidCreateAuthority) VerifyPersonalOwner(ctx context.Context, tx dal.ReadT
 
 func paidCreateFixture(t *testing.T) (dal.DB, *SharedProjectService, PaidSharedProjectOptions) {
 	t.Helper()
-	db := sneatcoretesting.NewMemoryDB()
+	return paidCreateFixtureWithDB(t, sneatcoretesting.NewMemoryDB())
+}
+
+func paidCreateFixtureWithDB(t *testing.T, db dal.DB) (dal.DB, *SharedProjectService, PaidSharedProjectOptions) {
+	t.Helper()
 	base, _, _, _, _, _ := validPlanTestService()
 	config := base.Config.(testConfigReader).config
 	o := PaidSharedProjectOptions{Version: "reviewed-1", Mode: "live", Product: "datatug", Config: config, Directory: paidCreateDirectory{payer: "personal-1"}, Personal: paidCreateAuthority{}, Owner: paidCreateAuthority{}}
@@ -419,37 +423,7 @@ func TestPaidSharedCreateRequiresWriterSourceProtectedGrants(t *testing.T) {
 	for _, explicit := range []bool{false, true} {
 		t.Run(fmt.Sprintf("explicit-%t", explicit), func(t *testing.T) {
 			ctx := context.Background()
-			f := newPlanWriterFixture(t)
-			_, _, o := paidCreateFixture(t)
-			f.effect.BuyerID = "actor"
-			f.effect.LastPaidEnd = sharedTestTime.Add(24 * time.Hour)
-			f.effect.LastServiceRefund.ServiceEndUTC = f.effect.LastPaidEnd
-			f.limits.snapshot.Limits = clonePlanLimits(o.Config.ProLimits)
-			f.effect.Grants.Contributors = o.Config.ProLimits.Contributors
-			f.effect.Grants.ProjectContributors = *o.Config.ProLimits.ProjectContributors
-			f.effect.Grants.AIQuestions = o.Config.ProLimits.AIQuestions
-			f.effect.Grants.AIPaysFor = o.Config.ProLimits.AIPaysFor
-			if explicit {
-				projects, users := int64(5), int64(5)
-				f.effect.Grants.ProtectedProjects, f.effect.Grants.ProtectedProjectUsers = &projects, &users
-			}
-			f.setAuthority(t, f.effect.Fence, 0, true)
-			if outcome, err := f.writer.Apply(ctx, f.effect); err != nil || outcome != PlanApplied {
-				t.Fatal(outcome, err)
-			}
-			plan := f.publicPlan(t)
-			if plan.Limits == nil || plan.Limits.ProtectedProjects == nil || *plan.Limits.ProtectedProjects != 5 || plan.Limits.ProtectedProjectUsers == nil || *plan.Limits.ProtectedProjectUsers != 5 {
-				t.Fatalf("projection %+v", plan)
-			}
-			qr, q := models4datatug.NewProtectedProjectQuotaRecord("live", "datatug", "personal-1")
-			*q = models4datatug.ProtectedProjectQuota{Version: 1, Mode: "live", Product: "datatug", PayerID: "personal-1", BasisDigest: "verified-empty-inventory", Revision: 1}
-			if err := f.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Insert(ctx, qr) }); err != nil {
-				t.Fatal(err)
-			}
-			s, err := NewPaidSharedProjectService(f.db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, o)
-			if err != nil {
-				t.Fatal(err)
-			}
+			f, s := paidWriterCreateFixture(t, sneatcoretesting.NewMemoryDB(), explicit)
 			c := sharedCommand()
 			ref, err := s.Create(ctx, c)
 			if explicit {
@@ -527,4 +501,44 @@ func TestAccountPlanWriterProtectedSourceProvenanceLifecycle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func paidWriterCreateFixture(t *testing.T, db dal.DB, explicit bool) (*planWriterFixture, *SharedProjectService) {
+	t.Helper()
+	ctx := context.Background()
+	f := newPlanWriterFixtureWithDB(t, db)
+	base, _, _, _, _, _ := validPlanTestService()
+	config := base.Config.(testConfigReader).config
+	o := PaidSharedProjectOptions{Version: "reviewed-1", Mode: "live", Product: "datatug", Config: config, Directory: paidCreateDirectory{payer: "personal-1"}, Personal: paidCreateAuthority{}, Owner: paidCreateAuthority{}}
+
+	f.effect.BuyerID = "actor"
+	f.effect.LastPaidEnd = sharedTestTime.Add(24 * time.Hour)
+	f.effect.LastServiceRefund.ServiceEndUTC = f.effect.LastPaidEnd
+	f.limits.snapshot.Limits = clonePlanLimits(o.Config.ProLimits)
+	f.effect.Grants.Contributors = o.Config.ProLimits.Contributors
+	f.effect.Grants.ProjectContributors = *o.Config.ProLimits.ProjectContributors
+	f.effect.Grants.AIQuestions = o.Config.ProLimits.AIQuestions
+	f.effect.Grants.AIPaysFor = o.Config.ProLimits.AIPaysFor
+	if explicit {
+		projects, users := int64(5), int64(5)
+		f.effect.Grants.ProtectedProjects, f.effect.Grants.ProtectedProjectUsers = &projects, &users
+	}
+	f.setAuthority(t, f.effect.Fence, 0, true)
+	if outcome, err := f.writer.Apply(ctx, f.effect); err != nil || outcome != PlanApplied {
+		t.Fatal(outcome, err)
+	}
+	plan := f.publicPlan(t)
+	if plan.Limits == nil || plan.Limits.ProtectedProjects == nil || *plan.Limits.ProtectedProjects != 5 || plan.Limits.ProtectedProjectUsers == nil || *plan.Limits.ProtectedProjectUsers != 5 {
+		t.Fatalf("projection %+v", plan)
+	}
+	qr, q := models4datatug.NewProtectedProjectQuotaRecord("live", "datatug", "personal-1")
+	*q = models4datatug.ProtectedProjectQuota{Version: 1, Mode: "live", Product: "datatug", PayerID: "personal-1", BasisDigest: "verified-empty-inventory", Revision: 1}
+	if err := f.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Insert(ctx, qr) }); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewPaidSharedProjectService(f.db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, s
 }
