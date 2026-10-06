@@ -30,7 +30,7 @@ func ValidateSharedProjectIdentifier(id string) error {
 		return fmt.Errorf("identifier must contain 1..128 characters")
 	}
 	for _, c := range id {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return fmt.Errorf("identifier must be a safe path segment")
 		}
 	}
