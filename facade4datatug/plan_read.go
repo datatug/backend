@@ -44,6 +44,13 @@ type AdmissionReader interface {
 	ReadAdmission(context.Context, string, time.Time) (AdmissionState, error)
 }
 
+// CallerAdmissionReader lets the host read admission for the authenticated
+// caller and the personal account already proved by PersonalAccountDirectory.
+// The implementation must supply the actual daily count, not a placeholder.
+type CallerAdmissionReader interface {
+	ReadAdmissionForCaller(context.Context, string, string, time.Time) (AdmissionState, error)
+}
+
 type PlanModel struct {
 	ID      string `json:"id"`
 	Class   string `json:"class"`
@@ -148,17 +155,20 @@ type PlanResponse struct {
 
 // PersonalPlanService composes ports without depending on transport or store.
 type PersonalPlanService struct {
-	Directory  PersonalAccountDirectory
-	Plans      PlanReader
-	Usage      UsageReader
-	Admission  AdmissionReader
-	Config     PlanConfigReader
-	Clock      PlanClock
-	FirstMonth FirstAdmittedMonthReader
+	Directory PersonalAccountDirectory
+	Plans     PlanReader
+	Usage     UsageReader
+	Admission AdmissionReader
+	// CallerAdmission takes precedence when bound. Admission remains supported
+	// for existing consumers; a new host must bind this caller-aware port.
+	CallerAdmission CallerAdmissionReader
+	Config          PlanConfigReader
+	Clock           PlanClock
+	FirstMonth      FirstAdmittedMonthReader
 }
 
 func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ string) (PlanResponse, error) {
-	if s.Directory == nil || s.Plans == nil || s.Usage == nil || s.Admission == nil || s.Config == nil || s.Clock == nil || s.FirstMonth == nil {
+	if s.Directory == nil || s.Plans == nil || s.Usage == nil || (s.CallerAdmission == nil && s.Admission == nil) || s.Config == nil || s.Clock == nil || s.FirstMonth == nil {
 		return PlanResponse{}, ErrPlanUnavailable
 	}
 	account, err := ResolvePersonalPayer(ctx, callerID, accountHint, s.Directory)
@@ -226,7 +236,12 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 		}
 		used, capped = usage.Used, usage.Capped
 	}
-	admission, err := s.Admission.ReadAdmission(ctx, account.ID, now)
+	var admission AdmissionState
+	if s.CallerAdmission != nil {
+		admission, err = s.CallerAdmission.ReadAdmissionForCaller(ctx, callerID, account.ID, now)
+	} else {
+		admission, err = s.Admission.ReadAdmission(ctx, account.ID, now)
+	}
 	if err != nil || admission.TodayUsed < 0 || !validBlocked(admission.Blocked) {
 		return PlanResponse{}, ErrPlanUnavailable
 	}
