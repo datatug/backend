@@ -108,8 +108,9 @@ func (c *testClock) Now() time.Time { c.calls++; return c.now }
 
 func validPlanTestService() (PersonalPlanService, *testDirectory, *testPlanReader, *testUsageReader, *testAdmissionReader, *testClock) {
 	five := int64(5)
-	free := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 2, AIQuestions: 7, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
-	pro := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 3, ProjectContributors: &five, AIQuestions: 11, AIModelClasses: []string{"fast", "standard"}, AIPaysFor: "owner"}
+	zero := int64(0)
+	free := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 2, ProtectedProjects: &zero, ProtectedProjectUsers: &zero, AIQuestions: 7, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
+	pro := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 3, ProjectContributors: &five, ProtectedProjects: &five, ProtectedProjectUsers: &five, AIQuestions: 11, AIModelClasses: []string{"fast", "standard"}, AIPaysFor: "owner"}
 	d := &testDirectory{account: PersonalAccount{ID: "personal-1", Title: "Example"}}
 	p := &testPlanReader{}
 	u := &testUsageReader{}
@@ -304,6 +305,23 @@ func TestValidatePlanConfig(t *testing.T) {
 		{"free", func(c *PlanConfig) { c.FreeFirstMonthLimits.Contributors = 0 }},
 		{"later free", func(c *PlanConfig) { c.FreeLaterMonthLimits.AIQuestions = -1 }},
 		{"pro", func(c *PlanConfig) { c.ProLimits.ProjectContributors = nil }},
+		{"free protected missing", func(c *PlanConfig) {
+			c.FreeFirstMonthLimits.ProtectedProjects = nil
+			c.FreeFirstMonthLimits.ProtectedProjectUsers = nil
+		}},
+		{"later free protected nonzero", func(c *PlanConfig) {
+			c.FreeLaterMonthLimits.ProtectedProjects = timeInt64(1)
+			c.FreeLaterMonthLimits.ProtectedProjectUsers = timeInt64(1)
+		}},
+		{"free protected mixed zero", func(c *PlanConfig) {
+			c.FreeFirstMonthLimits.ProtectedProjects = timeInt64(0)
+			c.FreeFirstMonthLimits.ProtectedProjectUsers = timeInt64(1)
+		}},
+		{"pro protected partial", func(c *PlanConfig) { c.ProLimits.ProtectedProjectUsers = nil }},
+		{"pro protected zero", func(c *PlanConfig) {
+			c.ProLimits.ProtectedProjects = timeInt64(0)
+			c.ProLimits.ProtectedProjectUsers = timeInt64(0)
+		}},
 		{"free models", func(c *PlanConfig) { c.FreeModels = nil }},
 		{"pro models", func(c *PlanConfig) { c.ProModels = nil }},
 	} {
@@ -407,6 +425,58 @@ func TestPersonalPlanStoredGrantAndCatalogChanges(t *testing.T) {
 	got, err = s.Read(context.Background(), "caller", "", "")
 	if err != nil || *got.Limits.ProjectContributors != 5 {
 		t.Fatal(got, err)
+	}
+}
+
+func TestPersonalPlanProtectedPairLegacyAndStoredGrant(t *testing.T) {
+	s, _, p, _, _, clock := validPlanTestService()
+	config := s.Config.(testConfigReader).config
+	legacy := clonePlanLimits(config.ProLimits)
+	legacy.ProtectedProjects, legacy.ProtectedProjectUsers = nil, nil
+	badConfig := clonePlanLimits(config.ProLimits)
+	badConfig.ProtectedProjects = nil
+	if _, err := resolvedProLimits(legacy, badConfig); !errors.Is(err, ErrPlanUnavailable) {
+		t.Fatal(err)
+	}
+	p.record = &models4datatug.PlanRecord{V: 1, Plan: "pro", Status: "active", PaidUntil: timePtr(clock.now.Add(time.Hour)), Limits: &legacy}
+	read := func() PlanResponse {
+		t.Helper()
+		got, err := s.Read(context.Background(), "caller", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	got := read()
+	if got.EffectivePlan != "pro" || *got.Limits.ProtectedProjects != 5 || *got.Limits.ProtectedProjectUsers != 5 || p.record.Limits.ProtectedProjects != nil {
+		t.Fatal(got, p.record)
+	}
+	stored := clonePlanLimits(config.ProLimits)
+	p.record.Limits = &stored
+	config.ProLimits.ProtectedProjects, config.ProLimits.ProtectedProjectUsers = timeInt64(6), timeInt64(6)
+	s.Config = testConfigReader{config: config}
+	got = read()
+	if *got.Limits.ProtectedProjects != 5 || *got.Limits.ProtectedProjectUsers != 5 || !effectiveProForPurchase(*p.record, config, clock.now) {
+		t.Fatal(got)
+	}
+	*got.Limits.ProtectedProjects = 99
+	if *p.record.Limits.ProtectedProjects != 5 || *config.ProLimits.ProtectedProjects != 6 {
+		t.Fatal(p.record, config.ProLimits)
+	}
+	for _, alter := range []func(*models4datatug.PlanLimits){
+		func(l *models4datatug.PlanLimits) { l.ProtectedProjects = nil },
+		func(l *models4datatug.PlanLimits) { l.ProtectedProjects = timeInt64(-1) },
+		func(l *models4datatug.PlanLimits) {
+			l.ProtectedProjects = timeInt64(0)
+			l.ProtectedProjectUsers = timeInt64(0)
+		},
+	} {
+		bad := clonePlanLimits(stored)
+		alter(&bad)
+		p.record.Limits = &bad
+		if _, err := s.Read(context.Background(), "caller", "", ""); !errors.Is(err, ErrPlanUnavailable) || effectiveProForPurchase(*p.record, config, clock.now) {
+			t.Fatal(bad, err)
+		}
 	}
 }
 func timeInt64(value int64) *int64 { return &value }

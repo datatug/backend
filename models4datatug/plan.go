@@ -34,12 +34,14 @@ func planCollectionKey(accountID string) *record.Key {
 // PlanLimits is the version-1 allowance carried by a paid plan or a response.
 // A Free allowance comes from host configuration, never from a stored plan.
 type PlanLimits struct {
-	Contributors        int64    `json:"contributors" firestore:"contributors"`
-	ProjectGuests       int64    `json:"projectGuests" firestore:"projectGuests"`
-	ProjectContributors *int64   `json:"projectContributors,omitempty" firestore:"projectContributors,omitempty"`
-	AIQuestions         int64    `json:"aiQuestions" firestore:"aiQuestions"`
-	AIModelClasses      []string `json:"aiModelClasses" firestore:"aiModelClasses"`
-	AIPaysFor           string   `json:"aiPaysFor" firestore:"aiPaysFor"`
+	Contributors          int64    `json:"contributors" firestore:"contributors"`
+	ProjectGuests         int64    `json:"projectGuests" firestore:"projectGuests"`
+	ProjectContributors   *int64   `json:"projectContributors,omitempty" firestore:"projectContributors,omitempty"`
+	ProtectedProjects     *int64   `json:"protectedProjects,omitempty" firestore:"protectedProjects,omitempty"`
+	ProtectedProjectUsers *int64   `json:"protectedProjectUsers,omitempty" firestore:"protectedProjectUsers,omitempty"`
+	AIQuestions           int64    `json:"aiQuestions" firestore:"aiQuestions"`
+	AIModelClasses        []string `json:"aiModelClasses" firestore:"aiModelClasses"`
+	AIPaysFor             string   `json:"aiPaysFor" firestore:"aiPaysFor"`
 }
 
 // PlanRecord is the version-1 plan/current document. Test-mode reconciliation

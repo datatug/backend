@@ -189,7 +189,7 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 	plan, effective, status, billingPeriod := "free", "free", "none", "none"
 	var paidUntil *time.Time
 	founding := false
-	limits := config.FreeFirstMonthLimits
+	limits := clonePlanLimits(config.FreeFirstMonthLimits)
 	models := config.FreeModels
 	var extra int64
 	if record != nil && record.V == 1 {
@@ -201,9 +201,9 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 			founding = record.Founding
 		}
 		if plan == "pro" && record.Limits != nil && paidAccessHolds(record, now, config) {
-			candidate := *record.Limits
-			if candidate.ProjectContributors == nil {
-				candidate.ProjectContributors = config.ProLimits.ProjectContributors
+			candidate, resolveErr := resolvedProLimits(*record.Limits, config.ProLimits)
+			if resolveErr != nil {
+				return PlanResponse{}, ErrPlanUnavailable
 			}
 			if record.AIExtraQuestions >= 0 && validateLimits(candidate) == nil &&
 				validateModels(config.ProModels, candidate) == nil &&
@@ -221,7 +221,7 @@ func (s PersonalPlanService) Read(ctx context.Context, callerID, accountHint, _ 
 			return PlanResponse{}, ErrPlanUnavailable
 		}
 		if firstMonth != "" && firstMonth != periodID {
-			limits = config.FreeLaterMonthLimits
+			limits = clonePlanLimits(config.FreeLaterMonthLimits)
 		}
 	}
 	limit := limits.AIQuestions + extra
@@ -301,7 +301,32 @@ func validateLimits(l models4datatug.PlanLimits) error {
 	if l.ProjectContributors != nil && *l.ProjectContributors < 1 {
 		return ErrPlanUnavailable
 	}
+	if (l.ProtectedProjects == nil) != (l.ProtectedProjectUsers == nil) {
+		return ErrPlanUnavailable
+	}
+	if l.ProtectedProjects != nil && (*l.ProtectedProjects < 0 || *l.ProtectedProjectUsers < 0 || (*l.ProtectedProjects == 0) != (*l.ProtectedProjectUsers == 0)) {
+		return ErrPlanUnavailable
+	}
 	return nil
+}
+
+func resolvedProLimits(stored, configured models4datatug.PlanLimits) (models4datatug.PlanLimits, error) {
+	out := clonePlanLimits(stored)
+	if configured.ProtectedProjects == nil || configured.ProtectedProjectUsers == nil {
+		return out, ErrPlanUnavailable
+	}
+	if out.ProtectedProjects == nil && out.ProtectedProjectUsers == nil {
+		projects, users := *configured.ProtectedProjects, *configured.ProtectedProjectUsers
+		out.ProtectedProjects, out.ProtectedProjectUsers = &projects, &users
+	} else if out.ProtectedProjects == nil || out.ProtectedProjectUsers == nil ||
+		*out.ProtectedProjects <= 0 || *out.ProtectedProjectUsers <= 0 {
+		return out, ErrPlanUnavailable
+	}
+	if out.ProjectContributors == nil && configured.ProjectContributors != nil {
+		value := *configured.ProjectContributors
+		out.ProjectContributors = &value
+	}
+	return out, nil
 }
 func validateModels(models []PlanModel, limits models4datatug.PlanLimits) error {
 	if len(models) == 0 {
@@ -355,6 +380,14 @@ func validateConfig(config PlanConfig) error {
 		return err
 	}
 	if config.ProLimits.ProjectContributors == nil {
+		return ErrPlanUnavailable
+	}
+	for _, free := range []models4datatug.PlanLimits{config.FreeFirstMonthLimits, config.FreeLaterMonthLimits} {
+		if free.ProtectedProjects == nil || free.ProtectedProjectUsers == nil || *free.ProtectedProjects != 0 || *free.ProtectedProjectUsers != 0 {
+			return ErrPlanUnavailable
+		}
+	}
+	if config.ProLimits.ProtectedProjects == nil || config.ProLimits.ProtectedProjectUsers == nil || *config.ProLimits.ProtectedProjects <= 0 || *config.ProLimits.ProtectedProjectUsers <= 0 {
 		return ErrPlanUnavailable
 	}
 	if err := validateModels(config.FreeModels, config.FreeFirstMonthLimits); err != nil {

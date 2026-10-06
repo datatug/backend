@@ -574,6 +574,41 @@
       "outcome": "leave"
     },
     {
+      "name": "latched full refund remains ended after a newer paid invoice",
+      "facts": {
+        "accountKind": "personal",
+        "tier": "pro",
+        "period": "month",
+        "providerStatus": "active",
+        "paidUntil": "2026-03-20T10:12:00Z",
+        "firstPaidAt": "2026-02-20T10:12:00Z",
+        "lastInvoiceRefundedInFull": false,
+        "terminalFullRefund": true,
+        "founding": false,
+        "grants": {
+          "contributors": 1,
+          "projectGuests": 3,
+          "aiQuestions": 11,
+          "aiModelClasses": [
+            "fast",
+            "standard"
+          ],
+          "aiPaysFor": "owner"
+        },
+        "refundedAt": "2026-03-05T12:00:00Z"
+      },
+      "outcome": "write",
+      "record": {
+        "v": 1,
+        "plan": "free",
+        "status": "ended",
+        "period": "none",
+        "paidUntil": "2026-03-20T10:12:00Z",
+        "endedReason": "refunded",
+        "founding": false
+      }
+    },
+    {
       "name": "refunded in full while active",
       "facts": {
         "accountKind": "personal",
@@ -596,7 +631,16 @@
         },
         "refundedAt": "2026-03-05T12:00:00Z"
       },
-      "outcome": "leave"
+      "outcome": "write",
+      "record": {
+        "v": 1,
+        "plan": "free",
+        "status": "ended",
+        "period": "none",
+        "paidUntil": "2026-03-20T10:12:00Z",
+        "endedReason": "refunded",
+        "founding": false
+      }
     },
     {
       "name": "refunded in full while trialing",
@@ -621,7 +665,16 @@
         },
         "refundedAt": "2026-03-05T12:00:00Z"
       },
-      "outcome": "leave"
+      "outcome": "write",
+      "record": {
+        "v": 1,
+        "plan": "free",
+        "status": "ended",
+        "period": "none",
+        "paidUntil": "2026-03-20T10:12:00Z",
+        "endedReason": "refunded",
+        "founding": false
+      }
     },
     {
       "name": "refunded in full while past_due",
@@ -646,7 +699,16 @@
         },
         "refundedAt": "2026-03-05T12:00:00Z"
       },
-      "outcome": "leave"
+      "outcome": "write",
+      "record": {
+        "v": 1,
+        "plan": "free",
+        "status": "ended",
+        "period": "none",
+        "paidUntil": "2026-03-20T10:12:00Z",
+        "endedReason": "refunded",
+        "founding": false
+      }
     },
     {
       "name": "refunded in full while active, a tier for organisations on a personal account",

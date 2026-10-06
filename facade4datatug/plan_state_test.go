@@ -57,8 +57,8 @@ func TestPlanStateForPersonalContractCases(t *testing.T) {
 			}
 		})
 	}
-	if count != 29 {
-		t.Fatalf("checked %d personal state cases, want 29", count)
+	if count != 30 {
+		t.Fatalf("checked %d personal state cases, want 30", count)
 	}
 }
 
@@ -66,5 +66,27 @@ func TestPlanStateForDoesNotGrantUnknownTier(t *testing.T) {
 	result := PlanStateFor(PlanFacts{AccountKind: "personal", Tier: "unknown", ProviderStatus: "active"})
 	if result.Outcome != "refuse" || result.Reason != "unknown_tier" {
 		t.Fatal(result)
+	}
+}
+
+func TestPlanStateForImmediateFullRefund(t *testing.T) {
+	for _, status := range []string{"active", "trialing", "past_due"} {
+		t.Run(status, func(t *testing.T) {
+			got := PlanStateFor(PlanFacts{AccountKind: "personal", Tier: "pro", ProviderStatus: status, LastInvoiceRefundedInFull: true})
+			if got.Outcome != "write" || got.Record == nil || got.Record.Plan != "free" || got.Record.Status != "ended" || got.Record.EndedReason != "refunded" {
+				t.Fatalf("full refund state = %+v", got)
+			}
+		})
+	}
+	for _, status := range []string{"active", "trialing", "past_due", "unpaid", "paused", "canceled"} {
+		t.Run("latched "+status, func(t *testing.T) {
+			got := PlanStateFor(PlanFacts{AccountKind: "personal", Tier: "pro", ProviderStatus: status, TerminalFullRefund: true})
+			if got.Outcome != "write" || got.Record == nil || got.Record.Plan != "free" || got.Record.EndedReason != "refunded" {
+				t.Fatal(got)
+			}
+		})
+	}
+	if got := PlanStateFor(PlanFacts{AccountKind: "personal", Tier: "pro", ProviderStatus: "active", LastInvoiceRefundedInFull: false}); got.Outcome != "write" || got.Record == nil || got.Record.Plan != "pro" {
+		t.Fatal(got)
 	}
 }

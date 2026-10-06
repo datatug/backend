@@ -30,11 +30,14 @@ const (
 	PlanEffectUnproved PlanEffectAuthority = "unproved"
 )
 
-// PlanEffectGrants mirrors only the four values frozen by the payment effect.
-// Complete Pro limits require a separately versioned server configuration.
+// PlanEffectGrants mirrors the values frozen by the payment effect. The
+// protected pair is optional only for accepted legacy effects; complete Pro
+// limits still require a separately versioned server configuration.
 type PlanEffectGrants struct {
 	Contributors, ProjectContributors, AIQuestions int64
 	AIPaysFor                                      string
+	ProtectedProjects                              *int64 `json:"protectedProjects,omitempty"`
+	ProtectedProjectUsers                          *int64 `json:"protectedProjectUsers,omitempty"`
 }
 
 type PlanPayment struct {
@@ -104,6 +107,7 @@ type AccountPlanEffect struct {
 	SourceQuoteKey           string
 	SourcePaidServiceProofID string
 	LastServiceRefund        *ServiceRefundProof
+	TerminalFullRefund       bool `json:"terminalFullRefund,omitempty"`
 }
 
 // PlanEffectOwnerPort is bound to paymentus's transaction-aware owner reader.
@@ -155,11 +159,32 @@ func (c ConfiguredProLimits) ResolveProLimits(planID string, grants PlanEffectGr
 func checkedProLimits(snapshot ProLimitsSnapshot, grants PlanEffectGrants) (ProLimitsSnapshot, error) {
 	l := snapshot.Limits
 	if snapshot.Version == "" || !snapshot.ProjectGuestsKnown || l.ProjectContributors == nil ||
+		l.ProtectedProjects == nil || l.ProtectedProjectUsers == nil ||
+		*l.ProtectedProjects <= 0 || *l.ProtectedProjectUsers <= 0 ||
 		l.Contributors != grants.Contributors || *l.ProjectContributors != grants.ProjectContributors ||
 		l.AIQuestions != grants.AIQuestions || l.AIPaysFor != grants.AIPaysFor ||
 		l.ProjectGuests < 0 || len(l.AIModelClasses) == 0 || validateLimits(l) != nil {
 		return ProLimitsSnapshot{}, ErrPlanEffectUnproved
 	}
+	if (grants.ProtectedProjects == nil) != (grants.ProtectedProjectUsers == nil) {
+		return ProLimitsSnapshot{}, ErrPlanEffectUnproved
+	}
+	if grants.ProtectedProjects != nil && (*grants.ProtectedProjects != *l.ProtectedProjects || *grants.ProtectedProjectUsers != *l.ProtectedProjectUsers) {
+		return ProLimitsSnapshot{}, ErrPlanEffectUnproved
+	}
 	snapshot.Limits = clonePlanLimits(l)
 	return snapshot, nil
+}
+
+func clonePlanEffectGrants(in PlanEffectGrants) PlanEffectGrants {
+	out := in
+	if in.ProtectedProjects != nil {
+		value := *in.ProtectedProjects
+		out.ProtectedProjects = &value
+	}
+	if in.ProtectedProjectUsers != nil {
+		value := *in.ProtectedProjectUsers
+		out.ProtectedProjectUsers = &value
+	}
+	return out
 }

@@ -73,8 +73,9 @@ func (planFirstMonth) ReadFirstAdmittedMonth(context.Context, string, string, st
 
 func TestPlanHTTPFreeProEndedAndForeignAccount(t *testing.T) {
 	five := int64(5)
-	free := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 2, AIQuestions: 7, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
-	pro := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 3, ProjectContributors: &five, AIQuestions: 11, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
+	zero := int64(0)
+	free := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 2, ProtectedProjects: &zero, ProtectedProjectUsers: &zero, AIQuestions: 7, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
+	pro := models4datatug.PlanLimits{Contributors: 1, ProjectGuests: 3, ProjectContributors: &five, ProtectedProjects: &five, ProtectedProjectUsers: &five, AIQuestions: 11, AIModelClasses: []string{"fast"}, AIPaysFor: "owner"}
 	config := facade4datatug.PlanConfig{FreeFirstMonthLimits: free, FreeLaterMonthLimits: free, ProLimits: pro, FreeModels: []facade4datatug.PlanModel{{ID: "model", Class: "fast", Weight: 1, Default: true}}, ProModels: []facade4datatug.PlanModel{{ID: "model", Class: "fast", Weight: 1, Default: true}}, DailyLimit: 17, ActiveGrace: time.Hour, PastDueGrace: 72 * time.Hour, Enforced: true, UpgradeURL: "https://example.com/pro"}
 	d := &planDirectory{}
 	p := &planStore{}
@@ -103,13 +104,17 @@ func TestPlanHTTPFreeProEndedAndForeignAccount(t *testing.T) {
 		return w.Code, out
 	}
 	status, freeResponse := read("/v0/datatug/plan?project=foreign")
-	if status != 200 || freeResponse.Plan != "free" || freeResponse.AccountID != "personal-1" || len(freeResponse.Accounts) != 1 {
+	if status != 200 || freeResponse.Plan != "free" || freeResponse.AccountID != "personal-1" || len(freeResponse.Accounts) != 1 ||
+		freeResponse.Limits.ProtectedProjects == nil || *freeResponse.Limits.ProtectedProjects != 0 ||
+		freeResponse.Limits.ProtectedProjectUsers == nil || *freeResponse.Limits.ProtectedProjectUsers != 0 {
 		t.Fatal(status, freeResponse)
 	}
 	facts := facade4datatug.PlanFacts{AccountKind: "personal", Tier: "pro", Period: "month", ProviderStatus: "active", PaidUntil: &now, Grants: &pro}
 	p.record = facade4datatug.PlanStateFor(facts).Record
 	status, proResponse := read("/v0/datatug/plan?account=personal-1")
-	if status != 200 || proResponse.Plan != "pro" || proResponse.Limits.ProjectContributors == nil || *proResponse.Limits.ProjectContributors != 5 {
+	if status != 200 || proResponse.Plan != "pro" || proResponse.Limits.ProjectContributors == nil || *proResponse.Limits.ProjectContributors != 5 ||
+		proResponse.Limits.ProtectedProjects == nil || *proResponse.Limits.ProtectedProjects != 5 ||
+		proResponse.Limits.ProtectedProjectUsers == nil || *proResponse.Limits.ProtectedProjectUsers != 5 {
 		t.Fatal(status, proResponse)
 	}
 	encoded, err := json.Marshal(proResponse)
@@ -121,7 +126,7 @@ func TestPlanHTTPFreeProEndedAndForeignAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	limits := wire["limits"].(map[string]any)
-	if limits["projectContributors"] != float64(5) {
+	if limits["projectContributors"] != float64(5) || limits["protectedProjects"] != float64(5) || limits["protectedProjectUsers"] != float64(5) {
 		t.Fatal(limits)
 	}
 	facts.ProviderStatus = "canceled"
