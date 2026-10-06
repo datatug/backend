@@ -46,6 +46,7 @@ func (w AccountPlanWriter) Apply(ctx context.Context, effect AccountPlanEffect) 
 	}
 	var outcome PlanApplyOutcome
 	var frozenLimits *ProLimitsSnapshot
+	var protectedProjects, protectedUsers int64
 	err := w.DB.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		outcome = ""
 		current, err := w.Owner.ReadOwner(ctx, tx, effect.Fence.Mode, effect.Fence.Family, effect.Fence.AccountID)
@@ -124,6 +125,14 @@ func (w AccountPlanWriter) Apply(ctx context.Context, effect AccountPlanEffect) 
 				if resolveErr != nil {
 					return resolveErr
 				}
+				// Freeze only explicit, verified source grants before writes and
+				// preserve the same scalar snapshot across transaction retries.
+				if effect.Grants.ProtectedProjects != nil && effect.Grants.ProtectedProjectUsers != nil {
+					if *effect.Grants.ProtectedProjects <= 0 || *effect.Grants.ProtectedProjectUsers <= 0 {
+						return ErrPlanEffectUnproved
+					}
+					protectedProjects, protectedUsers = *effect.Grants.ProtectedProjects, *effect.Grants.ProtectedProjectUsers
+				}
 				frozenLimits = &snapshot
 			}
 			limits := clonePlanLimits(frozenLimits.Limits)
@@ -201,12 +210,15 @@ func (w AccountPlanWriter) Apply(ctx context.Context, effect AccountPlanEffect) 
 				application.LastProQuoteKey = effect.QuoteKey
 				application.LastProPlanID = effect.PlanID
 				application.LastProPaidServiceProofID = effect.PaidServiceProofID
+				// Legacy config-resolved display limits do not prove paid grants.
+				application.LastProProtectedProjects, application.LastProProtectedProjectUsers = protectedProjects, protectedUsers
 			} else {
 				application.LastProSubscriptionID = ""
 				application.LastProOwnerGeneration = 0
 				application.LastProQuoteKey = ""
 				application.LastProPlanID = ""
 				application.LastProPaidServiceProofID = ""
+				application.LastProProtectedProjects, application.LastProProtectedProjectUsers = 0, 0
 			}
 		}
 		appRec := record.NewRecordWithData(models4datatug.NewPlanApplicationKey(effect.Fence.Mode, effect.Fence.Family, effect.Fence.AccountID), &application)

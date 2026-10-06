@@ -57,6 +57,10 @@ type PlanApplication struct {
 	LastProQuoteKey               string   `json:"lastProQuoteKey,omitempty" firestore:"lastProQuoteKey,omitempty"`
 	LastProPlanID                 string   `json:"lastProPlanId,omitempty" firestore:"lastProPlanId,omitempty"`
 	LastProPaidServiceProofID     string   `json:"lastProPaidServiceProofId,omitempty" firestore:"lastProPaidServiceProofId,omitempty"`
+	// These values come only from the verified payment effect's explicit grants,
+	// never the limits resolver's legacy config fallback. Zero means unproved.
+	LastProProtectedProjects     int64 `json:"lastProProtectedProjects,omitempty" firestore:"lastProProtectedProjects,omitempty"`
+	LastProProtectedProjectUsers int64 `json:"lastProProtectedProjectUsers,omitempty" firestore:"lastProProtectedProjectUsers,omitempty"`
 }
 
 // PaidMoneyMonth matches the core paid-month fields. Core's published

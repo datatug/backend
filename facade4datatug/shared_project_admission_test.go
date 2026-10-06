@@ -56,7 +56,7 @@ func paidCreateFixture(t *testing.T) (dal.DB, *SharedProjectService, PaidSharedP
 	f := PlanOwnerFence{Mode: o.Mode, Family: o.Product, AccountID: "personal-1", OwnerSubscriptionID: "subscription-1", OwnerGeneration: 1, SubscriptionRevision: 1}
 	end := sharedTestTime.Add(24 * time.Hour)
 	plan := models4datatug.PlanRecord{V: 1, Plan: "pro", Status: "active", Period: "month", PaidUntil: &end, Limits: &config.ProLimits}
-	app := models4datatug.PlanApplication{V: 1, Mode: f.Mode, Family: f.Family, AccountID: f.AccountID, OwnerSubscriptionID: f.OwnerSubscriptionID, OwnerGeneration: 1, SubscriptionRevision: 1, EffectDigest: "accepted-effect", LimitsVersion: "paid-grant-1", LastProSubscriptionID: f.OwnerSubscriptionID, LastProOwnerGeneration: 1, LastProQuoteKey: "quote-1", LastProPlanID: "datatug-pro-monthly", LastProPaidServiceProofID: "paid-invoice-1"}
+	app := models4datatug.PlanApplication{V: 1, Mode: f.Mode, Family: f.Family, AccountID: f.AccountID, OwnerSubscriptionID: f.OwnerSubscriptionID, OwnerGeneration: 1, SubscriptionRevision: 1, EffectDigest: "accepted-effect", LimitsVersion: "paid-grant-1", LastProSubscriptionID: f.OwnerSubscriptionID, LastProOwnerGeneration: 1, LastProQuoteKey: "quote-1", LastProPlanID: "datatug-pro-monthly", LastProPaidServiceProofID: "paid-invoice-1", LastProProtectedProjects: 5, LastProProtectedProjectUsers: 5}
 	q := models4datatug.ProtectedProjectQuota{Version: 1, Mode: o.Mode, Product: o.Product, PayerID: f.AccountID, BasisDigest: "verified-complete-empty-inventory", Revision: 1}
 	qr, _ := models4datatug.NewProtectedProjectQuotaRecord(o.Mode, o.Product, f.AccountID)
 	if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
@@ -177,7 +177,7 @@ func TestPaidSharedCreateConcurrentSixthFencesAcrossSpaces(t *testing.T) {
 }
 
 func TestPaidSharedCreateEndProvenanceAndSponsorRefuse(t *testing.T) {
-	for _, name := range []string{"paid-boundary", "scheduled-end", "refunded", "paused", "unknown-tier", "nil-limits", "missing-frozen-pair", "one-frozen-limit", "missing-proof", "stale-owner", "wrong-mode", "wrong-sponsor", "missing-quota", "malformed-quota"} {
+	for _, name := range []string{"paid-boundary", "scheduled-end", "refunded", "paused", "unknown-tier", "nil-limits", "missing-frozen-pair", "one-frozen-limit", "missing-proof", "missing-source-pair", "source-mismatch", "stale-owner", "wrong-mode", "wrong-sponsor", "missing-quota", "malformed-quota"} {
 		t.Run(name, func(t *testing.T) {
 			db, s, _ := paidCreateFixture(t)
 			ctx := context.Background()
@@ -204,6 +204,11 @@ func TestPaidSharedCreateEndProvenanceAndSponsorRefuse(t *testing.T) {
 				paidUpdate(t, db, planKey, "limits", models4datatug.PlanLimits{Contributors: 1, AIQuestions: 11, AIModelClasses: []string{"fast", "standard"}, AIPaysFor: "owner", ProtectedProjects: &five})
 			case "missing-proof":
 				paidUpdate(t, db, appKey, "lastProPaidServiceProofId", "")
+			case "missing-source-pair":
+				paidUpdate(t, db, appKey, "lastProProtectedProjects", int64(0))
+				paidUpdate(t, db, appKey, "lastProProtectedProjectUsers", int64(0))
+			case "source-mismatch":
+				paidUpdate(t, db, appKey, "lastProProtectedProjectUsers", int64(6))
 			case "stale-owner":
 				paidUpdate(t, db, appKey, "subscriptionRevision", int64(2))
 			case "wrong-mode":
@@ -405,5 +410,121 @@ func TestPaidSharedCreateTestProjectionNeverAdmitsLiveProject(t *testing.T) {
 	basis := InitialProtectedProjectBasis{Digest: "empty", Allocated: 0}
 	if err := InitializeProtectedProjectQuota(ctx, db, o, "actor", "personal-1", basis, paidBasisProof{expected: basis}); !errors.Is(err, ErrProtectedProjectQuota) {
 		t.Fatalf("TEST initialization %v", err)
+	}
+}
+
+// Exercise the real writer: legacy effects can project the config's 5x5 pair,
+// but that projection must not masquerade as a frozen paid grant.
+func TestPaidSharedCreateRequiresWriterSourceProtectedGrants(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit-%t", explicit), func(t *testing.T) {
+			ctx := context.Background()
+			f := newPlanWriterFixture(t)
+			_, _, o := paidCreateFixture(t)
+			f.effect.BuyerID = "actor"
+			f.effect.LastPaidEnd = sharedTestTime.Add(24 * time.Hour)
+			f.effect.LastServiceRefund.ServiceEndUTC = f.effect.LastPaidEnd
+			f.limits.snapshot.Limits = clonePlanLimits(o.Config.ProLimits)
+			f.effect.Grants.Contributors = o.Config.ProLimits.Contributors
+			f.effect.Grants.ProjectContributors = *o.Config.ProLimits.ProjectContributors
+			f.effect.Grants.AIQuestions = o.Config.ProLimits.AIQuestions
+			f.effect.Grants.AIPaysFor = o.Config.ProLimits.AIPaysFor
+			if explicit {
+				projects, users := int64(5), int64(5)
+				f.effect.Grants.ProtectedProjects, f.effect.Grants.ProtectedProjectUsers = &projects, &users
+			}
+			f.setAuthority(t, f.effect.Fence, 0, true)
+			if outcome, err := f.writer.Apply(ctx, f.effect); err != nil || outcome != PlanApplied {
+				t.Fatal(outcome, err)
+			}
+			plan := f.publicPlan(t)
+			if plan.Limits == nil || plan.Limits.ProtectedProjects == nil || *plan.Limits.ProtectedProjects != 5 || plan.Limits.ProtectedProjectUsers == nil || *plan.Limits.ProtectedProjectUsers != 5 {
+				t.Fatalf("projection %+v", plan)
+			}
+			qr, q := models4datatug.NewProtectedProjectQuotaRecord("live", "datatug", "personal-1")
+			*q = models4datatug.ProtectedProjectQuota{Version: 1, Mode: "live", Product: "datatug", PayerID: "personal-1", BasisDigest: "verified-empty-inventory", Revision: 1}
+			if err := f.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Insert(ctx, qr) }); err != nil {
+				t.Fatal(err)
+			}
+			s, err := NewPaidSharedProjectService(f.db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := sharedCommand()
+			ref, err := s.Create(ctx, c)
+			if explicit {
+				if err != nil || ref.ProjectID == "" || paidQuota(t, f.db).Allocated != 1 {
+					t.Fatalf("paid source %+v %v", ref, err)
+				}
+			} else {
+				if !errors.Is(err, ErrPlanEffectUnproved) {
+					t.Fatalf("config-only projection admitted: %+v %v", ref, err)
+				}
+				if paidQuota(t, f.db).Allocated != 0 {
+					t.Fatal("legacy refusal allocated quota")
+				}
+				r, _ := models4datatug.NewSharedProjectCreateReceiptRecord(c.SpaceID, c.CommandID)
+				if err := f.db.Get(ctx, r); !record.IsNotFound(err) {
+					t.Fatalf("legacy refusal receipt: %v", err)
+				}
+
+				project, _ := models4datatug.NewSharedProjectRecord(c.SpaceID, "project-1")
+				allocation, _ := models4datatug.NewProjectAdmissionRecord(c.SpaceID, "project-1")
+				for _, r := range []record.Record{project, allocation} {
+					if err := f.db.Get(ctx, r); !record.IsNotFound(err) {
+						t.Fatalf("legacy refusal left durable project/allocation: %v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAccountPlanWriterProtectedSourceProvenanceLifecycle(t *testing.T) {
+	for _, final := range []string{"replacement-legacy", "ended"} {
+		t.Run(final, func(t *testing.T) {
+			ctx := context.Background()
+			f := newPlanWriterFixture(t)
+			projects, users := int64(5), int64(5)
+			f.effect.Grants.ProtectedProjects, f.effect.Grants.ProtectedProjectUsers = &projects, &users
+			f.owner.onReconcile = func() { projects, users = 99, 99 }
+			apply := func() {
+				t.Helper()
+				f.setAuthority(t, f.effect.Fence, f.effect.MoneyIngestEpoch, true)
+				if got, err := f.writer.Apply(ctx, f.effect); err != nil || got != PlanApplied {
+					t.Fatal(got, err)
+				}
+			}
+			apply()
+			projects, users = 99, 99 // no alias to caller's mutable payment effect
+			if a := f.application(t); a.LastProProtectedProjects != 5 || a.LastProProtectedProjectUsers != 5 {
+				t.Fatal(a)
+			}
+			f.effect.Grants.ProtectedProjects, f.effect.Grants.ProtectedProjectUsers = nil, nil
+			f.effect.BasisOnly = true
+			f.effect.Fence.SubscriptionRevision++
+			f.effect.SourceRevision++
+			f.effect.MoneyIngestEpoch++
+			apply()
+			if a := f.application(t); a.LastProProtectedProjects != 5 || a.LastProProtectedProjectUsers != 5 {
+				t.Fatal(a)
+			}
+			f.effect.BasisOnly = false
+			f.effect.Fence.SubscriptionRevision++
+			f.effect.SourceRevision++
+			f.effect.MoneyIngestEpoch++
+			if final == "replacement-legacy" {
+				f.effect.Fence.OwnerSubscriptionID, f.effect.SourceSubscriptionID = "sub-B", "sub-B"
+				f.effect.Fence.OwnerGeneration++
+				f.effect.QuoteKey = "quote-B"
+			} else {
+				f.effect.TerminalFullRefund = true
+				f.effect.LastServiceRefund.RefundedInFull = true
+			}
+			apply()
+			if a := f.application(t); a.LastProProtectedProjects != 0 || a.LastProProtectedProjectUsers != 0 {
+				t.Fatal(a)
+			}
+		})
 	}
 }
