@@ -69,6 +69,12 @@ func SharedProjectCreateDigest(actorID, spaceID, commandID, title string) string
 	return hex.EncodeToString(digest[:])
 }
 
+func PaidSharedProjectCreateDigest(actorID, spaceID, commandID, title, payer, mode, product string) string {
+	b, _ := json.Marshal([8]string{"paid-shared-project-create/1", actorID, spaceID, commandID, title, payer, mode, product})
+	digest := sha256.Sum256(b)
+	return hex.EncodeToString(digest[:])
+}
+
 // SharedProjectCreateReceipt is immutable, private command evidence. It is not
 // a project index, a module-enablement record, or a billing entitlement.
 type SharedProjectCreateReceipt struct {
@@ -80,6 +86,9 @@ type SharedProjectCreateReceipt struct {
 	RequestDigest string    `json:"requestDigest" firestore:"requestDigest"`
 	ProjectID     string    `json:"projectID" firestore:"projectID"`
 	CreatedAt     time.Time `json:"createdAt" firestore:"createdAt"`
+	PayerID       string    `json:"payerID,omitempty" firestore:"payerID,omitempty"`
+	Mode          string    `json:"mode,omitempty" firestore:"mode,omitempty"`
+	Product       string    `json:"product,omitempty" firestore:"product,omitempty"`
 }
 
 func (r SharedProjectCreateReceipt) Validate() error {
@@ -94,7 +103,14 @@ func (r SharedProjectCreateReceipt) Validate() error {
 	if err := ValidateSharedProjectTitle(r.Title); err != nil {
 		return err
 	}
-	if r.RequestDigest != SharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title) {
+	digest := SharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title)
+	if r.PayerID != "" || r.Mode != "" || r.Product != "" {
+		if ValidateSharedProjectIdentifier(r.PayerID) != nil || ValidateSharedProjectIdentifier(r.Product) != nil || (r.Mode != "test" && r.Mode != "live") {
+			return fmt.Errorf("invalid paid project binding")
+		}
+		digest = PaidSharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title, r.PayerID, r.Mode, r.Product)
+	}
+	if r.RequestDigest != digest {
 		return fmt.Errorf("invalid shared project request digest")
 	}
 	return nil
