@@ -264,15 +264,15 @@ func TestPersonalPlanPaidAccessBoundaries(t *testing.T) {
 			t.Fatalf("at %s status %s: %+v, %v", clock.now, p.record.Status, got, err)
 		}
 	}
-	clock.now = paid.Add(time.Hour)
-	assertPlan("pro") // later than, not at, paidUntil plus grace
+	clock.now = paid.Add(time.Hour).Add(-time.Nanosecond)
+	assertPlan("pro") // access is half-open, including any explicit legacy grace
 	clock.now = clock.now.Add(time.Nanosecond)
 	assertPlan("free")
 	p.record.Status = "trialing"
 	clock.now = paid.Add(30 * time.Minute)
 	assertPlan("pro")
 	p.record.Status = "past_due"
-	clock.now = paid.Add(72 * time.Hour)
+	clock.now = paid.Add(72 * time.Hour).Add(-time.Nanosecond)
 	assertPlan("pro")
 	clock.now = clock.now.Add(time.Nanosecond)
 	assertPlan("free")
@@ -666,5 +666,87 @@ func TestPersonalPlanCallerAdmissionBinding(t *testing.T) {
 	got, err = s.Read(context.Background(), "caller", "", "")
 	if err != nil || got.AI.Today.Used != 5 || len(legacy.instants) != 1 {
 		t.Fatal(got, err, legacy.instants)
+	}
+}
+
+// Zero grace represents strict paid-through access, including a renewal retry
+// while the existing period is still paid. It cannot extend an ended period.
+func TestPersonalPlanZeroGracePaidBoundary(t *testing.T) {
+	for _, status := range []string{"active", "trialing", "past_due"} {
+		t.Run(status, func(t *testing.T) {
+			s, _, p, _, _, clock := validPlanTestService()
+			config := s.Config.(testConfigReader).config
+			config.ActiveGrace, config.PastDueGrace = 0, 0
+			s.Config = testConfigReader{config: config}
+			paid := clock.now.Add(time.Hour)
+			p.record = &models4datatug.PlanRecord{V: 1, Plan: "pro", Status: status, PaidUntil: &paid, Limits: &config.ProLimits}
+			for _, tc := range []struct {
+				at   time.Time
+				want string
+			}{
+				{paid.Add(-time.Nanosecond), "pro"}, {paid, "free"}, {paid.Add(time.Nanosecond), "free"},
+			} {
+				clock.now = tc.at
+				got, err := s.Read(context.Background(), "caller", "", "")
+				if err != nil || got.EffectivePlan != tc.want {
+					t.Fatalf("at %s want %s: %+v, %v", tc.at, tc.want, got, err)
+				}
+			}
+			// End/refund/cancellation defeats even a still-future paid-through value.
+			future := paid.Add(time.Hour)
+			p.record.PaidUntil = &future
+			p.record.Status = "ended"
+			got, err := s.Read(context.Background(), "caller", "", "")
+			if err != nil || got.EffectivePlan != "free" {
+				t.Fatal(got, err)
+			}
+			p.record.Status = status
+			p.record.EndsAt = &paid
+			got, err = s.Read(context.Background(), "caller", "", "")
+			if err != nil || got.EffectivePlan != "free" {
+				t.Fatal(got, err)
+			}
+		})
+	}
+}
+
+func TestValidatePlanConfigGrace(t *testing.T) {
+	s, _, _, _, _, _ := validPlanTestService()
+	base := s.Config.(testConfigReader).config
+	for _, tc := range []struct {
+		name            string
+		active, pastDue time.Duration
+		valid           bool
+	}{
+		{"zero strict policy", 0, 0, true},
+		{"equal explicit legacy grace", time.Hour, time.Hour, true},
+		{"longer legacy retry grace", time.Hour, 2 * time.Hour, true},
+		{"negative active", -time.Nanosecond, 0, false},
+		{"negative past due", 0, -time.Nanosecond, false},
+		{"past due shorter than active", time.Hour, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := base
+			config.ActiveGrace, config.PastDueGrace = tc.active, tc.pastDue
+			err := ValidatePlanConfig(config)
+			if tc.valid && err != nil {
+				t.Fatal(err)
+			}
+			if !tc.valid && !errors.Is(err, ErrPlanUnavailable) {
+				t.Fatalf("want unavailable: %v", err)
+			}
+		})
+	}
+}
+
+func TestPersonalPlanExplicitGraceEndIsExclusive(t *testing.T) {
+	s, _, p, _, _, clock := validPlanTestService()
+	config := s.Config.(testConfigReader).config
+	paid := clock.now
+	p.record = &models4datatug.PlanRecord{V: 1, Plan: "pro", Status: "active", PaidUntil: &paid, Limits: &config.ProLimits}
+	clock.now = paid.Add(config.ActiveGrace)
+	got, err := s.Read(context.Background(), "caller", "", "")
+	if err != nil || got.EffectivePlan != "free" {
+		t.Fatal(got, err)
 	}
 }
