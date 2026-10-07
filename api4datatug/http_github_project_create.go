@@ -65,6 +65,9 @@ func (o GitHubProjectRouteOptions) service() githubProjectService {
 	if o.serviceOverride != nil {
 		return o.serviceOverride
 	}
+	if o.Service == nil {
+		return nil
+	}
 	return o.Service
 }
 func (o GitHubProjectRouteOptions) provider() githubProjectProvider {

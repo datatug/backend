@@ -431,6 +431,33 @@ func TestHostedGitHubRoutesFailClosedBeforePrivateProviderRead(t *testing.T) {
 	}
 }
 
+func TestHostedGitHubRoutesRefuseConfiguredProviderWithoutPaidService(t *testing.T) {
+	options := GitHubProjectRouteOptions{Provider: &githubauth4datatug.Provider{}, AuthorizeRepository: func(context.Context, string, int64, string, string) (facade4datatug.GitHubCreateRepository, error) {
+		t.Fatal("provider called without paid service")
+		return nil, nil
+	}}
+	for _, tc := range []struct {
+		name        string
+		handler     http.HandlerFunc
+		method, url string
+	}{
+		{"summary", httpGetGitHubProjectSummary(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
+		{"branches", httpGetGitHubProjectBranches(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug"},
+		{"capabilities", httpGetGitHubProjectCapabilities(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug"},
+		{"query listing", httpGetGitHubAllQueries(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
+		{"query save", httpPostGitHubSaveQuery(options), http.MethodPost, "/v0/datatug/queries/save_query"},
+		{"project create", httpPostCreateGitHubProject(options), http.MethodPost, "/v0/datatug/projects/create_project?store=github.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.handler(w, httptest.NewRequest(tc.method, tc.url, nil))
+			if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "github_unavailable") {
+				t.Fatalf("missing paid service status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestHostedGitHubSaveRejectsUnknownFieldsAndLostAuthorityWithoutMutation(t *testing.T) {
 	stubRoutePrincipal(t)
 	options, provider, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
