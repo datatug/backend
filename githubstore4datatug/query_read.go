@@ -47,6 +47,8 @@ func (s *ProjectSnapshot) ReadQueryRevision(ctx context.Context, folderPath, id 
 	if err := json.Unmarshal(definition, &fields); err != nil || fields == nil {
 		return nil, ErrInvalidProjectSnapshot
 	}
+	var declaredID string
+	identityMatches := json.Unmarshal(fields["id"], &declaredID) == nil && declaredID == id
 	if folderPath == "" {
 		folderPath = "~"
 	}
@@ -64,7 +66,7 @@ func (s *ProjectSnapshot) ReadQueryRevision(ctx context.Context, folderPath, id 
 	result := &QueryReadResult{Query: encoded, BranchHead: s.Head, SaveSupported: false, UnsupportedSaveReason: "This definition contains metadata outside the supported save contract."}
 	checksum := sha256.Sum256(append(append([]byte(nil), definition...), body...))
 	result.Revision = "read-" + hex.EncodeToString(checksum[:])
-	if !strings.HasSuffix(definitionPath, ".query.json") || (kind != "SQL" && kind != "DTQL") {
+	if !identityMatches || !strings.HasSuffix(definitionPath, ".query.json") || (kind != "SQL" && kind != "DTQL") {
 		return result, nil
 	}
 	for key := range fields {
@@ -91,12 +93,24 @@ func (s *ProjectSnapshot) ReadQueryRevision(ctx context.Context, folderPath, id 
 		}
 	}()
 	root := filepath.Join(tmp, "project")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return nil, err
+	}
+	scratch, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := scratch.Close(); closeErr != nil {
+			out = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("close query read scratch: %w", closeErr))
+		}
+	}()
 	for name, content := range pair {
-		filename := filepath.Join(root, filepath.FromSlash(name))
-		if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+		if err := scratch.MkdirAll(path.Dir(name), 0o700); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(filename, content, 0o600); err != nil {
+		if err := scratch.WriteFile(name, content, 0o600); err != nil {
 			return nil, err
 		}
 	}

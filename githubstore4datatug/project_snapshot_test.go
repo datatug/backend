@@ -100,6 +100,87 @@ func TestPinnedProjectSnapshotRefusesBlobMismatch(t *testing.T) {
 	}
 }
 
+func TestPinnedProjectSnapshotRejectsUntrustedTreeEntriesBeforePrivateRead(t *testing.T) {
+	fake := newSnapshotFake(t)
+	original := append([]githubauth4datatug.GitHubTreeEntry(nil), fake.tree...)
+	for _, tc := range []struct {
+		name   string
+		mutate func([]githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry
+		want   error
+	}{
+		{"duplicate path", func(tree []githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry {
+			return append(tree, tree[0])
+		}, ErrInvalidProjectSnapshot},
+		{"untrusted parent traversal", func(tree []githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry {
+			return append(tree, githubauth4datatug.GitHubTreeEntry{Path: "../private", Type: "blob", Mode: "100644", OID: createTreeOID})
+		}, ErrInvalidProjectSnapshot},
+		{"symlink in project", func(tree []githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry {
+			return append(tree, githubauth4datatug.GitHubTreeEntry{Path: "demo-project-1/link", Type: "blob", Mode: "120000", OID: createTreeOID})
+		}, ErrInvalidProjectSnapshot},
+		{"submodule in project", func(tree []githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry {
+			return append(tree, githubauth4datatug.GitHubTreeEntry{Path: "demo-project-1/other", Type: "commit", Mode: "160000", OID: createTreeOID})
+		}, ErrInvalidProjectSnapshot},
+		{"oversized project file", func(tree []githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry {
+			return append(tree, githubauth4datatug.GitHubTreeEntry{Path: "demo-project-1/large", Type: "blob", Mode: "100644", OID: createTreeOID, Size: maxProjectReadFile + 1})
+		}, ErrInvalidProjectSnapshot},
+		{"missing manifest", func(tree []githubauth4datatug.GitHubTreeEntry) []githubauth4datatug.GitHubTreeEntry {
+			for i, entry := range tree {
+				if entry.Path == "demo-project-1/datatug-project.json" {
+					return append(tree[:i], tree[i+1:]...)
+				}
+			}
+			return tree
+		}, ErrProjectFileMissing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake.tree = tc.mutate(append([]githubauth4datatug.GitHubTreeEntry(nil), original...))
+			if _, err := OpenProjectSnapshot(context.Background(), fake, "demo-project-1", "work"); !errors.Is(err, tc.want) {
+				t.Fatalf("untrusted tree accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestPinnedProjectSnapshotRefusesCorruptPrivateMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+		content    []byte
+		read       func(context.Context, *ProjectSnapshot) error
+	}{
+		{"missing project identity", "demo-project-1/datatug-project.json", []byte(`{"id":"","title":"Project","access":"protected"}`), func(ctx context.Context, s *ProjectSnapshot) error { _, err := s.ProjectSummary(ctx); return err }},
+		{"malformed query listing", "demo-project-1/queries/corrupt.query.json", []byte(`{"id":`), func(ctx context.Context, s *ProjectSnapshot) error { _, err := s.AllQueries(ctx); return err }},
+		{"malformed query read", "demo-project-1/queries/corrupt.query.json", []byte(`{"id":`), func(ctx context.Context, s *ProjectSnapshot) error {
+			_, err := s.ReadQueryRevision(ctx, "~", "corrupt")
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newSnapshotFake(t)
+			oid := testGitBlobOID(tc.content)
+			fake.files[oid] = tc.content
+			found := false
+			for i := range fake.tree {
+				if fake.tree[i].Path == tc.file {
+					fake.tree[i].OID = oid
+					fake.tree[i].Size = int64(len(tc.content))
+					found = true
+					break
+				}
+			}
+			if !found {
+				fake.tree = append(fake.tree, githubauth4datatug.GitHubTreeEntry{Path: tc.file, Type: "blob", Mode: "100644", OID: oid, Size: int64(len(tc.content))})
+			}
+			snapshot, err := OpenProjectSnapshot(context.Background(), fake, "demo-project-1", "work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.read(context.Background(), snapshot); !errors.Is(err, ErrInvalidProjectSnapshot) {
+				t.Fatalf("corrupt metadata returned: %v", err)
+			}
+		})
+	}
+}
+
 func TestPinnedProjectSnapshotMarksRichAndLegacyQueriesReadOnly(t *testing.T) {
 	fake := newSnapshotFake(t)
 	snapshot, err := OpenProjectSnapshot(context.Background(), fake, "demo-project-1", "work")
@@ -131,5 +212,35 @@ func TestPinnedProjectSnapshotReturnsCoreRevisionForNarrowSavedQuery(t *testing.
 	read, err := snapshot.ReadQueryRevision(context.Background(), "~", "saved")
 	if err != nil || !read.SaveSupported || len(read.Revision) != 64 || read.BranchHead != createCommittedHead {
 		t.Fatalf("saved read %+v err=%v", read, err)
+	}
+}
+
+func TestPinnedProjectSnapshotKeepsUnsupportedQueryMetadataReadOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name, metadata string
+	}{
+		{"unknown top-level field", `{"id":"saved","title":"Saved","type":"DTQL","purpose":"legacy contract"}`},
+		{"unknown nested federation field", `{"id":"saved","title":"Saved","type":"DTQL","federation":{"ovdbBaseUrl":"https://demodb.dev/ovdb","expectedServerIdentity":"legacy"}}`},
+		{"identity differs from path", `{"id":"other","title":"Saved","type":"DTQL"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newSnapshotFake(t)
+			for name, content := range map[string][]byte{
+				"demo-project-1/queries/saved.query.json": []byte(tc.metadata),
+				"demo-project-1/queries/saved.query.dtql": []byte("SELECT CustomerId FROM chinook.Customer"),
+			} {
+				oid := testGitBlobOID(content)
+				fake.files[oid] = content
+				fake.tree = append(fake.tree, githubauth4datatug.GitHubTreeEntry{Path: name, Type: "blob", Mode: "100644", OID: oid, Size: int64(len(content))})
+			}
+			snapshot, err := OpenProjectSnapshot(context.Background(), fake, "demo-project-1", "work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			read, err := snapshot.ReadQueryRevision(context.Background(), "~", "saved")
+			if err != nil || read.SaveSupported || read.Revision == "" || !strings.Contains(string(read.Query), `"text"`) {
+				t.Fatalf("unsupported definition lost on read: %+v %v", read, err)
+			}
+		})
 	}
 }

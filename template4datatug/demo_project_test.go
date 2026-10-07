@@ -153,3 +153,44 @@ func TestDemoProjectRejectsPathTraversalAndModifiedManifest(t *testing.T) {
 		t.Fatalf("modified file hash accepted: %v", err)
 	}
 }
+
+func TestDemoProjectRejectsInvalidIdentityAndIncompleteArchive(t *testing.T) {
+	if _, err := CloneDemoProject("work", "", "Customer queries", time.Now()); !errors.Is(err, ErrInvalidTemplate) {
+		t.Fatalf("empty project identity accepted: %v", err)
+	}
+	manifestBytes, err := assets.ReadFile("assets/demo-project-1-manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeDemoProject([]byte("not a gzip archive"), manifestBytes, "work"); !errors.Is(err, ErrInvalidTemplate) {
+		t.Fatalf("corrupt archive accepted: %v", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(manifestBytes, &m); err != nil {
+		t.Fatal(err)
+	}
+	source, err := DemoProjectFiles(DemoProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := m.Files[0]
+	content := source[first.Path]
+	var packed bytes.Buffer
+	gz := gzip.NewWriter(&packed)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: first.Path, Mode: 0644, Typeflag: tar.TypeReg, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeDemoProject(packed.Bytes(), manifestBytes, "work"); !errors.Is(err, ErrInvalidTemplate) {
+		t.Fatalf("incomplete archive accepted: %v", err)
+	}
+}

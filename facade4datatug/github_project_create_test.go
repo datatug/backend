@@ -206,6 +206,46 @@ func TestGitHubCreateRejectsUnwritableRepoBeforeQuota(t *testing.T) {
 	}
 }
 
+func TestGitHubCreateRejectsStaleHeadAndImmutableRepositoryMismatchBeforeQuota(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fakeGitHubCreateRepo)
+		want   error
+	}{
+		{"stale selected branch", func(repo *fakeGitHubCreateRepo) { repo.head = createNewHead }, ErrGitHubProjectConflict},
+		{"unrelated immutable repository", func(repo *fakeGitHubCreateRepo) { repo.scope.RepositoryID++ }, ErrSharedProjectUnauthorized},
+		{"unrelated GitHub actor", func(repo *fakeGitHubCreateRepo) { repo.scope.ActorID = "other" }, ErrSharedProjectUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, service, _ := paidCreateFixture(t)
+			repo := githubRepo()
+			tc.mutate(repo)
+			if _, err := service.CreateGitHubProject(context.Background(), githubCommand(), repo); !errors.Is(err, tc.want) {
+				t.Fatalf("untrusted create accepted: %v", err)
+			}
+			if repo.commitCount != 0 || paidQuota(t, db).Allocated != 0 {
+				t.Fatal("preflight failure mutated paid quota or Git repository")
+			}
+		})
+	}
+}
+
+func TestGitHubCreateReplayCannotBypassExpiredPaidAccess(t *testing.T) {
+	db, service, _ := paidCreateFixture(t)
+	repo := githubRepo()
+	command := githubCommand()
+	if _, err := service.CreateGitHubProject(context.Background(), command, repo); err != nil {
+		t.Fatal(err)
+	}
+	paidUpdate(t, db, models4datatug.NewCurrentPlanKey("personal-1"), "status", "ended")
+	if _, err := service.CreateGitHubProject(context.Background(), command, repo); !errors.Is(err, ErrSharedProjectUnauthorized) {
+		t.Fatalf("refunded payer replayed paid create: %v", err)
+	}
+	if repo.commitCount != 1 || paidQuota(t, db).Allocated != 1 {
+		t.Fatal("refunded replay changed quota or Git repository")
+	}
+}
+
 func TestGitHubProjectReadRequiresReadyLocatorAndCurrentLinkedContact(t *testing.T) {
 	db, service, _ := paidCreateFixture(t)
 	repo := githubRepo()

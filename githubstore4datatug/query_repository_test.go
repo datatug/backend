@@ -163,6 +163,53 @@ func TestQueryRepositoryDeniesMissingActorProviderAndUnprovableReceipt(t *testin
 	}
 }
 
+func TestQueryRepositoryUpdatesBodyTypeAndProvesSidecarDeletionAtomically(t *testing.T) {
+	ctx := context.Background()
+	fake := &queryFake{snapshotFake: newSnapshotFake(t)}
+	for name, content := range map[string][]byte{
+		"demo-project-1/queries/customers.query.json": []byte(`{"id":"customers","title":"Customers","type":"SQL"}`),
+		"demo-project-1/queries/customers.query.sql":  []byte("SELECT 1"),
+	} {
+		oid := testGitBlobOID(content)
+		fake.files[oid] = content
+		fake.tree = append(fake.tree, githubauth4datatug.GitHubTreeEntry{Path: name, Type: "blob", Mode: "100644", OID: oid, Size: int64(len(content))})
+	}
+	snapshot, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := snapshot.ReadQueryRevision(ctx, "~", "customers")
+	if err != nil || !read.SaveSupported {
+		t.Fatalf("existing query revision %+v %v", read, err)
+	}
+	request := queryRequest()
+	request.Query.ID, request.Query.Title = "customers", "Customers"
+	request.Query.Text = "SELECT CustomerId FROM chinook.Customer"
+	request.ExpectedBranchHead = createCommittedHead
+	request.IfNoneMatch = false
+	request.IfMatch = read.Revision
+	repo := &queryRepository{client: fake}
+	plan, err := repo.PrepareQuerySave(ctx, "demo-project-1", "datatug-demo-project", "work", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deletedOld, addedBody bool
+	for _, change := range plan.Changes {
+		deletedOld = deletedOld || change.Delete && strings.HasSuffix(change.Path, "customers.query.sql")
+		addedBody = addedBody || !change.Delete && strings.HasSuffix(change.Path, "customers.query.dtql")
+	}
+	if !deletedOld || !addedBody {
+		t.Fatalf("type transition did not include exact delete and add: %+v", plan.Changes)
+	}
+	message := "Save DataTug query; DataTug-Operation: type-transition"
+	if head, err := repo.CreateQueryCommit(ctx, "work", createCommittedHead, message, plan); err != nil || head != queryCommitOID {
+		t.Fatalf("atomic pair update head=%q err=%v", head, err)
+	}
+	if head, err := repo.FindQueryCommit(ctx, "work", createCommittedHead, "type-transition", plan); err != nil || head != queryCommitOID {
+		t.Fatalf("sidecar deletion was not proved head=%q err=%v", head, err)
+	}
+}
+
 func TestQueryRepositorySavesPairAtExpectedHeadAndRecoversExactCommit(t *testing.T) {
 	fake := &queryFake{snapshotFake: newSnapshotFake(t)}
 	repo := &queryRepository{client: fake}

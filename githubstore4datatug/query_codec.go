@@ -101,11 +101,24 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 		}
 	}()
 	root := filepath.Join(tmp, "project")
-	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(queryDir)), 0o700); err != nil {
+	if err := os.Mkdir(root, 0o700); err != nil {
+		return nil, err
+	}
+	scratch, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closeErr := scratch.Close(); closeErr != nil {
+			out = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("close query preview scratch: %w", closeErr))
+		}
+	}()
+	if err := scratch.MkdirAll(queryDir, 0o700); err != nil {
 		return nil, err
 	}
 	for name, content := range snapshot {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), content, 0o600); err != nil {
+		if err := scratch.WriteFile(name, content, 0o600); err != nil {
 			return nil, err
 		}
 	}
@@ -117,9 +130,14 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(queryDir)))
+	dir, err := scratch.Open(queryDir)
 	if err != nil {
 		return nil, err
+	}
+	entries, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
 	}
 	result := &QueryMutationPreview{Response: dto.SaveQueryResponse{Query: saved.Query, Revision: string(saved.Revision)}}
 	result.Response.Query.FolderPath = request.Query.FolderPath
@@ -132,7 +150,7 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 			return nil, ErrInvalidQuerySnapshot
 		}
 		name := path.Join(queryDir, entry.Name())
-		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
+		content, err := scratch.ReadFile(name)
 		if err != nil || len(content) > maxQueryPreviewBytes {
 			return nil, ErrInvalidQuerySnapshot
 		}
