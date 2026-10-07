@@ -49,7 +49,10 @@ func NewPaidProjectLinkagePolicy(o PaidProjectLinkageOptions) (*PaidProjectLinka
 	return &PaidProjectLinkagePolicy{paid: snapshotPaidSharedProjectOptions(o.Paid), catalog: catalog, contacts: o.Contacts, manager: o.Manager, targets: o.Targets, now: o.Now}, nil
 }
 func (p *PaidProjectLinkagePolicy) AuthorizeRelationshipMutation(ctx context.Context, tx dal.ReadTransaction, b contract4linkage.RelationshipMutationBatch) error {
-	if p == nil || ctx == nil || sharedProjectPortAbsent(tx) || b.ActorUserID == "" || b.ObservedAt.IsZero() || len(b.Entities) == 0 {
+	if p == nil || p.now == nil || p.paid.validate() != nil || p.catalog.version == "" || !p.catalog.allows(p.catalog.owner) || sharedProjectPortAbsent(p.contacts) || sharedProjectPortAbsent(p.manager) || sharedProjectPortAbsent(p.targets) {
+		return ErrSharedProjectUnavailable
+	}
+	if ctx == nil || sharedProjectPortAbsent(tx) || b.ActorUserID == "" || b.ObservedAt.IsZero() || len(b.Entities) == 0 {
 		return ErrSharedProjectInvalid
 	}
 	tx = sharedProjectReadTransaction{tx}

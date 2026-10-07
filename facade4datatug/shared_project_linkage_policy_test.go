@@ -587,3 +587,32 @@ func TestPaidProjectLinkageFinalBatchSwapAtCap(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPaidProjectLinkageZeroValueAndNilReceiverFailClosed(t *testing.T) {
+	f := newLinkagePolicyFixture(t)
+	if err := f.db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		b, err := f.batch(ctx, tx, "owner-contact", []string{"role-a"}, nil, false)
+		if err != nil {
+			return err
+		}
+		var absent *PaidProjectLinkagePolicy
+		for _, p := range []*PaidProjectLinkagePolicy{absent, {}, {now: func() time.Time { return sharedTestTime }}} {
+			if err := p.AuthorizeRelationshipMutation(ctx, tx, b); !errors.Is(err, ErrSharedProjectUnavailable) {
+				t.Fatalf("invalid policy error %v", err)
+			}
+		}
+		for _, mutate := range []func(*PaidProjectLinkagePolicy){func(p *PaidProjectLinkagePolicy) { p.now = nil }, func(p *PaidProjectLinkagePolicy) { p.catalog = projectRoleCatalog{} }, func(p *PaidProjectLinkagePolicy) { p.contacts = nil }, func(p *PaidProjectLinkagePolicy) { p.manager = (*projectRoleFixtureAuthority)(nil) }, func(p *PaidProjectLinkagePolicy) { p.targets = nil }} {
+			p := *f.policy
+			mutate(&p)
+			if err := p.AuthorizeRelationshipMutation(ctx, tx, b); !errors.Is(err, ErrSharedProjectUnavailable) {
+				t.Fatalf("partial policy error %v", err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if f.authority.managerCalls != 0 || f.authority.targetCalls != 0 {
+		t.Fatal("invalid callback reached authority")
+	}
+}
