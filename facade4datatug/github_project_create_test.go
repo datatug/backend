@@ -17,18 +17,25 @@ const (
 )
 
 type fakeGitHubCreateRepo struct {
-	scope           GitHubCreateRepositoryScope
-	head            string
-	committedMarker string
-	files           map[string][]byte
-	commitCount     int
-	responseLost    bool
-	folderOccupied  bool
-	failBeforeWrite bool
+	scope              GitHubCreateRepositoryScope
+	head               string
+	committedMarker    string
+	files              map[string][]byte
+	commitCount        int
+	responseLost       bool
+	folderOccupied     bool
+	failBeforeWrite    bool
+	findError          error
+	headAfterFirstRead string
+	headReads          int
 }
 
 func (f *fakeGitHubCreateRepo) Scope() GitHubCreateRepositoryScope { return f.scope }
 func (f *fakeGitHubCreateRepo) CurrentHead(_ context.Context, _ string) (string, error) {
+	f.headReads++
+	if f.headAfterFirstRead != "" && f.headReads > 1 {
+		return f.headAfterFirstRead, nil
+	}
 	return f.head, nil
 }
 func (f *fakeGitHubCreateRepo) EnsureFolderEmpty(_ context.Context, _, _ string) error {
@@ -84,10 +91,39 @@ func TestGitHubCreateUncertainOutcomeKeepsHiddenReservationForExactRetry(t *test
 	}
 }
 func (f *fakeGitHubCreateRepo) FindCommitByMarker(_ context.Context, _, expectedHead, marker string, files map[string][]byte) (string, error) {
+	if f.findError != nil {
+		return "", f.findError
+	}
 	if expectedHead == createBaseHead && f.committedMarker == marker && len(files) == len(f.files) {
 		return createNewHead, nil
 	}
 	return "", nil
+}
+
+func TestGitHubCreateKeepsReservationWhenProviderCannotProveSelectedHead(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*fakeGitHubCreateRepo)
+	}{
+		{"branch moved after preflight", func(r *fakeGitHubCreateRepo) { r.headAfterFirstRead = createNewHead }},
+		{"commit history unavailable", func(r *fakeGitHubCreateRepo) { r.findError = errors.New("provider unavailable") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, service, _ := paidCreateFixture(t)
+			repo := githubRepo()
+			tc.mutate(repo)
+			if _, err := service.CreateGitHubProject(context.Background(), githubCommand(), repo); !errors.Is(err, ErrGitHubOutcomeUncertain) {
+				t.Fatalf("uncertain provider state: %v", err)
+			}
+			if repo.commitCount != 0 || paidQuota(t, db).Allocated != 1 {
+				t.Fatalf("unsafe outcome commits=%d quota=%d", repo.commitCount, paidQuota(t, db).Allocated)
+			}
+			opRecord, op := models4datatug.NewGitHubProjectCreateOperationRecord("actor", "op")
+			if err := db.Get(context.Background(), opRecord); err != nil || op.Status != models4datatug.GitHubProjectInitializing {
+				t.Fatalf("intent lost: %+v %v", op, err)
+			}
+		})
+	}
 }
 
 func githubCommand() GitHubProjectCreateCommand {

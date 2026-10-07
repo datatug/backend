@@ -27,6 +27,37 @@ func queryRequest() dto.SaveQueryRequest {
 	}
 }
 
+func TestQueryMutationPreviewRefusesUnboundedOrAmbiguousSourcePair(t *testing.T) {
+	request := queryRequest()
+	request.Query.ID, request.Query.Title = "customers", "Customers"
+	request.Query.FolderPath = "team"
+	if result, err := PreviewQueryMutation(context.Background(), request, nil); err != nil || len(result.Changes) != 2 {
+		t.Fatalf("nested query pair %+v %v", result, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := PreviewQueryMutation(ctx, request, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled operation wrote a pair: %v", err)
+	}
+	request.Query.FolderPath = "~"
+	for _, tc := range []struct {
+		name     string
+		snapshot map[string][]byte
+		want     error
+	}{
+		{"too many sidecars", map[string][]byte{"queries/customers.query.json": {}, "queries/customers.query.sql": {}, "queries/customers.query.dtql": {}, "queries/customers.query.http": {}}, ErrInvalidQuerySnapshot},
+		{"oversized sidecar", map[string][]byte{"queries/customers.query.json": []byte(strings.Repeat("x", maxQueryPreviewBytes+1))}, ErrInvalidQuerySnapshot},
+		{"corrupt JSON", map[string][]byte{"queries/customers.query.json": []byte(`{`)}, ErrUnsupportedExistingQuery},
+		{"two metadata values", map[string][]byte{"queries/customers.query.json": []byte(`{"id":"customers","type":"DTQL"} {"id":"foreign"}`)}, ErrUnsupportedExistingQuery},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := PreviewQueryMutation(context.Background(), request, tc.snapshot); !errors.Is(err, tc.want) {
+				t.Fatalf("unsafe pair accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestPreviewQueryMutationCreatesCompletePairAndDeletesOldBody(t *testing.T) {
 	request := queryRequest()
 	request.Query.ID = "customers"

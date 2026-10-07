@@ -1,6 +1,7 @@
 package models4datatug
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,6 +13,69 @@ func TestGitHubLocatorIsUniqueByImmutableRepositoryAndFolder(t *testing.T) {
 	d, _ := NewGitHubProjectLocatorRecord(123, "team/other")
 	if a.Key().String() != b.Key().String() || a.Key().String() == c.Key().String() || a.Key().String() == d.Key().String() {
 		t.Fatal("locator key did not bind immutable repository and folder")
+	}
+}
+
+func TestGitHubQueryOperationIDIsActorWideAndPrivateKeySafe(t *testing.T) {
+	a, _ := NewGitHubQueryOperationRecord("actor", "retry-id")
+	b, _ := NewGitHubQueryOperationRecord("actor", "retry-id")
+	c, _ := NewGitHubQueryOperationRecord("actor", "another-id")
+	d, _ := NewGitHubQueryOperationRecord("other-actor", "retry-id")
+	if a.Key().String() != b.Key().String() || a.Key().String() == c.Key().String() || a.Key().String() == d.Key().String() {
+		t.Fatal("query operation ID was not actor-wide")
+	}
+	malicious, _ := NewGitHubQueryOperationRecord("actor", "line\nsecret")
+	if strings.Contains(malicious.Key().String(), "secret") || strings.Contains(malicious.Key().String(), "\n") {
+		t.Fatal("attacker controlled operation ID escaped into storage key")
+	}
+	op := GitHubQueryOperation{Version: 1, ActorID: "actor", OperationID: "retry-id", RequestDigest: "digest", RepositoryID: 123, Folder: "datatug", Branch: "work", ExpectedHead: "head", QueryPath: "queries/q", CreatedAt: time.Now().UTC()}
+	if err := op.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	op.RepositoryID = 0
+	if err := op.Validate(); err == nil {
+		t.Fatal("operation with no immutable repository accepted")
+	}
+	op.RepositoryID = 123
+	op.CreatedAt = time.Time{}
+	if err := op.Validate(); err == nil {
+		t.Fatal("operation with no creation time accepted")
+	}
+}
+
+func TestGitHubBindingAndLocatorRejectAmbiguousPaths(t *testing.T) {
+	binding := GitHubProjectBinding{RepositoryID: 123, Owner: "owner", Name: "repo", Folder: "team/project", Branch: "feature/work"}
+	if err := binding.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, folder := range []string{"../secret", "team//project", "team/@other", "team/.", "team/.."} {
+		binding.Folder = folder
+		if err := binding.Validate(); err == nil {
+			t.Fatalf("ambiguous folder %q accepted", folder)
+		}
+	}
+	binding.Folder = "team/project"
+	binding.Branch = "work\nwrong"
+	if err := binding.Validate(); err == nil {
+		t.Fatal("branch with newline accepted")
+	}
+	locator := GitHubProjectLocator{Version: 1, RepositoryID: 123, Folder: "team/project", SpaceID: "space", ProjectID: "project", Status: GitHubProjectReady, CreatedAt: time.Now().UTC()}
+	if err := locator.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	locator.Folder = "team/../other"
+	if err := locator.Validate(); err == nil {
+		t.Fatal("locator with ambiguous folder accepted")
+	}
+	locator.Folder = "team/project"
+	locator.Status = "unknown"
+	if err := locator.Validate(); err == nil {
+		t.Fatal("unknown locator state accepted")
+	}
+	locator.Status = GitHubProjectReady
+	locator.CreatedAt = time.Now().In(time.FixedZone("not UTC", 3600))
+	if err := locator.Validate(); err == nil {
+		t.Fatal("non-UTC locator timestamp accepted")
 	}
 }
 

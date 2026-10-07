@@ -19,10 +19,16 @@ type fakeGitHubQueryRepo struct {
 	marker       string
 	commits      int
 	loseResponse bool
+	findError    error
+	commitError  error
+	invalidPlan  bool
 }
 
 func (r *fakeGitHubQueryRepo) Scope() GitHubCreateRepositoryScope { return r.scope }
 func (r *fakeGitHubQueryRepo) PrepareQuerySave(_ context.Context, folder, projectID, branch string, request dto.SaveQueryRequest) (*GitHubQuerySavePlan, error) {
+	if r.invalidPlan {
+		return &GitHubQuerySavePlan{}, nil
+	}
 	if folder != "datatug" || projectID == "" || branch != "feature/work" {
 		return nil, ErrGitHubQueryInvalid
 	}
@@ -32,6 +38,9 @@ func (r *fakeGitHubQueryRepo) CurrentHead(_ context.Context, _ string) (string, 
 	return r.head, nil
 }
 func (r *fakeGitHubQueryRepo) CreateQueryCommit(_ context.Context, _, expectedHead, message string, _ *GitHubQuerySavePlan) (string, error) {
+	if r.commitError != nil {
+		return "", r.commitError
+	}
 	if r.head != expectedHead {
 		return "", ErrGitHubQueryConflict
 	}
@@ -44,10 +53,46 @@ func (r *fakeGitHubQueryRepo) CreateQueryCommit(_ context.Context, _, expectedHe
 	return querySavedHead, nil
 }
 func (r *fakeGitHubQueryRepo) FindQueryCommit(_ context.Context, _, expectedHead, marker string, _ *GitHubQuerySavePlan) (string, error) {
+	if r.findError != nil {
+		return "", r.findError
+	}
 	if expectedHead == createNewHead && marker == r.marker && r.commits == 1 {
 		return querySavedHead, nil
 	}
 	return "", nil
+}
+
+func TestGitHubQuerySaveRefusesUnprovableOutcomeWithoutDuplicateCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mutate    func(*fakeGitHubQueryRepo)
+		want      error
+		persisted bool
+	}{
+		{"invalid immutable plan", func(r *fakeGitHubQueryRepo) { r.invalidPlan = true }, ErrGitHubQueryInvalid, false},
+		{"provider observation unavailable", func(r *fakeGitHubQueryRepo) { r.findError = errors.New("provider unavailable") }, ErrGitHubQueryOutcomeUncertain, true},
+		{"commit rejected with no exact marker", func(r *fakeGitHubQueryRepo) { r.commitError = errors.New("provider rejected commit") }, ErrGitHubQueryOutcomeUncertain, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, service, _ := paidCreateFixture(t)
+			if _, err := service.CreateGitHubProject(context.Background(), githubCommand(), githubRepo()); err != nil {
+				t.Fatal(err)
+			}
+			repo := &fakeGitHubQueryRepo{scope: GitHubCreateRepositoryScope{ActorID: "actor", RepositoryID: 123, Owner: "owner", Name: "repo", Permission: "write"}, head: createNewHead}
+			tc.mutate(repo)
+			if _, err := service.SaveGitHubQuery(context.Background(), "actor", 123, "owner", "repo", "datatug", querySaveRequest(), repo); !errors.Is(err, tc.want) {
+				t.Fatalf("unprovable result: %v", err)
+			}
+			if repo.commits != 0 {
+				t.Fatal("unprovable operation mutated remote twice")
+			}
+			opRecord, _ := models4datatug.NewGitHubQueryOperationRecord("actor", "save-1")
+			err := db.Get(context.Background(), opRecord)
+			if (err == nil) != tc.persisted {
+				t.Fatalf("intent custody persisted=%t err=%v", tc.persisted, err)
+			}
+		})
+	}
 }
 
 func querySaveRequest() dto.SaveQueryRequest {

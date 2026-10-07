@@ -15,6 +15,7 @@ import (
 
 	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
+	"github.com/datatug/backend/githubstore4datatug"
 	"github.com/datatug/backend/template4datatug"
 	"github.com/datatug/datatug-core/pkg/dto"
 	"github.com/sneat-co/sneat-go-core/apicore/verify"
@@ -440,6 +441,7 @@ func TestHostedGitHubSaveRejectsUnknownFieldsAndLostAuthorityWithoutMutation(t *
 		want       int
 	}{
 		{"unknown nested metadata", strings.Replace(valid, `"text":"SELECT 1"`, `"text":"SELECT 1","secretOtherMetadata":"discard-me"`, 1), func() {}, http.StatusBadRequest},
+		{"unsupported federation metadata", strings.Replace(valid, `"text":"SELECT 1"`, `"text":"SELECT 1","federation":{"ovdbBaseUrl":"https://demodb.dev/ovdb","expectedServerIdentity":"must-not-discard"}`, 1), func() {}, http.StatusBadRequest},
 		{"changed store", strings.Replace(valid, `"storage":"github.com"`, `"storage":"other"`, 1), func() {}, http.StatusBadRequest},
 		{"unlisted repository", valid, func() {
 			provider.listedRepos = []githubauth4datatug.GitHubRepository{{ID: 92, Owner: "other", Name: "repo"}}
@@ -459,5 +461,192 @@ func TestHostedGitHubSaveRejectsUnknownFieldsAndLostAuthorityWithoutMutation(t *
 				t.Fatalf("status=%d calls=%d response=%s", w.Code, service.saveCalls, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestHostedGitHubCreateRejectsUnknownInputAndUnavailableApp(t *testing.T) {
+	valid := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"51716f3a4d682d5cb7ef70a7fd37f42e5418fd3d"}}`
+	for _, body := range []string{
+		strings.Replace(valid, `"branch":"work"`, `"branch":"work","unhandledGrant":"x"`, 1),
+		strings.Replace(valid, `"title":"Owned"`, `"title":"Owned","unknown":"x"`, 1),
+		valid + `{}`,
+	} {
+		var request CreateGitHubProjectRequest
+		if err := json.Unmarshal([]byte(body), &request); err == nil {
+			t.Fatalf("unknown/extra create input accepted: %s", body)
+		}
+	}
+	var request CreateGitHubProjectRequest
+	if err := json.Unmarshal([]byte(valid), &request); err != nil || request.Validate() != nil {
+		t.Fatalf("valid create input rejected: %v %+v", err, request)
+	}
+	request.GitHub.Folder = "../other"
+	if request.Validate() == nil {
+		t.Fatal("path traversal accepted")
+	}
+	w := httptest.NewRecorder()
+	httpPostCreateGitHubProject(GitHubProjectRouteOptions{})(w, httptest.NewRequest(http.MethodPost, "/?store=github.com", strings.NewReader(valid)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured create=%d", w.Code)
+	}
+	options, _, _ := routeOptions(t, githubauth4datatug.RepositoryWrite)
+	options.AuthorizeRepository = func(context.Context, string, int64, string, string) (facade4datatug.GitHubCreateRepository, error) {
+		return &routeCreateRepo{}, nil
+	}
+	w = httptest.NewRecorder()
+	httpPostCreateGitHubProject(options)(w, httptest.NewRequest(http.MethodPost, "/?store=other", strings.NewReader(valid)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid store create=%d", w.Code)
+	}
+}
+
+func TestHostedGitHubCreateMapsProviderAndAdmissionFailures(t *testing.T) {
+	stubRoutePrincipal(t)
+	oldDecode := verifyAuthenticatedRequestAndDecodeBody
+	t.Cleanup(func() { verifyAuthenticatedRequestAndDecodeBody = oldDecode })
+	verifyAuthenticatedRequestAndDecodeBody = func(w http.ResponseWriter, r *http.Request, _ verify.RequestOptions, request facade.Request) (facade.ContextWithUser, error) {
+		if err := json.NewDecoder(r.Body).Decode(request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return nil, err
+		}
+		if err := request.Validate(); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return nil, err
+		}
+		return githubTestUserContext(r), nil
+	}
+	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"51716f3a4d682d5cb7ef70a7fd37f42e5418fd3d"}}`
+	for _, tc := range []struct {
+		name               string
+		authErr, createErr error
+		want               int
+	}{
+		{"lost GitHub write", githubauth4datatug.ErrGitHubPermissionDenied, nil, http.StatusForbidden},
+		{"paid admission lost", nil, facade4datatug.ErrSharedProjectUnauthorized, http.StatusForbidden},
+		{"quota filled", nil, facade4datatug.ErrProtectedProjectQuota, http.StatusConflict},
+		{"commit uncertain", nil, facade4datatug.ErrGitHubOutcomeUncertain, http.StatusConflict},
+		{"invalid create command", nil, facade4datatug.ErrGitHubProjectInvalid, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, _, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
+			options.AuthorizeRepository = func(context.Context, string, int64, string, string) (facade4datatug.GitHubCreateRepository, error) {
+				if tc.authErr != nil {
+					return nil, tc.authErr
+				}
+				return &routeCreateRepo{}, nil
+			}
+			service.errorCreate = tc.createErr
+			w := httptest.NewRecorder()
+			httpPostCreateGitHubProject(options)(w, httptest.NewRequest(http.MethodPost, "/?store=github.com", strings.NewReader(body)))
+			if w.Code != tc.want || strings.Contains(w.Body.String(), "Owned") {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if tc.authErr != nil && service.createCalls != 0 {
+				t.Fatal("create called after permission loss")
+			}
+		})
+	}
+}
+
+func TestHostedGitHubPrivateReadsRefuseWrongManifestAndMissingQueryBody(t *testing.T) {
+	stubRoutePrincipal(t)
+	for _, tc := range []struct {
+		name, path string
+		mutate     func(*routeRepo)
+		want       int
+	}{
+		{"wrong registered identity", "/v0/datatug/projects/project_summary?storage=github.com&project=repo@owner@datatug&branch=work", func(r *routeRepo) {
+			for i, entry := range r.tree {
+				if entry.Path == "datatug/datatug-project.json" {
+					content := []byte(`{"id":"foreign","title":"Foreign project","access":"protected"}`)
+					oid := routeBlobOID(content)
+					r.blobs[oid] = content
+					r.tree[i].OID = oid
+					r.tree[i].Size = int64(len(content))
+					break
+				}
+			}
+		}, http.StatusBadRequest},
+		{"missing query body", "/v0/datatug/queries/query_revision?storage=github.com&project=repo@owner@datatug&branch=work&id=demodb/chinook-top-customer-spend", func(r *routeRepo) {
+			for i, entry := range r.tree {
+				if entry.Path == "datatug/queries/demodb/chinook-top-customer-spend.query.sql" {
+					r.tree = append(r.tree[:i], r.tree[i+1:]...)
+					break
+				}
+			}
+		}, http.StatusNotFound},
+		{"invalid query ID", "/v0/datatug/queries/query_revision?storage=github.com&project=repo@owner@datatug&branch=work&id=/absolute", func(*routeRepo) {}, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, provider, _ := routeOptions(t, githubauth4datatug.RepositoryRead)
+			tc.mutate(provider.repo)
+			var handler http.HandlerFunc
+			if strings.Contains(tc.path, "project_summary") {
+				handler = httpGetGitHubProjectSummary(options)
+			} else {
+				handler = httpGetGitHubQueryRevision(options)
+			}
+			w := httptest.NewRecorder()
+			handler(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+			if w.Code != tc.want || strings.Contains(w.Body.String(), "Foreign project") || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHostedGitHubSaveReturnsTypedRetryAndUnsupportedErrors(t *testing.T) {
+	stubRoutePrincipal(t)
+	body := `{"storage":"github.com","project":"repo@owner@datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operationId":"save-1","ifNoneMatch":true,"query":{"folderPath":"~","id":"customers","title":"Customers","type":"DTQL","text":"SELECT 1"}}`
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"changed branch", dto.ErrBranchHeadConflict, http.StatusConflict, "conflict"},
+		{"changed operation payload", dto.ErrOperationConflict, http.StatusConflict, "conflict"},
+		{"unsupported rich query", githubstore4datatug.ErrUnsupportedExistingQuery, http.StatusBadRequest, "unsupported_query"},
+		{"contact lost", facade4datatug.ErrSharedProjectUnauthorized, http.StatusForbidden, "project_denied"},
+		{"commit outcome uncertain", facade4datatug.ErrGitHubQueryOutcomeUncertain, http.StatusConflict, "outcome_uncertain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, _, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
+			service.saveErr = tc.err
+			w := httptest.NewRecorder()
+			httpPostGitHubSaveQuery(options)(w, httptest.NewRequest(http.MethodPost, "/v0/datatug/queries/save_query", strings.NewReader(body)))
+			if w.Code != tc.status || !strings.Contains(w.Body.String(), `"`+tc.code+`"`) || strings.Contains(w.Body.String(), "SELECT 1") {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestHostedGitHubSaveRejectsEmptyOversizedAndUnconfiguredRequestsBeforeProvider(t *testing.T) {
+	stubRoutePrincipal(t)
+	options, provider, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
+	for _, tc := range []struct {
+		name, body string
+		length     int64
+		want       int
+	}{
+		{"empty body", "", 0, http.StatusBadRequest},
+		{"known oversized body", "{}", maxSaveGitHubQueryRequestBytes + 1, http.StatusRequestEntityTooLarge},
+		{"missing selected project", `{"storage":"github.com","project":"bad","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operationId":"save-1","ifNoneMatch":true,"query":{"folderPath":"~","id":"customers","title":"Customers","type":"DTQL","text":"SELECT 1"}}`, -1, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/v0/datatug/queries/save_query", strings.NewReader(tc.body))
+			r.ContentLength = tc.length
+			w := httptest.NewRecorder()
+			httpPostGitHubSaveQuery(options)(w, r)
+			if w.Code != tc.want || provider.listed != 0 || service.saveCalls != 0 {
+				t.Fatalf("untrusted request reached provider status=%d list=%d save=%d", w.Code, provider.listed, service.saveCalls)
+			}
+		})
+	}
+	w := httptest.NewRecorder()
+	httpPostGitHubSaveQuery(GitHubProjectRouteOptions{})(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`)))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured save=%d", w.Code)
 	}
 }

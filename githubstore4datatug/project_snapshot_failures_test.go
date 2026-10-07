@@ -119,3 +119,40 @@ func TestProjectSnapshotRejectsInvalidOrMissingQueryBody(t *testing.T) {
 		t.Fatalf("missing body accepted: %v", err)
 	}
 }
+
+func TestProjectSnapshotRequiresImmutableSelectedHeadAndValidFolder(t *testing.T) {
+	ctx := context.Background()
+	fake := newSnapshotFake(t)
+	for _, tc := range []struct {
+		name, folder, branch, head string
+		client                     scopedReadClient
+	}{
+		{"missing provider", "demo-project-1", "work", createCommittedHead, nil},
+		{"unsafe folder", "../private", "work", createCommittedHead, fake},
+		{"no selected branch", "demo-project-1", "", createCommittedHead, fake},
+		{"no immutable head", "demo-project-1", "work", "", fake},
+		{"unknown immutable head", "demo-project-1", "work", strings.Repeat("f", 40), fake},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := OpenProjectSnapshotAtHead(ctx, tc.client, tc.folder, tc.branch, tc.head); !errors.Is(err, ErrInvalidProjectSnapshot) {
+				t.Fatalf("untrusted snapshot accepted: %v", err)
+			}
+		})
+	}
+	if _, err := OpenProjectSnapshot(ctx, nil, "demo-project-1", "work"); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("nil provider accepted: %v", err)
+	}
+	if _, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", ""); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("missing branch accepted: %v", err)
+	}
+	snapshot, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.ReadFile(ctx, "../outside"); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("path escape read accepted: %v", err)
+	}
+	if _, err := snapshot.ReadFile(ctx, "missing.txt"); !errors.Is(err, ErrProjectFileMissing) {
+		t.Fatalf("missing blob accepted: %v", err)
+	}
+}

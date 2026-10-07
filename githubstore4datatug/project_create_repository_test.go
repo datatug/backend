@@ -160,6 +160,12 @@ func TestCreateRepositoryRefusesProviderProofGaps(t *testing.T) {
 }
 
 func TestCreateRepositoryRejectsEmptyCommitAndStaleHead(t *testing.T) {
+	if _, err := AuthorizeCreateRepository(context.Background(), nil, "actor", 123, "owner", "repo"); !errors.Is(err, githubauth4datatug.ErrGitHubAppNotConfigured) {
+		t.Fatalf("missing dedicated App accepted: %v", err)
+	}
+	if got := (*createRepository)(nil).Scope(); got != (facade4datatug.GitHubCreateRepositoryScope{}) {
+		t.Fatalf("nil repository acquired scope: %+v", got)
+	}
 	fake := testCreateRepo(map[string][]byte{"datatug/datatug-project.json": []byte(`{"id":"project"}`), "datatug/queries/q.query.json": []byte(`{"id":"q"}`)}, "marker")
 	repo := &createRepository{client: fake}
 	if _, err := repo.CreateFilesCommit(context.Background(), "work", createExpectedHead, "message", nil); !errors.Is(err, ErrGitHubCreateProof) {

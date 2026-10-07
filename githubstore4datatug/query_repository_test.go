@@ -145,6 +145,24 @@ func TestQueryRepositoryReportsOnlyVerifiedProviderCommit(t *testing.T) {
 	}
 }
 
+func TestQueryRepositoryDeniesMissingActorProviderAndUnprovableReceipt(t *testing.T) {
+	ctx := context.Background()
+	if _, err := AuthorizeQueryRepository(ctx, nil, "actor", 123, "owner", "repo"); !errors.Is(err, githubauth4datatug.ErrGitHubAppNotConfigured) {
+		t.Fatalf("missing App provider: %v", err)
+	}
+	if got := (*queryRepository)(nil).Scope(); got != (facade4datatug.GitHubCreateRepositoryScope{}) {
+		t.Fatalf("nil repository acquired scope: %+v", got)
+	}
+	fake := &queryFake{snapshotFake: newSnapshotFake(t)}
+	repo := &queryRepository{client: fake}
+	if _, err := repo.CreateQueryCommit(ctx, "work", createCommittedHead, "marker", nil); !errors.Is(err, ErrGitHubQueryCommitProof) {
+		t.Fatalf("nil mutation plan: %v", err)
+	}
+	if _, err := repo.FindQueryCommit(ctx, "work", createCommittedHead, "not-present", &facade4datatug.GitHubQuerySavePlan{Changes: []facade4datatug.GitHubQueryFileChange{{Path: "demo-project-1/queries/q.query.json"}}}); err != nil {
+		t.Fatalf("no matching commit should permit safe first attempt: %v", err)
+	}
+}
+
 func TestQueryRepositorySavesPairAtExpectedHeadAndRecoversExactCommit(t *testing.T) {
 	fake := &queryFake{snapshotFake: newSnapshotFake(t)}
 	repo := &queryRepository{client: fake}
