@@ -115,12 +115,16 @@ func (c *GitHubAppClient) exchange(ctx context.Context, form url.Values) (OAuthT
 		return OAuthTokens{}, ErrReauthorizationRequired
 	}
 	now := c.now()
-	return newOAuthTokens(
+	tokens, err := newOAuthTokens(
 		wire.AccessToken,
 		wire.RefreshToken,
 		now.Add(time.Duration(wire.ExpiresIn)*time.Second),
 		now.Add(time.Duration(wire.RefreshTokenExpiresIn)*time.Second),
 	)
+	if err != nil {
+		return OAuthTokens{}, ErrReauthorizationRequired
+	}
+	return tokens, nil
 }
 
 func (c *GitHubAppClient) UserClient(tokens OAuthTokens) repositoryUserClient {
@@ -357,7 +361,11 @@ func graphQLOperationName(query string) string {
 	for i, field := range fields {
 		if strings.EqualFold(field, "mutation") || strings.EqualFold(field, "query") {
 			if i+1 < len(fields) && !strings.HasPrefix(fields[i+1], "{") {
-				return strings.Trim(fields[i+1], "{(")
+				name := strings.Trim(fields[i+1], "{(")
+				if end := strings.IndexAny(name, "({"); end >= 0 {
+					name = name[:end]
+				}
+				return name
 			}
 			return ""
 		}

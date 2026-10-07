@@ -5,6 +5,7 @@ package api4datatug
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -96,6 +97,67 @@ func TestGitHubAuthorizationRoutesFailClosedWithoutProvider(t *testing.T) {
 	}
 }
 
+func TestGitHubAuthorizationErrorsMapToStableHTTPStatus(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want int
+		code string
+	}{
+		{name: "invalid OAuth state", err: githubauth4datatug.ErrOAuthStateInvalid, want: http.StatusBadRequest, code: "invalid_state"},
+		{name: "actor mismatch", err: githubauth4datatug.ErrGitHubActorMismatch, want: http.StatusForbidden, code: "actor_mismatch"},
+		{name: "repository denied", err: githubauth4datatug.ErrGitHubRepositoryDenied, want: http.StatusForbidden, code: "repository_denied"},
+		{name: "permission denied", err: githubauth4datatug.ErrGitHubPermissionDenied, want: http.StatusForbidden, code: "repository_denied"},
+		{name: "missing credential", err: githubauth4datatug.ErrCredentialMissing, want: http.StatusConflict, code: "reauthorization_required"},
+		{name: "expired credential", err: githubauth4datatug.ErrReauthorizationRequired, want: http.StatusConflict, code: "reauthorization_required"},
+		{name: "internal failure", err: errors.New("private provider error"), want: http.StatusServiceUnavailable, code: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status, code := githubAuthorizationStatus(test.err)
+			if status != test.want || code != test.code {
+				t.Fatalf("githubAuthorizationStatus() = (%d, %q), want (%d, %q)", status, code, test.want, test.code)
+			}
+		})
+	}
+}
+
+func TestGitHubAuthorizationRoutesMapProviderFailuresWithoutDetails(t *testing.T) {
+	originalDecode := verifyAuthenticatedRequestAndDecodeBody
+	originalVerify := verifyAuthenticatedRequest
+	t.Cleanup(func() {
+		verifyAuthenticatedRequestAndDecodeBody = originalDecode
+		verifyAuthenticatedRequest = originalVerify
+	})
+	verifyAuthenticatedRequest = func(_ http.ResponseWriter, r *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		return githubTestUserContext(r), nil
+	}
+	service := &fakeGitHubAuthorizationService{}
+	options := GitHubAuthorizationRouteOptions{Provider: service}
+	for _, test := range []struct {
+		name    string
+		handler http.HandlerFunc
+		request *http.Request
+		err     error
+		status  int
+	}{
+		{name: "start unavailable", handler: httpPostStartGitHubAuthorization(options), request: httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`)), err: errors.New("provider error must not escape"), status: http.StatusServiceUnavailable},
+		{name: "complete invalid state", handler: httpPostCompleteGitHubAuthorization(options), request: httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"code":"secret-code","state":"opaque"}`)), err: githubauth4datatug.ErrOAuthStateInvalid, status: http.StatusBadRequest},
+		{name: "repository listing needs reconnect", handler: httpGetGitHubRepositories(options), request: httptest.NewRequest(http.MethodGet, "/", nil), err: githubauth4datatug.ErrCredentialMissing, status: http.StatusConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service.err = test.err
+			response := httptest.NewRecorder()
+			test.handler(response, test.request)
+			if response.Code != test.status || strings.Contains(response.Body.String(), "provider error") || strings.Contains(response.Body.String(), "secret-code") {
+				t.Fatalf("status=%d response=%q; want generic status %d", response.Code, response.Body.String(), test.status)
+			}
+		})
+	}
+	if _, err := verifiedFirebaseUID(nil); err == nil {
+		t.Fatal("verifiedFirebaseUID() accepted missing verified context")
+	}
+}
+
 func TestCompleteGitHubAuthorizationUsesStrictBoundedSecretSafeDecoder(t *testing.T) {
 	originalDecode := verifyAuthenticatedRequestAndDecodeBody
 	originalVerify := verifyAuthenticatedRequest
@@ -156,17 +218,18 @@ type fakeGitHubAuthorizationService struct {
 	completedState   string
 	firebaseUID      string
 	repositories     []githubauth4datatug.GitHubRepository
+	err              error
 }
 
 func (f *fakeGitHubAuthorizationService) BeginAuthorization(_ context.Context, uid string) (string, error) {
 	f.firebaseUID = uid
-	return f.authorizationURL, nil
+	return f.authorizationURL, f.err
 }
 func (f *fakeGitHubAuthorizationService) CompleteAuthorization(_ context.Context, uid, state, code string) error {
 	f.firebaseUID, f.completedState, f.completedCode = uid, state, code
-	return nil
+	return f.err
 }
 func (f *fakeGitHubAuthorizationService) ListRepositories(_ context.Context, uid string) ([]githubauth4datatug.GitHubRepository, error) {
 	f.firebaseUID = uid
-	return append([]githubauth4datatug.GitHubRepository(nil), f.repositories...), nil
+	return append([]githubauth4datatug.GitHubRepository(nil), f.repositories...), f.err
 }
