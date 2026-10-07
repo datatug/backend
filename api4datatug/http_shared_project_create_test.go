@@ -119,7 +119,7 @@ func TestSharedProjectHTTPDisabledAndAuthenticationFailure(t *testing.T) {
 func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	routes := map[string]http.HandlerFunc{}
 	RegisterHttpRoutesWithOptions(func(method, path string, h http.HandlerFunc) { routes[method+" "+path] = h }, fakeIDs{}, RouteOptions{})
-	if len(routes) != 4 {
+	if len(routes) != 7 {
 		t.Fatalf("routes %+v", routes)
 	}
 	h := routes["POST /v0/datatug/projects/create_shared_project"]
@@ -128,6 +128,16 @@ func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	}
 	if w := postShared(h, `{}`); w.Code != http.StatusServiceUnavailable {
 		t.Fatal(w.Code)
+	}
+	if routes["POST /v0/datatug/github/authorization/start"] == nil || routes["POST /v0/datatug/github/authorization/complete"] == nil || routes["GET /v0/datatug/github/repositories"] == nil {
+		t.Fatalf("missing additive GitHub authorization routes: %+v", routes)
+	}
+	for _, route := range []string{"POST /v0/datatug/github/authorization/start", "POST /v0/datatug/github/authorization/complete", "GET /v0/datatug/github/repositories"} {
+		w := httptest.NewRecorder()
+		routes[route](w, httptest.NewRequest(http.MethodGet, "/", nil))
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("unconfigured %s route status=%d", route, w.Code)
+		}
 	}
 	for _, field := range []CreateSharedProjectRequest{{SpaceID: "../bad", CommandID: "command", Title: "T"}, {SpaceID: "space", CommandID: "command", Title: ""}} {
 		if err := field.Validate(); !validation.IsBadRequestError(err) {
