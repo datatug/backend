@@ -78,23 +78,27 @@ func NewActivatingPaidSharedProjectService(
 	}, nil
 }
 
-// EnsureProtectedProjectQuotaForCreate is a bounded explicit-submit
-// preflight. It derives the caller from authenticated context, derives the
-// payer through the existing personal-account directory, and never treats an
-// absent quota as zero. All protected allocation writers require an existing
-// quota in their own transaction, so absence fences target-payer writes while
-// the complete scan runs. The seed transaction rechecks actor/payer ownership,
-// current paid access, and continued quota absence before inserting the basis.
-func (s *SharedProjectService) EnsureProtectedProjectQuotaForCreate(ctx facade.ContextWithUser) error {
+// EnsureProtectedProjectQuotaForCreate is a command-bound explicit-submit
+// preflight. It requires current paid, owner-contact and Core Space authority
+// before scanning or seeding a missing quota. All protected allocation writers
+// require an existing quota in their own transaction, so absence fences
+// target-payer writes while the complete scan runs. The seed transaction
+// repeats the command authority checks and continued quota absence before
+// inserting the basis.
+func (s *SharedProjectService) EnsureProtectedProjectQuotaForCreate(ctx facade.ContextWithUser, binding SharedProjectCreateBinding) error {
 	if s == nil || s.activation == nil || s.paid == nil || sharedProjectPortAbsent(s.db) || s.now == nil || sharedProjectPortAbsent(ctx) || sharedProjectPortAbsent(ctx.User()) {
 		return ErrSharedProjectActivationUnavailable
 	}
 	actor := ctx.User().GetUserID()
-	if actor == "" {
+	if actor == "" || actor != binding.ActorID || models4datatug.ValidateSharedProjectIdentifier(binding.SpaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(binding.CommandID) != nil || models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) != nil || binding.Mode != s.paid.Mode || binding.Product != s.paid.Product || binding.Mode != "live" || binding.Product != "datatug" {
+		return ErrSharedProjectUnauthorized
+	}
+	requestDigest, err := hex.DecodeString(binding.RequestDigest)
+	if err != nil || len(requestDigest) != sha256.Size || binding.RequestDigest != strings.ToLower(binding.RequestDigest) {
 		return ErrSharedProjectUnauthorized
 	}
 	account, err := ResolvePersonalPayer(ctx, actor, "", s.paid.Directory)
-	if err != nil || models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
+	if err != nil || models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil || account.ID != binding.PayerID {
 		return ErrSharedProjectUnauthorized
 	}
 	at := s.now().UTC()
@@ -102,8 +106,17 @@ func (s *SharedProjectService) EnsureProtectedProjectQuotaForCreate(ctx facade.C
 		return ErrSharedProjectUnauthorized
 	}
 	var quotaMissing bool
-	err = s.db.RunReadonlyTransaction(ctx, func(txCtx context.Context, tx dal.ReadTransaction) error {
+	// The Core contract accepts a readwrite transaction so it can bind its
+	// opaque plan to the exact snapshot. Planning is read-only; Apply is not
+	// called here.
+	err = s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		if _, err := readCurrentPaidProjectAccess(txCtx, tx, *s.paid, actor, account.ID, at); err != nil {
+			return err
+		}
+		if _, _, _, err := s.readCurrentProjectOwnerContact(txCtx, tx, binding); err != nil {
+			return err
+		}
+		if _, err := s.PlanExplicitProjectCreateActivationInTransaction(ctx, tx, binding, at); err != nil {
 			return err
 		}
 		quotaRecord, quota := models4datatug.NewProtectedProjectQuotaRecord(s.paid.Mode, s.paid.Product, account.ID)
@@ -111,23 +124,26 @@ func (s *SharedProjectService) EnsureProtectedProjectQuotaForCreate(ctx facade.C
 		if err := tx.Get(txCtx, quotaRecord); err != nil {
 			if record.IsNotFound(err) {
 				quotaMissing = true
-				return nil
+			} else {
+				return ErrProtectedProjectQuota
 			}
-			return ErrProtectedProjectQuota
 		}
-		if quota.Validate() != nil || quota.Mode != s.paid.Mode || quota.Product != s.paid.Product || quota.PayerID != account.ID {
+		if !quotaMissing && (quota.Validate() != nil || quota.Mode != s.paid.Mode || quota.Product != s.paid.Product || quota.PayerID != account.ID) {
 			return ErrProtectedProjectQuota
 		}
 		return nil
 	})
-	if err != nil || !quotaMissing {
+	if err != nil {
 		return err
+	}
+	if !quotaMissing {
+		return nil
 	}
 	basis, err := s.activation.inventory.CompleteProtectedProjectBasis(ctx, s.paid.Mode, s.paid.Product, account.ID)
 	if err != nil || basis.Digest == "" || basis.Allocated < 0 {
 		return ErrProtectedProjectInventory
 	}
-	authority := activationProtectedProjectBasisAuthority{paid: *s.paid, at: at}
+	authority := activationProtectedProjectBasisAuthority{service: s, user: ctx, binding: binding, at: at}
 	if err := InitializeProtectedProjectQuota(ctx, s.db, *s.paid, actor, account.ID, basis, authority); err != nil {
 		if !errors.Is(err, ErrSharedProjectConflict) && !record.IsAlreadyExists(err) {
 			return err
@@ -136,7 +152,6 @@ func (s *SharedProjectService) EnsureProtectedProjectQuotaForCreate(ctx facade.C
 	}
 	return nil
 }
-
 func (s *SharedProjectService) verifyInitializedQuota(ctx context.Context, payer string, basis InitialProtectedProjectBasis) error {
 	return s.db.RunReadonlyTransaction(ctx, func(txCtx context.Context, tx dal.ReadTransaction) error {
 		r, quota := models4datatug.NewProtectedProjectQuotaRecord(s.paid.Mode, s.paid.Product, payer)
@@ -261,16 +276,25 @@ func (s *SharedProjectService) applyExplicitCreateActivation(
 }
 
 type activationProtectedProjectBasisAuthority struct {
-	paid PaidSharedProjectOptions
-	at   time.Time
+	service *SharedProjectService
+	user    facade.ContextWithUser
+	binding SharedProjectCreateBinding
+	at      time.Time
 }
 
-func (a activationProtectedProjectBasisAuthority) VerifyInitialProtectedProjectBasisInTransaction(ctx context.Context, tx dal.ReadTransaction, actor, mode, product, payer string, basis InitialProtectedProjectBasis) error {
-	if a.paid.validate() != nil || sharedProjectPortAbsent(tx) || actor == "" || mode != a.paid.Mode || product != a.paid.Product || payer == "" || basis.Digest == "" || basis.Allocated < 0 || a.at.IsZero() {
+func (a activationProtectedProjectBasisAuthority) VerifyInitialProtectedProjectBasisInTransaction(ctx context.Context, tx dal.ReadwriteTransaction, actor, mode, product, payer string, basis InitialProtectedProjectBasis) error {
+	if a.service == nil || a.service.paid == nil || a.service.paid.validate() != nil || sharedProjectPortAbsent(tx) || sharedProjectPortAbsent(a.user) || sharedProjectPortAbsent(a.user.User()) || actor == "" || mode != a.service.paid.Mode || product != a.service.paid.Product || payer == "" || basis.Digest == "" || basis.Allocated < 0 || a.at.IsZero() || actor != a.binding.ActorID || payer != a.binding.PayerID || mode != a.binding.Mode || product != a.binding.Product {
 		return ErrProtectedProjectQuota
 	}
-	if _, err := readCurrentPaidProjectAccess(ctx, tx, a.paid, actor, payer, a.at); err != nil {
+	if a.user.User().GetUserID() != actor {
 		return ErrSharedProjectUnauthorized
 	}
-	return nil
+	if _, err := readCurrentPaidProjectAccess(ctx, tx, *a.service.paid, actor, payer, a.at); err != nil {
+		return ErrSharedProjectUnauthorized
+	}
+	if _, _, _, err := a.service.readCurrentProjectOwnerContact(ctx, tx, a.binding); err != nil {
+		return err
+	}
+	_, err := a.service.PlanExplicitProjectCreateActivationInTransaction(a.user, tx, a.binding, a.at)
+	return err
 }

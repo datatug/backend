@@ -43,33 +43,42 @@ type projectOwnerLinkPlan struct {
 	contactGraph contract4linkage.WithRelatedAndIDs
 }
 
-func (s *SharedProjectService) prepareProjectOwnerLink(ctx context.Context, tx dal.ReadTransaction, b SharedProjectCreateBinding, project string, at time.Time) (*projectOwnerLinkPlan, error) {
+func (s *SharedProjectService) readCurrentProjectOwnerContact(ctx context.Context, tx dal.ReadTransaction, b SharedProjectCreateBinding) (contract4linkage.RelationshipEntityRef, record.Record, *contract4linkage.WithRelatedAndIDs, error) {
+	var zero contract4linkage.RelationshipEntityRef
 	if s.ownerLinks == nil {
-		return nil, ErrSharedProjectUnavailable
+		return zero, nil, nil, ErrSharedProjectUnavailable
 	}
 	read := sharedProjectReadTransaction{tx}
 	ref, err := s.ownerLinks.owner.ResolveProjectOwnerContact(ctx, read, b)
 	if err != nil {
-		return nil, err
+		return zero, nil, nil, err
 	}
 	// Current generic Linkage rejects foreign related writes. Do not bypass that
 	// guard through create; standalone cross-Space sharing needs its own proof.
 	if models4datatug.ValidateProjectContactRef(ref) != nil || string(ref.SpaceID) != b.SpaceID {
-		return nil, ErrSharedProjectUnauthorized
+		return zero, nil, nil, ErrSharedProjectUnauthorized
 	}
 	state, err := s.ownerLinks.contacts.ReadCurrentProjectContact(ctx, read, ref)
 	if err != nil {
-		return nil, err
+		return zero, nil, nil, err
 	}
 	if state.Ref != ref || !state.Exists || !state.Active || state.UserID != b.ActorID {
-		return nil, ErrSharedProjectUnauthorized
+		return zero, nil, nil, ErrSharedProjectUnauthorized
 	}
 	cr, current := models4datatug.NewProjectContactLinkageRecord(ref)
 	if err := tx.Get(ctx, cr); err != nil {
-		return nil, err
+		return zero, nil, nil, err
 	}
 	if current.Validate() != nil {
-		return nil, ErrSharedProjectConflict
+		return zero, nil, nil, ErrSharedProjectConflict
+	}
+	return ref, cr, current, nil
+}
+
+func (s *SharedProjectService) prepareProjectOwnerLink(ctx context.Context, tx dal.ReadTransaction, b SharedProjectCreateBinding, project string, at time.Time) (*projectOwnerLinkPlan, error) {
+	ref, cr, current, err := s.readCurrentProjectOwnerContact(ctx, tx, b)
+	if err != nil {
+		return nil, err
 	}
 	next, err := cloneProjectLinkage(*current)
 	if err != nil {

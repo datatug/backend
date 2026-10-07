@@ -107,7 +107,7 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		if !ok || sharedProjectPortAbsent(userCtx) {
 			return result, ErrSharedProjectUnauthorized
 		}
-		if err := s.EnsureProtectedProjectQuotaForCreate(userCtx); err != nil {
+		if err := s.EnsureProtectedProjectQuotaForCreate(userCtx, binding); err != nil {
 			return result, err
 		}
 	}

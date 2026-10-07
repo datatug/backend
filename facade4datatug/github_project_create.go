@@ -131,7 +131,7 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 		if !ok || sharedProjectPortAbsent(activationCtx) {
 			return zero, ErrSharedProjectUnauthorized
 		}
-		if err := s.EnsureProtectedProjectQuotaForCreate(activationCtx); err != nil {
+		if err := s.EnsureProtectedProjectQuotaForCreate(activationCtx, createBinding); err != nil {
 			return zero, err
 		}
 	}

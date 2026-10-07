@@ -25,6 +25,14 @@ import (
 	"github.com/strongo/strongoapp/with"
 )
 
+func paidBindingForCommand(command SharedProjectCreateCommand, paid PaidSharedProjectOptions) SharedProjectCreateBinding {
+	return SharedProjectCreateBinding{
+		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.CommandID,
+		PayerID: "personal-1", Mode: paid.Mode, Product: paid.Product,
+		RequestDigest: models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, "personal-1", paid.Mode, paid.Product),
+	}
+}
+
 type activationProbe struct{ applied bool }
 
 func (p *activationProbe) Apply(context.Context, dal.ReadwriteTransaction) error {
@@ -64,15 +72,15 @@ func TestEnsureProtectedProjectQuotaForCreateUsesCompleteInventorySnapshot(t *te
 		t.Fatal(err)
 	}
 	ctx := facade.NewContextWithUserID(context.Background(), "actor")
-	if err := service.EnsureProtectedProjectQuotaForCreate(ctx); err != nil {
+	if err := service.EnsureProtectedProjectQuotaForCreate(ctx, paidBindingForCommand(sharedCommand(), paid)); err != nil {
 		t.Fatal(err)
 	}
 	quotaRecord, quota := models4datatug.NewProtectedProjectQuotaRecord(paid.Mode, paid.Product, "personal-1")
 	if err := db.Get(context.Background(), quotaRecord); err != nil || quota.Validate() != nil || quota.Allocated != 0 || quota.BasisDigest == "" {
 		t.Fatalf("initialized quota %+v, %v", quota, err)
 	}
-	if activator.called != 0 {
-		t.Fatal("quota preflight activated the Space capability")
+	if activator.called != 2 || activator.plan.(*activationProbe).applied {
+		t.Fatalf("quota preflight must recheck Core authority before seed without applying: calls=%d applied=%v", activator.called, activator.plan.(*activationProbe).applied)
 	}
 }
 
@@ -97,13 +105,14 @@ func TestEnsureProtectedProjectQuotaForCreateConcurrentInitializersConverge(t *t
 	}
 	services := []*SharedProjectService{makeService(), makeService()}
 	ctx := facade.NewContextWithUserID(context.Background(), "actor")
+	binding := paidBindingForCommand(sharedCommand(), paid)
 	results := make(chan error, len(services))
 	var wg sync.WaitGroup
 	for _, service := range services {
 		wg.Add(1)
 		go func(service *SharedProjectService) {
 			defer wg.Done()
-			results <- service.EnsureProtectedProjectQuotaForCreate(ctx)
+			results <- service.EnsureProtectedProjectQuotaForCreate(ctx, binding)
 		}(service)
 	}
 	wg.Wait()
@@ -117,6 +126,77 @@ func TestEnsureProtectedProjectQuotaForCreateConcurrentInitializersConverge(t *t
 	if err := db.Get(context.Background(), quotaRecord); err != nil || quota.Validate() != nil || quota.Allocated != 0 || quota.Revision != 1 {
 		t.Fatalf("quota %+v, %v", quota, err)
 	}
+}
+
+func TestEnsureProtectedProjectQuotaForCreateRechecksAuthorityBeforeSeed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		revoke func(*testing.T, dal.DB)
+	}{
+		{
+			name: "Core Space role",
+			revoke: func(t *testing.T, db dal.DB) {
+				user := dbo4userus.NewUserEntry("actor")
+				if err := db.Get(context.Background(), user.Record); err != nil {
+					t.Fatal(err)
+				}
+				brief := user.Data.Spaces["space"]
+				brief.Roles = []string{const4contactus.SpaceMemberRoleMember}
+				if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Set(ctx, user.Record) }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "owner contact",
+			revoke: func(t *testing.T, db dal.DB) {
+				r, _ := models4datatug.NewProjectContactLinkageRecord(contactFixtureRef("space", "owner-contact"))
+				if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Delete(ctx, r.Key()) }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, _, paid := paidCreateFixture(t)
+			deletePaidQuota(t, db)
+			seedCoreSpaceWithRole(t, db, "space", "actor", const4contactus.SpaceMemberRoleOwner)
+			query := &revokeAfterInventoryScan{QueryExecutor: db, revoke: func() { test.revoke(t, db) }}
+			service, err := NewActivatingPaidSharedProjectService(db, &sharedCounterIDs{}, func() time.Time { return sharedTestTime }, paid, SharedProjectActivationOptions{
+				Activator: coreSpaceFacade.NewCapabilityAuthority(), RequiredRoles: []string{const4contactus.SpaceMemberRoleOwner}, InventoryQuery: query,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := facade.NewContextWithUserID(context.Background(), "actor")
+			if err := service.EnsureProtectedProjectQuotaForCreate(ctx, paidBindingForCommand(sharedCommand(), paid)); err == nil {
+				t.Fatal("expected seed authority recheck to reject create")
+			}
+			assertPaidQuotaAbsent(t, db)
+			assertDataTugNotActivated(t, db)
+		})
+	}
+}
+
+type revokeAfterInventoryScan struct {
+	dal.QueryExecutor
+	revoke func()
+	reads  int
+	called bool
+}
+
+func (q *revokeAfterInventoryScan) ExecuteQueryToRecordsReader(ctx context.Context, query dal.Query) (dal.RecordsReader, error) {
+	reader, err := q.QueryExecutor.ExecuteQueryToRecordsReader(ctx, query)
+	q.reads++
+	if err == nil && q.reads == 3 && !q.called {
+		q.called = true
+		q.revoke()
+	}
+	return reader, err
+}
+
+func (q *revokeAfterInventoryScan) ExecuteQueryToRecordsetReader(ctx context.Context, query dal.Query, options ...recordset.Option) (dal.RecordsetReader, error) {
+	return q.QueryExecutor.ExecuteQueryToRecordsetReader(ctx, query, options...)
 }
 
 type inventoryQueryBarrier struct {
@@ -257,6 +337,7 @@ func TestActivatingGitHubCreateDenialsLeaveRepoAndSpaceUnchanged(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			db, service, ctx := activatingPaidCreateFixture(t, test.role)
+			deletePaidQuota(t, db)
 			if test.setup != nil {
 				test.setup(t, db)
 			}
@@ -267,9 +348,7 @@ func TestActivatingGitHubCreateDenialsLeaveRepoAndSpaceUnchanged(t *testing.T) {
 			if repo.commitCount != 0 || repo.head != createBaseHead || len(repo.files) != 0 {
 				t.Fatal("rejected create mutated the GitHub repository")
 			}
-			if quota := paidQuota(t, db); quota.Allocated != 0 {
-				t.Fatalf("rejected create allocated quota: %+v", quota)
-			}
+			assertPaidQuotaAbsent(t, db)
 			inventory, err := NewDALProtectedProjectInventory(db)
 			if err != nil {
 				t.Fatal(err)
@@ -283,6 +362,68 @@ func TestActivatingGitHubCreateDenialsLeaveRepoAndSpaceUnchanged(t *testing.T) {
 				t.Fatalf("rejected create left operation record: %v", err)
 			}
 		})
+	}
+}
+
+func TestActivatingCloudCreateDenialsLeaveAbsentQuotaAndSpaceUnchanged(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		role  string
+		setup func(*testing.T, dal.DB)
+	}{
+		{name: "Core role revoked", role: const4contactus.SpaceMemberRoleMember},
+		{
+			name: "paid access revoked",
+			role: const4contactus.SpaceMemberRoleOwner,
+			setup: func(t *testing.T, db dal.DB) {
+				past := sharedTestTime.Add(-time.Minute)
+				paidUpdate(t, db, models4datatug.NewCurrentPlanKey("personal-1"), "paidUntil", &past)
+			},
+		},
+		{
+			name: "owner contact unavailable",
+			role: const4contactus.SpaceMemberRoleOwner,
+			setup: func(t *testing.T, db dal.DB) {
+				r, _ := models4datatug.NewProjectContactLinkageRecord(contactFixtureRef("space", "owner-contact"))
+				if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Delete(ctx, r.Key()) }); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, service, ctx := activatingPaidCreateFixture(t, test.role)
+			deletePaidQuota(t, db)
+			if test.setup != nil {
+				test.setup(t, db)
+			}
+			if _, err := service.Create(ctx, sharedCommand()); err == nil {
+				t.Fatal("expected create authorization failure")
+			}
+			assertPaidQuotaAbsent(t, db)
+			assertSharedAbsent(t, db, "space", "project-1", "command")
+			admission, _ := models4datatug.NewProjectAdmissionRecord("space", "project-1")
+			if err := db.Get(context.Background(), admission); !record.IsNotFound(err) {
+				t.Fatalf("rejected create left an admission: %v", err)
+			}
+			assertDataTugNotActivated(t, db)
+		})
+	}
+}
+
+func deletePaidQuota(t *testing.T, db dal.DB) {
+	t.Helper()
+	r, _ := models4datatug.NewProtectedProjectQuotaRecord("live", "datatug", "personal-1")
+	if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Delete(ctx, r.Key()) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertPaidQuotaAbsent(t *testing.T, db dal.DB) {
+	t.Helper()
+	r, _ := models4datatug.NewProtectedProjectQuotaRecord("live", "datatug", "personal-1")
+	if err := db.Get(context.Background(), r); !record.IsNotFound(err) {
+		t.Fatalf("rejected create left quota record: %v", err)
 	}
 }
 
