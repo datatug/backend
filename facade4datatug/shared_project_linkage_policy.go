@@ -177,7 +177,7 @@ func (p *PaidProjectLinkagePolicy) authorizeProject(ctx context.Context, tx dal.
 		// missing/corrupt reciprocal record cannot silently reclaim an assignment.
 		cr, currentGraph := models4datatug.NewProjectContactLinkageRecord(ref)
 		graphErr := tx.Get(ctx, cr)
-		if graphErr != nil && !(record.IsNotFound(graphErr) && len(before[ref]) == 0) {
+		if graphErr != nil && (!record.IsNotFound(graphErr) || len(before[ref]) != 0) {
 			return graphErr
 		}
 		if graphErr == nil && currentGraph.Validate() != nil {
