@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
 	"github.com/datatug/datatug-core/pkg/datatug"
 	"github.com/datatug/datatug-core/pkg/dto"
@@ -16,9 +17,10 @@ const queryTreeOID = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 type queryFake struct {
 	*snapshotFake
-	newTree     []githubauth4datatug.GitHubTreeEntry
-	newCommit   githubauth4datatug.GitHubCommit
-	createCount int
+	newTree      []githubauth4datatug.GitHubTreeEntry
+	newCommit    githubauth4datatug.GitHubCommit
+	createCount  int
+	createdError error
 }
 
 func (f *queryFake) Scope() githubauth4datatug.RepositoryScope {
@@ -45,6 +47,9 @@ func (f *queryFake) GetTree(ctx context.Context, oid string) ([]githubauth4datat
 	return f.snapshotFake.GetTree(ctx, oid)
 }
 func (f *queryFake) CreateCommitOnBranch(_ context.Context, _, expectedHead, message string, changes []githubauth4datatug.GitHubFileChange) (githubauth4datatug.GitHubCommit, error) {
+	if f.createdError != nil {
+		return githubauth4datatug.GitHubCommit{}, f.createdError
+	}
 	if expectedHead != createCommittedHead {
 		return githubauth4datatug.GitHubCommit{}, errors.New("stale head")
 	}
@@ -70,6 +75,74 @@ func (f *queryFake) CreateCommitOnBranch(_ context.Context, _, expectedHead, mes
 	f.newCommit = githubauth4datatug.GitHubCommit{OID: queryCommitOID, TreeOID: queryTreeOID, Message: message, ParentOIDs: []string{expectedHead}}
 	f.createCount++
 	return f.newCommit, nil
+}
+
+func TestQueryRepositoryRejectsStaleBaseAndLossyLegacyDefinition(t *testing.T) {
+	fake := &queryFake{snapshotFake: newSnapshotFake(t)}
+	repo := &queryRepository{client: fake}
+	request := queryRequest()
+	request.Query.ID, request.Query.Title = "customers", "Customers"
+	request.Branch = "wrong"
+	if _, err := repo.PrepareQuerySave(context.Background(), "demo-project-1", "datatug-demo-project", "work", request); !errors.Is(err, facade4datatug.ErrGitHubQueryInvalid) {
+		t.Fatalf("branch mismatch: %v", err)
+	}
+	request.Branch = "work"
+	request.ExpectedBranchHead = createCommittedHead
+	if _, err := repo.PrepareQuerySave(context.Background(), "demo-project-1", "other-project", "work", request); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("foreign project manifest accepted: %v", err)
+	}
+	legacyPath := "demo-project-1/queries/customers.sql.json"
+	content := []byte(`{"id":"customers","title":"Legacy"}`)
+	oid := testGitBlobOID(content)
+	fake.files[oid] = content
+	fake.tree = append(fake.tree, githubauth4datatug.GitHubTreeEntry{Path: legacyPath, Type: "blob", OID: oid, Mode: "100644", Size: int64(len(content))})
+	if _, err := repo.PrepareQuerySave(context.Background(), "demo-project-1", "datatug-demo-project", "work", request); !errors.Is(err, ErrUnsupportedExistingQuery) {
+		t.Fatalf("legacy query overwritten: %v", err)
+	}
+}
+
+func TestQueryRepositoryReportsOnlyVerifiedProviderCommit(t *testing.T) {
+	request := queryRequest()
+	request.Query.ID, request.Query.Title = "customers", "Customers"
+	request.ExpectedBranchHead = createCommittedHead
+	for _, tc := range []struct {
+		name    string
+		corrupt func(*queryFake)
+		want    error
+	}{
+		{"provider error", func(f *queryFake) { f.createdError = errors.New("provider failed") }, nil},
+		{"wrong parent", func(f *queryFake) { f.newCommit.ParentOIDs = []string{queryTreeOID} }, ErrGitHubQueryCommitProof},
+		{"extra foreign tree entry", func(f *queryFake) {
+			f.newTree = append(f.newTree, githubauth4datatug.GitHubTreeEntry{Path: "other.txt", Type: "blob", OID: queryTreeOID, Mode: "100644", Size: 1})
+		}, ErrGitHubQueryCommitProof},
+		{"duplicate tree entry", func(f *queryFake) { f.newTree = append(f.newTree, f.newTree[0]) }, ErrGitHubQueryCommitProof},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &queryFake{snapshotFake: newSnapshotFake(t)}
+			repo := &queryRepository{client: fake}
+			plan, err := repo.PrepareQuerySave(context.Background(), "demo-project-1", "datatug-demo-project", "work", request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name != "provider error" {
+				_, err = repo.CreateQueryCommit(context.Background(), "work", createCommittedHead, "Save DataTug query; DataTug-Operation: initial", plan)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			tc.corrupt(fake)
+			if tc.name == "provider error" {
+				_, err = repo.CreateQueryCommit(context.Background(), "work", createCommittedHead, "message", plan)
+				if err == nil || errors.Is(err, ErrGitHubQueryCommitProof) {
+					t.Fatalf("provider error became success/proof error: %v", err)
+				}
+				return
+			}
+			if _, err = repo.FindQueryCommit(context.Background(), "work", createCommittedHead, "initial", plan); !errors.Is(err, tc.want) {
+				t.Fatalf("unverified commit accepted: %v", err)
+			}
+		})
+	}
 }
 
 func TestQueryRepositorySavesPairAtExpectedHeadAndRecoversExactCommit(t *testing.T) {

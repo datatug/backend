@@ -12,7 +12,7 @@ import (
 func httpGetGitHubProjectCapabilities(options GitHubProjectRouteOptions) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if options.Provider == nil || options.Service == nil {
+		if options.provider() == nil || options.service() == nil {
 			sharedProjectError(w, http.StatusServiceUnavailable, "github_unavailable")
 			return
 		}
@@ -42,7 +42,7 @@ func httpGetGitHubProjectCapabilities(options GitHubProjectRouteOptions) http.Ha
 		}
 		result := dto.ProjectCapabilities{QueryRead: true, Branches: true}
 		if client.Scope().Permission == githubauth4datatug.RepositoryWrite {
-			_, err = options.Service.AuthorizeGitHubProjectWrite(ctx, actorID, selected.ID, owner, repo, folder)
+			_, err = options.service().AuthorizeGitHubProjectWrite(ctx, actorID, selected.ID, owner, repo, folder)
 			result.QuerySave = err == nil
 		}
 		writeGitHubJSON(w, http.StatusOK, result)

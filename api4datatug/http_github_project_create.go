@@ -10,8 +10,10 @@ import (
 
 	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
+	"github.com/datatug/backend/githubstore4datatug"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/datatug/backend/template4datatug"
+	"github.com/datatug/datatug-core/pkg/dto"
 	"github.com/sneat-co/sneat-go-core/apicore/verify"
 	"github.com/strongo/validation"
 )
@@ -24,6 +26,61 @@ type GitHubProjectRouteOptions struct {
 	Service             *facade4datatug.SharedProjectService
 	Provider            *githubauth4datatug.Provider
 	AuthorizeRepository func(context.Context, string, int64, string, string) (facade4datatug.GitHubCreateRepository, error)
+	// These package-private ports make the transport testable without exposing
+	// a production route option that could bypass the dedicated GitHub App.
+	serviceOverride         githubProjectService
+	providerOverride        githubProjectProvider
+	queryRepositoryOverride func(context.Context, string, int64, string, string) (facade4datatug.GitHubQueryRepository, error)
+}
+
+type githubProjectService interface {
+	CreateGitHubProject(context.Context, facade4datatug.GitHubProjectCreateCommand, facade4datatug.GitHubCreateRepository) (facade4datatug.GitHubProjectCreateResult, error)
+	ResolveGitHubProject(context.Context, string, int64, string, string, string) (facade4datatug.GitHubProjectAccess, error)
+	AuthorizeGitHubProjectWrite(context.Context, string, int64, string, string, string) (facade4datatug.GitHubProjectAccess, error)
+	SaveGitHubQuery(context.Context, string, int64, string, string, string, dto.SaveQueryRequest, facade4datatug.GitHubQueryRepository) (*dto.SaveQueryResponse, error)
+}
+
+type githubProjectReadRepository interface {
+	Scope() githubauth4datatug.RepositoryScope
+	ListBranches(context.Context) ([]githubauth4datatug.GitHubBranch, error)
+	GetRef(context.Context, string) (githubauth4datatug.GitHubRef, error)
+	GetCommit(context.Context, string) (githubauth4datatug.GitHubCommit, error)
+	GetTree(context.Context, string) ([]githubauth4datatug.GitHubTreeEntry, error)
+	GetBlob(context.Context, string) ([]byte, error)
+}
+type githubProjectProvider interface {
+	ListRepositories(context.Context, string) ([]githubauth4datatug.GitHubRepository, error)
+	AuthorizeReadRepository(context.Context, string, githubauth4datatug.RepositoryRef) (githubProjectReadRepository, error)
+}
+type githubProjectProviderAdapter struct{ provider *githubauth4datatug.Provider }
+
+func (a githubProjectProviderAdapter) ListRepositories(ctx context.Context, uid string) ([]githubauth4datatug.GitHubRepository, error) {
+	return a.provider.ListRepositories(ctx, uid)
+}
+func (a githubProjectProviderAdapter) AuthorizeReadRepository(ctx context.Context, uid string, ref githubauth4datatug.RepositoryRef) (githubProjectReadRepository, error) {
+	return a.provider.AuthorizeRepository(ctx, uid, ref, githubauth4datatug.RepositoryRead)
+}
+
+func (o GitHubProjectRouteOptions) service() githubProjectService {
+	if o.serviceOverride != nil {
+		return o.serviceOverride
+	}
+	return o.Service
+}
+func (o GitHubProjectRouteOptions) provider() githubProjectProvider {
+	if o.providerOverride != nil {
+		return o.providerOverride
+	}
+	if o.Provider != nil {
+		return githubProjectProviderAdapter{provider: o.Provider}
+	}
+	return nil
+}
+func (o GitHubProjectRouteOptions) queryRepository(ctx context.Context, uid string, id int64, owner, name string) (facade4datatug.GitHubQueryRepository, error) {
+	if o.queryRepositoryOverride != nil {
+		return o.queryRepositoryOverride(ctx, uid, id, owner, name)
+	}
+	return githubstore4datatug.AuthorizeQueryRepository(ctx, o.Provider, uid, id, owner, name)
 }
 
 func httpPostCreateProjectByStore(ids facade4datatug.IDGenerator, github GitHubProjectRouteOptions) http.HandlerFunc {
@@ -84,7 +141,7 @@ func (v CreateGitHubProjectRequest) Validate() error {
 func httpPostCreateGitHubProject(options GitHubProjectRouteOptions) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if options.Service == nil || options.AuthorizeRepository == nil {
+		if options.service() == nil || options.AuthorizeRepository == nil {
 			sharedProjectError(w, http.StatusServiceUnavailable, "github_unavailable")
 			return
 		}
@@ -118,7 +175,7 @@ func httpPostCreateGitHubProject(options GitHubProjectRouteOptions) http.Handler
 				ExpectedHead: request.GitHub.ExpectedBranchHead, TemplateID: request.Template.ID, TemplateCommit: request.Template.Commit,
 			},
 		}
-		response, err := options.Service.CreateGitHubProject(ctx, command, repo)
+		response, err := options.service().CreateGitHubProject(ctx, command, repo)
 		if err != nil {
 			status, code := http.StatusServiceUnavailable, "github_unavailable"
 			switch {

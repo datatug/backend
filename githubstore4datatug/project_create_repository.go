@@ -74,7 +74,7 @@ func (r *createRepository) EnsureFolderEmpty(ctx context.Context, head, folder s
 	}
 	prefix := folder + "/"
 	for _, entry := range tree {
-		if entry.Path == folder || strings.HasPrefix(entry.Path, prefix) {
+		if entry.Path == folder || strings.HasPrefix(entry.Path, prefix) || (entry.Type != "tree" && strings.HasPrefix(folder, entry.Path+"/")) {
 			return facade4datatug.ErrGitHubProjectConflict
 		}
 	}

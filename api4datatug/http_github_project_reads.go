@@ -15,7 +15,7 @@ import (
 )
 
 func openAuthorizedGitHubSnapshot(ctx context.Context, options GitHubProjectRouteOptions, actorID, project, branch string) (*githubstore4datatug.ProjectSnapshot, error) {
-	if options.Provider == nil || options.Service == nil {
+	if options.provider() == nil || options.service() == nil {
 		return nil, githubauth4datatug.ErrGitHubAppNotConfigured
 	}
 	repo, owner, folder, ok := parseGitHubProjectKey(project)
@@ -43,9 +43,9 @@ func openAuthorizedGitHubSnapshot(ctx context.Context, options GitHubProjectRout
 	return snapshot, nil
 }
 
-func authorizeRegisteredGitHubProject(ctx context.Context, options GitHubProjectRouteOptions, actorID, repo, owner, folder string) (*githubauth4datatug.GitHubRepository, *githubauth4datatug.AuthorizedGitHubRepository, facade4datatug.GitHubProjectAccess, error) {
+func authorizeRegisteredGitHubProject(ctx context.Context, options GitHubProjectRouteOptions, actorID, repo, owner, folder string) (*githubauth4datatug.GitHubRepository, githubProjectReadRepository, facade4datatug.GitHubProjectAccess, error) {
 	var noAccess facade4datatug.GitHubProjectAccess
-	repositories, err := options.Provider.ListRepositories(ctx, actorID)
+	repositories, err := options.provider().ListRepositories(ctx, actorID)
 	if err != nil {
 		return nil, nil, noAccess, err
 	}
@@ -59,11 +59,11 @@ func authorizeRegisteredGitHubProject(ctx context.Context, options GitHubProject
 	if selected == nil {
 		return nil, nil, noAccess, githubauth4datatug.ErrGitHubRepositoryDenied
 	}
-	client, err := options.Provider.AuthorizeRepository(ctx, actorID, githubauth4datatug.RepositoryRef{ID: selected.ID, Owner: selected.Owner, Name: selected.Name}, githubauth4datatug.RepositoryRead)
+	client, err := options.provider().AuthorizeReadRepository(ctx, actorID, githubauth4datatug.RepositoryRef{ID: selected.ID, Owner: selected.Owner, Name: selected.Name})
 	if err != nil {
 		return nil, nil, noAccess, err
 	}
-	access, err := options.Service.ResolveGitHubProject(ctx, actorID, selected.ID, owner, repo, folder)
+	access, err := options.service().ResolveGitHubProject(ctx, actorID, selected.ID, owner, repo, folder)
 	if err != nil {
 		return nil, nil, noAccess, err
 	}
@@ -90,7 +90,7 @@ func githubReadError(w http.ResponseWriter, err error) {
 func withGitHubProjectSnapshot(options GitHubProjectRouteOptions, operation func(http.ResponseWriter, *http.Request, *githubstore4datatug.ProjectSnapshot)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if options.Provider == nil || options.Service == nil {
+		if options.provider() == nil || options.service() == nil {
 			sharedProjectError(w, http.StatusServiceUnavailable, "github_unavailable")
 			return
 		}

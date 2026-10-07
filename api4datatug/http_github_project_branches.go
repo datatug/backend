@@ -36,7 +36,8 @@ type GitHubProjectBranchesResponse struct {
 func httpGetGitHubProjectBranches(options GitHubProjectRouteOptions) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if options.Provider == nil || options.Service == nil {
+		provider, service := options.provider(), options.service()
+		if provider == nil || service == nil {
 			sharedProjectError(w, http.StatusServiceUnavailable, "github_unavailable")
 			return
 		}
@@ -59,7 +60,7 @@ func httpGetGitHubProjectBranches(options GitHubProjectRouteOptions) http.Handle
 			sharedProjectError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		accessible, err := options.Provider.ListRepositories(ctx, actorID)
+		accessible, err := provider.ListRepositories(ctx, actorID)
 		if err != nil {
 			status, code := githubAuthorizationStatus(err)
 			sharedProjectError(w, status, code)
@@ -76,13 +77,13 @@ func httpGetGitHubProjectBranches(options GitHubProjectRouteOptions) http.Handle
 			sharedProjectError(w, http.StatusForbidden, "repository_denied")
 			return
 		}
-		client, err := options.Provider.AuthorizeRepository(ctx, actorID, githubauth4datatug.RepositoryRef{ID: selected.ID, Owner: selected.Owner, Name: selected.Name}, githubauth4datatug.RepositoryRead)
+		client, err := provider.AuthorizeReadRepository(ctx, actorID, githubauth4datatug.RepositoryRef{ID: selected.ID, Owner: selected.Owner, Name: selected.Name})
 		if err != nil {
 			status, code := githubAuthorizationStatus(err)
 			sharedProjectError(w, status, code)
 			return
 		}
-		access, err := options.Service.ResolveGitHubProject(ctx, actorID, selected.ID, owner, repoName, folder)
+		access, err := service.ResolveGitHubProject(ctx, actorID, selected.ID, owner, repoName, folder)
 		if err != nil && !errors.Is(err, facade4datatug.ErrGitHubProjectNotRegistered) {
 			sharedProjectError(w, http.StatusForbidden, "project_denied")
 			return

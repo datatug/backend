@@ -19,6 +19,8 @@ import (
 
 type SaveGitHubQueryRequest struct{ dto.SaveQueryRequest }
 
+const maxSaveGitHubQueryRequestBytes = 5 << 20
+
 func (v *SaveGitHubQueryRequest) UnmarshalJSON(data []byte) error {
 	var parsed dto.SaveQueryRequest
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -37,18 +39,35 @@ func (v SaveGitHubQueryRequest) Validate() error { return v.SaveQueryRequest.Val
 func httpPostGitHubSaveQuery(options GitHubProjectRouteOptions) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if options.Provider == nil || options.Service == nil {
+		if options.provider() == nil || options.service() == nil {
 			sharedProjectError(w, http.StatusServiceUnavailable, "github_unavailable")
 			return
 		}
-		var request SaveGitHubQueryRequest
-		ctx, err := verifyAuthenticatedRequestAndDecodeBody(w, r, verify.DefaultJsonWithAuthRequired, &request)
+		ctx, err := verifyAuthenticatedRequest(w, r, verify.Request(verify.AuthenticationRequired(true), verify.MaximumContentLength(-1)))
 		if err != nil {
 			return
 		}
 		actorID, err := verifiedFirebaseUID(ctx)
 		if err != nil {
 			sharedProjectError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if r.ContentLength > maxSaveGitHubQueryRequestBytes {
+			sharedProjectError(w, http.StatusRequestEntityTooLarge, "query_too_large")
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxSaveGitHubQueryRequestBytes+1))
+		if err != nil {
+			sharedProjectError(w, http.StatusBadRequest, "invalid_query")
+			return
+		}
+		if len(body) > maxSaveGitHubQueryRequestBytes {
+			sharedProjectError(w, http.StatusRequestEntityTooLarge, "query_too_large")
+			return
+		}
+		var request SaveGitHubQueryRequest
+		if len(body) == 0 || json.Unmarshal(body, &request) != nil || request.Validate() != nil {
+			sharedProjectError(w, http.StatusBadRequest, "invalid_query")
 			return
 		}
 		if request.StoreID != models4datatug.GithubStoreID {
@@ -60,7 +79,7 @@ func httpPostGitHubSaveQuery(options GitHubProjectRouteOptions) http.HandlerFunc
 			sharedProjectError(w, http.StatusBadRequest, "invalid_project")
 			return
 		}
-		accessible, err := options.Provider.ListRepositories(ctx, actorID)
+		accessible, err := options.provider().ListRepositories(ctx, actorID)
 		if err != nil {
 			status, code := githubAuthorizationStatus(err)
 			sharedProjectError(w, status, code)
@@ -77,13 +96,13 @@ func httpPostGitHubSaveQuery(options GitHubProjectRouteOptions) http.HandlerFunc
 			sharedProjectError(w, http.StatusForbidden, "repository_denied")
 			return
 		}
-		repository, err := githubstore4datatug.AuthorizeQueryRepository(ctx, options.Provider, actorID, selected.ID, owner, repoName)
+		repository, err := options.queryRepository(ctx, actorID, selected.ID, owner, repoName)
 		if err != nil {
 			status, code := githubAuthorizationStatus(err)
 			sharedProjectError(w, status, code)
 			return
 		}
-		result, err := options.Service.SaveGitHubQuery(ctx, actorID, selected.ID, owner, repoName, folder, request.SaveQueryRequest, repository)
+		result, err := options.service().SaveGitHubQuery(ctx, actorID, selected.ID, owner, repoName, folder, request.SaveQueryRequest, repository)
 		if err != nil {
 			status, code := http.StatusServiceUnavailable, "github_unavailable"
 			switch {
