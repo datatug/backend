@@ -9,6 +9,12 @@ import (
 	"github.com/datatug/backend/githubauth4datatug"
 )
 
+type wrongRefSnapshotClient struct{ *snapshotFake }
+
+func (c wrongRefSnapshotClient) GetRef(context.Context, string) (githubauth4datatug.GitHubRef, error) {
+	return githubauth4datatug.GitHubRef{Name: "other", OID: createCommittedHead}, nil
+}
+
 func TestProjectSnapshotRejectsUntrustedTreeBeforeExposingPrivateContent(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -145,6 +151,9 @@ func TestProjectSnapshotRequiresImmutableSelectedHeadAndValidFolder(t *testing.T
 	if _, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", ""); !errors.Is(err, ErrInvalidProjectSnapshot) {
 		t.Fatalf("missing branch accepted: %v", err)
 	}
+	if _, err := OpenProjectSnapshot(ctx, wrongRefSnapshotClient{fake}, "demo-project-1", "work"); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("mismatched ref accepted: %v", err)
+	}
 	snapshot, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", "work")
 	if err != nil {
 		t.Fatal(err)
@@ -154,5 +163,45 @@ func TestProjectSnapshotRequiresImmutableSelectedHeadAndValidFolder(t *testing.T
 	}
 	if _, err := snapshot.ReadFile(ctx, "missing.txt"); !errors.Is(err, ErrProjectFileMissing) {
 		t.Fatalf("missing blob accepted: %v", err)
+	}
+}
+
+func TestProjectSnapshotQueryFileReadRefusesMalformedDefinition(t *testing.T) {
+	ctx := context.Background()
+	fake := newSnapshotFake(t)
+	for i, entry := range fake.tree {
+		if entry.Path == "demo-project-1/queries/demodb/chinook-top-customer-spend.query.json" {
+			content := []byte(`{`)
+			oid := testGitBlobOID(content)
+			fake.files[oid] = content
+			fake.tree[i].OID = oid
+			fake.tree[i].Size = int64(len(content))
+			break
+		}
+	}
+	snapshot, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := snapshot.QueryFiles(ctx, "demodb", "chinook-top-customer-spend"); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("malformed query definition accepted: %v", err)
+	}
+}
+
+func TestProjectSnapshotBoundsPrivateQueryListing(t *testing.T) {
+	ctx := context.Background()
+	fake := newSnapshotFake(t)
+	content := []byte(`{"title":"` + strings.Repeat("x", maxListedQueryBytes/2) + `"}`)
+	for _, name := range []string{"demo-project-1/queries/large-1.query.json", "demo-project-1/queries/large-2.query.json"} {
+		oid := testGitBlobOID(content)
+		fake.files[oid] = content
+		fake.tree = append(fake.tree, githubauth4datatug.GitHubTreeEntry{Path: name, Type: "blob", Mode: "100644", OID: oid, Size: int64(len(content))})
+	}
+	snapshot, err := OpenProjectSnapshot(ctx, fake, "demo-project-1", "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.AllQueries(ctx); !errors.Is(err, ErrInvalidProjectSnapshot) {
+		t.Fatalf("unbounded private listing accepted: %v", err)
 	}
 }
