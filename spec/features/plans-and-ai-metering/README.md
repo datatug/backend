@@ -117,7 +117,7 @@ A client may listen to the two documents for live updates, but must use them onl
 
 #### REQ: stale-rule
 
-A plan holds only while it is paid for. The server treats a record as Free when the current time is later than `paidUntil` plus a grace, whose length is set by configuration and is longer for `past_due` than for `active` and `trialing`. A paying `status` with no `paidUntil` is Free. The endpoint reports the result as `effectivePlan` ([REQ:plan-endpoint-response](#req-plan-endpoint-response)); a client shows `effectivePlan` and the effective `limits`, and never recomputes the grace.
+A plan holds only while it is paid for. The server treats a record as Free at or after `paidUntil` plus an explicitly configured nonnegative grace. Both grace values may be zero; `past_due` grace may equal or exceed the `active`/`trialing` grace. DataTug strict paid-through configuration uses zero for both: a payment retry while the already-paid period remains open does not end that period, but no retry grants time beyond its paid end. An ended record or an effective `endsAt` denies paid access even when `paidUntil` is later. Personal Free fallback is not permission to use hosted AI on an affected project whose paid plan has ended; that project admission is checked separately. A paying `status` with no `paidUntil` is Free. The endpoint reports the result as `effectivePlan` ([REQ:plan-endpoint-response](#req-plan-endpoint-response)); a client shows `effectivePlan` and the effective `limits`, and never recomputes the grace.
 
 Fixture: `plan-response-stale.json` (the record says `pro` and `past_due`; the plan in force is `free`).
 

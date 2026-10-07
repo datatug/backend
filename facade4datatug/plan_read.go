@@ -68,12 +68,14 @@ type PlanConfig struct {
 	FreeModels           []PlanModel
 	ProModels            []PlanModel
 	DailyLimit           int64
-	ActiveGrace          time.Duration
-	PastDueGrace         time.Duration
-	Enforced             bool
-	UpgradeURL           string
-	ManageURL            string
-	SupportEmail         string
+	// Zero grace stops paid access exactly at PaidUntil. Positive values are
+	// explicit legacy policy; do not configure them for strict paid-through plans.
+	ActiveGrace  time.Duration
+	PastDueGrace time.Duration
+	Enforced     bool
+	UpgradeURL   string
+	ManageURL    string
+	SupportEmail string
 }
 
 // PlanConfigReader receives the proved account and the one UTC instant sampled
@@ -291,7 +293,7 @@ func paidAccessHolds(record *models4datatug.PlanRecord, now time.Time, config Pl
 	if record.EndsAt != nil && !now.Before(*record.EndsAt) {
 		return false
 	}
-	return !now.After(record.PaidUntil.Add(grace))
+	return now.Before(record.PaidUntil.Add(grace))
 }
 
 func validateLimits(l models4datatug.PlanLimits) error {
@@ -367,7 +369,7 @@ func ValidatePlanConfig(config PlanConfig) error {
 }
 
 func validateConfig(config PlanConfig) error {
-	if config.DailyLimit <= 0 || config.ActiveGrace < 0 || config.PastDueGrace <= config.ActiveGrace || config.UpgradeURL == "" {
+	if config.DailyLimit <= 0 || config.ActiveGrace < 0 || config.PastDueGrace < config.ActiveGrace || config.UpgradeURL == "" {
 		return ErrPlanUnavailable
 	}
 	if err := validateLimits(config.FreeFirstMonthLimits); err != nil {
