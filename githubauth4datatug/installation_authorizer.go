@@ -106,7 +106,7 @@ func (a *GitHubAppInstallationAuthorizer) appRequest(ctx context.Context, path, 
 	if err != nil {
 		return ErrGitHubRepositoryDenied
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("%w: DataTug App request status %d", ErrGitHubRepositoryDenied, response.StatusCode)
 	}

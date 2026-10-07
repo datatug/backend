@@ -227,7 +227,7 @@ func (r *AuthorizedGitHubRepository) getJSON(ctx context.Context, path string, t
 	if err != nil {
 		return ErrGitHubRepositoryDenied
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ErrGitHubRepositoryDenied
 	}
@@ -256,7 +256,7 @@ func (r *AuthorizedGitHubRepository) graphQL(ctx context.Context, operationName,
 	if err != nil {
 		return ErrGitHubRepositoryDenied
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ErrGitHubRepositoryDenied
 	}
@@ -290,7 +290,7 @@ func validOID(oid string) bool {
 		return false
 	}
 	for _, char := range oid {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
 			return false
 		}
 	}

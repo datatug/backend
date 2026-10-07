@@ -95,7 +95,7 @@ func (c *GitHubAppClient) exchange(ctx context.Context, form url.Values) (OAuthT
 	if err != nil {
 		return OAuthTokens{}, ErrReauthorizationRequired
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return OAuthTokens{}, ErrReauthorizationRequired
 	}
@@ -218,10 +218,10 @@ func (c *githubUserClient) Repositories(ctx context.Context) ([]GitHubRepository
 			Permissions GitHubRepositoryPermissions `json:"permissions"`
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, maxGitHubResponseBytes)).Decode(&wire) != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, ErrGitHubRepositoryDenied
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		for _, item := range wire {
 			owner := item.Owner.Login
 			if owner == "" {
@@ -254,7 +254,7 @@ func (c *githubUserClient) get(ctx context.Context, path string, target any) err
 	if err != nil {
 		return errors.New("GitHub authorization check failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return errors.New("GitHub authorization check was denied")
 	}
