@@ -13,6 +13,7 @@ import (
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/sneat-go-core/facade"
 )
 
 var (
@@ -55,6 +56,7 @@ type SharedProjectService struct {
 	now        func() time.Time
 	paid       *PaidSharedProjectOptions
 	ownerLinks *sharedProjectOwnerLinks
+	activation *sharedProjectActivation
 }
 
 func sharedProjectPortAbsent(v any) bool {
@@ -79,7 +81,7 @@ func NewSharedProjectService(db dal.DB, ids IDGenerator, authority SharedProject
 
 func (s *SharedProjectService) Create(ctx context.Context, command SharedProjectCreateCommand) (models4datatug.SharedProjectRef, error) {
 	var result models4datatug.SharedProjectRef
-	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ids) || sharedProjectPortAbsent(s.authority) || s.now == nil {
+	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ids) || (s.activation == nil && sharedProjectPortAbsent(s.authority)) || s.now == nil {
 		return result, ErrSharedProjectUnavailable
 	}
 	if err := command.Validate(); err != nil {
@@ -100,18 +102,21 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		binding.PayerID, binding.Mode, binding.Product = account.ID, s.paid.Mode, s.paid.Product
 		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
 	}
-	prepared, err := s.authority.PrepareSharedProjectCreate(ctx, binding)
+	if s.activation != nil {
+		userCtx, ok := ctx.(facade.ContextWithUser)
+		if !ok || sharedProjectPortAbsent(userCtx) {
+			return result, ErrSharedProjectUnauthorized
+		}
+		if err := s.EnsureProtectedProjectQuotaForCreate(userCtx); err != nil {
+			return result, err
+		}
+	}
+	// Existing-capability flows prepare their Core reservation before this
+	// transaction. The activating flow captures time here and plans Core's
+	// module change only after all domain reads in this same transaction.
+	prepared, observedAt, userCtx, err := s.prepareCreateAuthority(ctx, binding)
 	if err != nil {
-		return result, fmt.Errorf("%w: %w", ErrSharedProjectUnauthorized, err)
-	}
-	if prepared.Binding != binding || prepared.IssuedAt.IsZero() || sharedProjectPortAbsent(prepared.Validator) {
-		return result, ErrSharedProjectUnauthorized
-	}
-	// Preparation may commit a Core reservation. Capture time only afterwards,
-	// then keep the same observation and entropy through DAL transaction retries.
-	observedAt := s.now().UTC()
-	if observedAt.IsZero() || observedAt.Before(prepared.IssuedAt) {
-		return result, ErrSharedProjectUnauthorized
+		return result, err
 	}
 	projectID, idErr := s.ids.NewID(ctx)
 	if idErr == nil {
@@ -120,8 +125,8 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		}
 	}
 	err = s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
-		if err := prepared.Validator.ValidateSharedProjectCreateInTransaction(txCtx, tx, binding, observedAt); err != nil {
-			return fmt.Errorf("%w: %w", ErrSharedProjectUnauthorized, err)
+		if err := s.validatePreparedCreateInTransaction(txCtx, tx, binding, prepared, observedAt); err != nil {
+			return err
 		}
 		var admission *projectAdmissionState
 		if s.paid != nil {
@@ -159,6 +164,9 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 					return err
 				}
 			}
+			if err := s.applyExplicitCreateActivation(userCtx, txCtx, tx, binding, observedAt); err != nil {
+				return err
+			}
 			result = models4datatug.SharedProjectRef{StoreID: models4datatug.FirestoreStoreID, SpaceID: receipt.SpaceID, ProjectID: receipt.ProjectID}
 			return nil
 		}
@@ -180,8 +188,11 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 				return err
 			}
 		}
-		// All authority and command reads precede the first write. No user index
-		// or Space/module record is mutated by this domain command.
+		if err := s.applyExplicitCreateActivation(userCtx, txCtx, tx, binding, observedAt); err != nil {
+			return err
+		}
+		// All authority and command reads precede writes. For the activating
+		// constructor, Core's module update is applied first in this transaction.
 		projectRecord, project := models4datatug.NewSharedProjectRecord(command.SpaceID, projectID)
 		if ownerPlan != nil {
 			var linked *models4datatug.SharedLinkedProject

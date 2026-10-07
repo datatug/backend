@@ -16,6 +16,7 @@ import (
 	"github.com/dal-go/record/update"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/datatug/backend/template4datatug"
+	"github.com/sneat-co/sneat-go-core/facade"
 )
 
 var (
@@ -123,15 +124,25 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.OperationID, RequestDigest: digest,
 		PayerID: account.ID, Mode: s.paid.Mode, Product: s.paid.Product,
 	}
-	prepared, err := s.authority.PrepareSharedProjectCreate(ctx, createBinding)
-	if err != nil || prepared.Binding != createBinding || prepared.IssuedAt.IsZero() || sharedProjectPortAbsent(prepared.Validator) {
-		return zero, ErrSharedProjectUnauthorized
+	var activationCtx facade.ContextWithUser
+	if s.activation != nil {
+		var ok bool
+		activationCtx, ok = ctx.(facade.ContextWithUser)
+		if !ok || sharedProjectPortAbsent(activationCtx) {
+			return zero, ErrSharedProjectUnauthorized
+		}
+		if err := s.EnsureProtectedProjectQuotaForCreate(activationCtx); err != nil {
+			return zero, err
+		}
 	}
-	observedAt := s.now().UTC()
-	if observedAt.IsZero() || observedAt.Before(prepared.IssuedAt) {
-		return zero, ErrSharedProjectUnauthorized
+	prepared, observedAt, preparedActivationCtx, err := s.prepareCreateAuthority(ctx, createBinding)
+	if err != nil {
+		return zero, err
 	}
-	reserved, err := s.reserveGitHubCreate(ctx, command, createBinding, prepared, observedAt)
+	if activationCtx == nil {
+		activationCtx = preparedActivationCtx
+	}
+	reserved, err := s.reserveGitHubCreate(ctx, activationCtx, command, createBinding, prepared, observedAt)
 	if err != nil {
 		return zero, err
 	}
@@ -186,15 +197,15 @@ func githubCreateResult(c GitHubProjectCreateCommand, projectID, committedHead s
 	}
 }
 
-func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, command GitHubProjectCreateCommand, binding SharedProjectCreateBinding, prepared PreparedSharedProjectCreate, observedAt time.Time) (githubCreateReservation, error) {
+func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activationCtx facade.ContextWithUser, command GitHubProjectCreateCommand, binding SharedProjectCreateBinding, prepared PreparedSharedProjectCreate, observedAt time.Time) (githubCreateReservation, error) {
 	var result githubCreateReservation
 	newID, idErr := s.ids.NewID(ctx)
 	if idErr == nil && models4datatug.ValidateSharedProjectIdentifier(newID) != nil {
 		idErr = ErrSharedProjectUnavailable
 	}
 	err := s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
-		if err := prepared.Validator.ValidateSharedProjectCreateInTransaction(txCtx, tx, binding, observedAt); err != nil {
-			return ErrSharedProjectUnauthorized
+		if err := s.validatePreparedCreateInTransaction(txCtx, tx, binding, prepared, observedAt); err != nil {
+			return err
 		}
 		paidAt := s.now().UTC()
 		if paidAt.IsZero() || paidAt.Before(observedAt) {
@@ -232,6 +243,9 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, command 
 			lr, locator := models4datatug.NewGitHubProjectLocatorRecord(op.Binding.RepositoryID, op.Binding.Folder)
 			if err := tx.Get(txCtx, lr); err != nil || locator.Validate() != nil || locator.SpaceID != command.SpaceID || locator.ProjectID != op.ProjectID || locator.Status != op.Status {
 				return ErrGitHubProjectConflict
+			}
+			if err := s.applyExplicitCreateActivation(activationCtx, txCtx, tx, binding, observedAt); err != nil {
+				return err
 			}
 			result = githubCreateReservation{projectID: op.ProjectID, createdAt: op.CreatedAt, readyHead: op.CommittedHead}
 			return nil
@@ -281,6 +295,9 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, command 
 			ProjectID: newID, RequestDigest: binding.RequestDigest, Binding: command.Source.Binding,
 			ExpectedHead: command.Source.ExpectedHead, TemplateID: command.Source.TemplateID,
 			TemplateCommit: command.Source.TemplateCommit, Status: models4datatug.GitHubProjectInitializing, CreatedAt: observedAt,
+		}
+		if err := s.applyExplicitCreateActivation(activationCtx, txCtx, tx, binding, observedAt); err != nil {
+			return err
 		}
 		for _, item := range []record.Record{projectRecord, receiptRecord, locatorRecord, opRecord} {
 			if err := tx.Insert(txCtx, item); err != nil {

@@ -9,8 +9,10 @@ require (
 	github.com/dal-go/record v0.1.4
 	github.com/datatug/datatug-core v0.44.0
 	github.com/sneat-co/sneat-core-modules v0.92.0
+	github.com/sneat-co/sneat-ext-contracts/contactus v0.12.12
 	github.com/sneat-co/sneat-go-core v0.71.3
 	github.com/sneat-dev/wb v0.171.0
+	github.com/strongo/strongoapp v0.31.67
 	github.com/strongo/validation v0.0.15
 	google.golang.org/api v0.300.0
 	google.golang.org/grpc v1.84.0
@@ -23,7 +25,9 @@ require (
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	cloud.google.com/go/longrunning v1.2.0 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.29.0 // indirect
+	github.com/alexsergivan/transliterator v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.6 // indirect
+	github.com/bots-go-framework/bots-fw-store v0.14.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/crediterra/money v0.4.2 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
@@ -33,17 +37,19 @@ require (
 	github.com/google/s2a-go v0.1.10 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.22 // indirect
 	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
+	github.com/gosimple/slug v1.15.0 // indirect
+	github.com/gosimple/unidecode v1.0.1 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/qri-io/jsonpointer v0.1.1 // indirect
 	github.com/qri-io/jsonschema v0.2.1 // indirect
+	github.com/sneat-co/sneat-ext-contracts/media v0.1.2 // indirect
 	github.com/strongo/analytics v0.2.10 // indirect
 	github.com/strongo/decimal v0.1.2 // indirect
 	github.com/strongo/delaying v0.2.8 // indirect
 	github.com/strongo/logus v0.4.6 // indirect
 	github.com/strongo/random v0.0.3 // indirect
 	github.com/strongo/slice v0.3.12 // indirect
-	github.com/strongo/strongoapp v0.31.67 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.68.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0 // indirect
