@@ -39,7 +39,7 @@ type QueryMutationPreview struct {
 // metadata/body files to send together in one Git commit at an expected head.
 // All temp data is removed on every result, including conflicts and faults.
 // The snapshot contains only the target query pair at one immutable commit.
-func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, snapshot map[string][]byte) (*QueryMutationPreview, error) {
+func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, snapshot map[string][]byte) (out *QueryMutationPreview, resultErr error) {
 	if err := request.Validate(); err != nil {
 		return nil, err
 	}
@@ -94,7 +94,12 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() {
+		if cleanupErr := os.RemoveAll(tmp); cleanupErr != nil {
+			out = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove query preview scratch: %w", cleanupErr))
+		}
+	}()
 	root := filepath.Join(tmp, "project")
 	if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(queryDir)), 0o700); err != nil {
 		return nil, err

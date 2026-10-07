@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,7 +28,7 @@ type QueryReadResult struct {
 // ReadQueryRevision retains unknown and legacy metadata in the read response.
 // Only a current narrow Core pair receives a writable Core revision. Rich
 // definitions are readable but cannot be round-tripped through narrow saves.
-func (s *ProjectSnapshot) ReadQueryRevision(ctx context.Context, folderPath, id string) (*QueryReadResult, error) {
+func (s *ProjectSnapshot) ReadQueryRevision(ctx context.Context, folderPath, id string) (out *QueryReadResult, resultErr error) {
 	pair, kind, err := s.QueryFiles(ctx, folderPath, id)
 	if err != nil {
 		return nil, err
@@ -83,7 +84,12 @@ func (s *ProjectSnapshot) ReadQueryRevision(ctx context.Context, folderPath, id 
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() {
+		if cleanupErr := os.RemoveAll(tmp); cleanupErr != nil {
+			out = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove query read scratch: %w", cleanupErr))
+		}
+	}()
 	root := filepath.Join(tmp, "project")
 	for name, content := range pair {
 		filename := filepath.Join(root, filepath.FromSlash(name))

@@ -121,7 +121,7 @@ func CloneDemoProject(folder, projectID, title string, created time.Time) (map[s
 	return files, nil
 }
 
-func decodeDemoProject(archive, manifestBytes []byte, folder string) (map[string][]byte, error) {
+func decodeDemoProject(archive, manifestBytes []byte, folder string) (out map[string][]byte, resultErr error) {
 	var expected manifest
 	if err := json.Unmarshal(manifestBytes, &expected); err != nil || expected.Source != DemoProjectSource || expected.TemplateID != DemoProjectID || expected.Commit != DemoProjectCommit || len(expected.Files) != maxTemplateFiles {
 		return nil, ErrInvalidTemplate
@@ -145,7 +145,12 @@ func decodeDemoProject(archive, manifestBytes []byte, folder string) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("%w: gzip: %v", ErrInvalidTemplate, err)
 	}
-	defer gz.Close()
+	defer func() {
+		if closeErr := gz.Close(); closeErr != nil {
+			out = nil
+			resultErr = errors.Join(resultErr, fmt.Errorf("close template archive: %w", closeErr))
+		}
+	}()
 	reader := tar.NewReader(gz)
 	files := make(map[string][]byte, len(entries))
 	var readBytes int64
