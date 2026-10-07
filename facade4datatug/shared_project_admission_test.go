@@ -280,7 +280,7 @@ type paidBasisProof struct {
 	deny     bool
 }
 
-func (p paidBasisProof) VerifyInitialProtectedProjectBasisInTransaction(ctx context.Context, tx dal.ReadTransaction, actor, mode, product, payer string, b InitialProtectedProjectBasis) error {
+func (p paidBasisProof) VerifyInitialProtectedProjectBasisInTransaction(ctx context.Context, tx dal.ReadwriteTransaction, actor, mode, product, payer string, b InitialProtectedProjectBasis) error {
 	var row planOwnerTestRecord
 	if err := tx.Get(ctx, record.NewRecordWithData(planOwnerTestKey(), &row)); err != nil {
 		return err

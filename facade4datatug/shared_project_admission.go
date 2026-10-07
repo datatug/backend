@@ -145,7 +145,7 @@ type InitialProtectedProjectBasis struct {
 	Allocated int64
 }
 type ProtectedProjectBasisAuthority interface {
-	VerifyInitialProtectedProjectBasisInTransaction(context.Context, dal.ReadTransaction, string, string, string, string, InitialProtectedProjectBasis) error
+	VerifyInitialProtectedProjectBasisInTransaction(context.Context, dal.ReadwriteTransaction, string, string, string, string, InitialProtectedProjectBasis) error
 }
 
 // InitializeProtectedProjectQuota is one-time and transaction fenced. A host
