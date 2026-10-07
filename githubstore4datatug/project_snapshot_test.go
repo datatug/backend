@@ -69,13 +69,14 @@ func TestPinnedProjectSnapshotReadsRichDemoQueriesWithoutRefRefresh(t *testing.T
 		t.Fatalf("summary %s: %v", summary, err)
 	}
 	folder, err := snapshot.AllQueries(context.Background())
-	if err != nil || folder.ID != "~" || len(folder.Folders) != 8 {
+	if err != nil || folder.ID != "~" || len(folder.Folders) != 9 {
 		t.Fatalf("folders=%+v err=%v", folder, err)
 	}
 	for _, tc := range []struct{ folder, id, kind string }{
 		{"albums", "albums_by_title", "SQL"},
 		{"demodb", "chinook-top-customer-spend", "SQL"},
 		{"customers", "customer-invoices", "DTQL"},
+		{"hosted", "chinook-customer-preview", "DTQL"},
 		{"reference", "country-facts", "HTTP"},
 	} {
 		pair, kind, err := snapshot.QueryFiles(context.Background(), tc.folder, tc.id)
