@@ -154,7 +154,7 @@ func TestGitHubCreateReservesBeforeCommitAndReconcilesLostResponse(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ID != "repo@owner@datatug" || result.BranchHead != createNewHead || result.TemplateCommit != template4datatug.DemoProjectCommit || repo.commitCount != 1 || len(repo.files) != 631 {
+	if result.ID != "repo@owner@datatug" || result.BranchHead != createNewHead || result.TemplateCommit != template4datatug.DemoProjectCommit || repo.commitCount != 1 || len(repo.files) != template4datatug.DemoProjectFileCount {
 		t.Fatalf("unexpected result %+v commits=%d files=%d", result, repo.commitCount, len(repo.files))
 	}
 	if quota := paidQuota(t, db); quota.Allocated != 1 {

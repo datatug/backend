@@ -313,7 +313,7 @@ func TestHostedGitHubCreateRoutePassesVerifiedActorAndSelectedHead(t *testing.T)
 		}
 		return &routeCreateRepo{}, nil
 	}
-	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"51716f3a4d682d5cb7ef70a7fd37f42e5418fd3d"}}`
+	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
 	w := httptest.NewRecorder()
 	httpPostCreateGitHubProject(options)(w, httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/create_project?store=github.com", strings.NewReader(body)))
 	if w.Code != http.StatusCreated || service.createCalls != 1 || service.createCommand.ActorID != "firebase-actor" || service.createCommand.Source.ExpectedHead != routeHead {
@@ -492,7 +492,7 @@ func TestHostedGitHubSaveRejectsUnknownFieldsAndLostAuthorityWithoutMutation(t *
 }
 
 func TestHostedGitHubCreateRejectsUnknownInputAndUnavailableApp(t *testing.T) {
-	valid := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"51716f3a4d682d5cb7ef70a7fd37f42e5418fd3d"}}`
+	valid := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
 	for _, body := range []string{
 		strings.Replace(valid, `"branch":"work"`, `"branch":"work","unhandledGrant":"x"`, 1),
 		strings.Replace(valid, `"title":"Owned"`, `"title":"Owned","unknown":"x"`, 1),
@@ -542,7 +542,7 @@ func TestHostedGitHubCreateMapsProviderAndAdmissionFailures(t *testing.T) {
 		}
 		return githubTestUserContext(r), nil
 	}
-	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"51716f3a4d682d5cb7ef70a7fd37f42e5418fd3d"}}`
+	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
 	for _, tc := range []struct {
 		name               string
 		authErr, createErr error

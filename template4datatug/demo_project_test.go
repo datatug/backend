@@ -10,6 +10,7 @@ import (
 	"errors"
 	"path"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,8 +25,8 @@ func TestCloneDemoProjectPreservesAllOtherTemplateBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cloned) != 631 {
-		t.Fatalf("got %d files, want 631", len(cloned))
+	if len(cloned) != DemoProjectFileCount {
+		t.Fatalf("got %d files, want %d", len(cloned), DemoProjectFileCount)
 	}
 	for name, source := range original {
 		relative := name[len("demo-project-1/"):]
@@ -53,6 +54,42 @@ func TestCloneDemoProjectPreservesAllOtherTemplateBytes(t *testing.T) {
 	}
 	if string(cloned["work/datatug/datatug-project.json"]) == string(original["demo-project-1/datatug-project.json"]) {
 		t.Fatal("clone retained template identity")
+	}
+}
+
+func TestHostedCustomerPreviewSurvivesTemplateClone(t *testing.T) {
+	cloned, err := CloneDemoProject("work/datatug", "project-42", "Customer queries", time.Date(2026, 10, 7, 14, 30, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "work/datatug/queries/hosted/chinook-customer-preview.query."
+	var query struct {
+		ID         string `json:"id"`
+		Type       string `json:"type"`
+		Federation struct {
+			OVDBBaseURL string `json:"ovdbBaseUrl"`
+			Tables      []struct {
+				Database string   `json:"database"`
+				Name     string   `json:"name"`
+				Fields   []string `json:"fields"`
+			} `json:"tables"`
+		} `json:"federation"`
+	}
+	if err := json.Unmarshal(cloned[prefix+"json"], &query); err != nil {
+		t.Fatalf("decode hosted query metadata: %v", err)
+	}
+	if query.ID != "chinook-customer-preview" || query.Type != "DTQL" || query.Federation.OVDBBaseURL != "https://demodb.dev/ovdb" || len(query.Federation.Tables) != 1 {
+		t.Fatalf("unexpected hosted query metadata: %+v", query)
+	}
+	table := query.Federation.Tables[0]
+	if table.Database != "chinook" || table.Name != "Customer" || !reflect.DeepEqual(table.Fields, []string{"CustomerId", "FirstName", "LastName", "Country"}) {
+		t.Fatalf("unexpected hosted source: %+v", table)
+	}
+	text := string(cloned[prefix+"dtql"])
+	for _, want := range []string{"name: Customer", "field: CustomerId", "field: FirstName", "field: LastName", "field: Country", "limit: 20"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("hosted query text missing %q", want)
+		}
 	}
 }
 

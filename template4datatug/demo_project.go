@@ -23,11 +23,6 @@ import (
 const (
 	DemoProjectID     = "demo-project-1"
 	DemoProjectSource = "datatug/datatug-demo-project"
-	DemoProjectCommit = "51716f3a4d682d5cb7ef70a7fd37f42e5418fd3d"
-	archiveSHA256     = "f34921d45f9766e4aeca3dba0a8cd757ddd579f957fc8c35642d3ff8a483a74c"
-	manifestSHA256    = "958d48ce1ec4a5839aec2ff5973c8b47acf3855b7d5abf6e06660c44a9fb5b99"
-	maxTemplateFiles  = 631
-	maxTemplateBytes  = 279006
 	maxTemplateFile   = 1 << 20
 )
 
@@ -88,7 +83,7 @@ func DemoProjectFiles(folder string) (map[string][]byte, error) {
 }
 
 // CloneDemoProject rewrites only the source project's identity fields. The
-// manifest's other JSON members and all 630 other template files survive.
+// manifest's other JSON members and all other template files survive.
 func CloneDemoProject(folder, projectID, title string, created time.Time) (map[string][]byte, error) {
 	if projectID == "" || len(projectID) > 256 || title == "" || len(title) > 400 || created.IsZero() {
 		return nil, ErrInvalidTemplate

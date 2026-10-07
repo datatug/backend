@@ -12,6 +12,7 @@ import (
 
 	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
+	"github.com/datatug/backend/template4datatug"
 )
 
 const maxCreateAncestry = 64
@@ -82,7 +83,7 @@ func (r *createRepository) EnsureFolderEmpty(ctx context.Context, head, folder s
 }
 
 func (r *createRepository) CreateFilesCommit(ctx context.Context, branch, expectedHead, message string, files map[string][]byte) (string, error) {
-	if len(files) == 0 || len(files) > 631 {
+	if len(files) == 0 || len(files) > template4datatug.DemoProjectFileCount {
 		return "", ErrGitHubCreateProof
 	}
 	paths := make([]string, 0, len(files))
@@ -141,7 +142,7 @@ func (r *createRepository) FindCommitByMarker(ctx context.Context, branch, expec
 }
 
 func (r *createRepository) verifyCommitFiles(ctx context.Context, commit githubauth4datatug.GitHubCommit, files map[string][]byte) error {
-	if len(files) == 0 || len(files) > 631 {
+	if len(files) == 0 || len(files) > template4datatug.DemoProjectFileCount {
 		return ErrGitHubCreateProof
 	}
 	tree, err := r.client.GetTree(ctx, commit.TreeOID)
