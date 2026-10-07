@@ -82,6 +82,42 @@ func TestProviderConstructionAndRepositoryBoundReconnectFailClosed(t *testing.T)
 	}
 }
 
+func TestNewProviderBuildsTheAppOAuthProviderAndFailsClosedOnInvalidAppMaterial(t *testing.T) {
+	ctx := context.Background()
+	config := GitHubAppConfig{
+		AppID: DataTugGitHubAppID, ClientID: "client-id", ClientSecret: "client-secret",
+		CallbackURL: "https://datatug.app/github/callback",
+	}
+	db := sneatcoretesting.NewMemoryDB()
+	provider, err := NewProvider(db, config, bytesOf(0x63, 32), &fakeInstallation{}, ProviderOptions{})
+	if err != nil || provider == nil {
+		t.Fatalf("NewProvider() with injected App installation = (%v, %v)", provider, err)
+	}
+	if _, err = provider.BeginAuthorization(ctx, "firebase-A"); err != nil {
+		t.Fatalf("configured provider could not begin authorization: %v", err)
+	}
+
+	for _, invalid := range []struct {
+		name   string
+		config GitHubAppConfig
+	}{
+		{name: "wrong DataTug App", config: GitHubAppConfig{AppID: DataTugGitHubAppID + 1, ClientID: "client-id", ClientSecret: "client-secret", CallbackURL: config.CallbackURL}},
+		{name: "missing client ID", config: GitHubAppConfig{AppID: DataTugGitHubAppID, ClientSecret: "client-secret", CallbackURL: config.CallbackURL}},
+		{name: "missing client secret", config: GitHubAppConfig{AppID: DataTugGitHubAppID, ClientID: "client-id", CallbackURL: config.CallbackURL}},
+		{name: "invalid callback URL", config: GitHubAppConfig{AppID: DataTugGitHubAppID, ClientID: "client-id", ClientSecret: "client-secret", CallbackURL: "https://datatug.app/github/callback?code=leaked"}},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			if got, err := NewProvider(db, invalid.config, bytesOf(0x63, 32), &fakeInstallation{}, ProviderOptions{}); got != nil || !errors.Is(err, ErrGitHubAppNotConfigured) {
+				t.Fatalf("NewProvider() = (%v, %v), want fail-closed configuration error", got, err)
+			}
+		})
+	}
+	config.PrivateKeyPEM = []byte("not a valid App private key")
+	if got, err := NewProvider(db, config, bytesOf(0x63, 32), nil, ProviderOptions{}); got != nil || !errors.Is(err, ErrGitHubAppNotConfigured) {
+		t.Fatalf("NewProvider() without a valid dedicated-App signing key = (%v, %v), want fail-closed configuration error", got, err)
+	}
+}
+
 func TestProviderRefreshFailureMarksRotatingCredentialForReconnect(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
