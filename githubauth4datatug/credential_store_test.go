@@ -222,6 +222,40 @@ func TestScrubOAuthCallbackURLRemovesQueryBeforeReturningCode(t *testing.T) {
 	}
 }
 
+func TestScrubOAuthCallbackURLRejectsAmbiguousAndMalformedCredentialsAfterScrubbing(t *testing.T) {
+	if _, _, err := ScrubOAuthCallbackURL(&http.Request{}); !errors.Is(err, ErrOAuthStateInvalid) {
+		t.Fatalf("callback without URL error = %v, want invalid state", err)
+	}
+	for _, rawQuery := range []string{
+		"state=opaque", "code=one-time", "code=one&code=two&state=opaque",
+		"code=one&state=opaque&state=duplicate", "code=one&state=opaque&bad=%zz",
+	} {
+		t.Run(rawQuery, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodGet, "https://datatug.app/github/callback?"+rawQuery, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, state, err := ScrubOAuthCallbackURL(request)
+			if err == nil || code != "" || state != "" {
+				t.Fatalf("ScrubOAuthCallbackURL() = %q, %q, %v; want rejected callback", code, state, err)
+			}
+			if request.URL.RawQuery != "" || strings.Contains(request.RequestURI, "one") || strings.Contains(request.RequestURI, "opaque") {
+				t.Fatalf("invalid callback retained query data: URL=%q RequestURI=%q", request.URL.String(), request.RequestURI)
+			}
+		})
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://datatug.app/github/callback?code=one&state=opaque&error=access_denied", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = ScrubOAuthCallbackURL(request); err == nil || errors.Is(err, ErrOAuthStateInvalid) {
+		t.Fatalf("OAuth denial callback error = %v; want stable non-state denial", err)
+	}
+	if request.URL.RawQuery != "" || strings.Contains(request.RequestURI, "access_denied") {
+		t.Fatalf("OAuth denial callback retained query data: URL=%q RequestURI=%q", request.URL.String(), request.RequestURI)
+	}
+}
+
 type fakeInstallation struct {
 	access GitHubAppRepositoryAccess
 	err    error

@@ -209,11 +209,52 @@ func TestGitHubUserClientAuthenticatesAndValidatesIdentityAndRepositories(t *tes
 	}
 }
 
+func TestGitHubUserClientRejectsMalformedRepositoryListings(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    int
+		body      string
+		transport error
+	}{
+		{name: "API denial", status: http.StatusForbidden, body: `[]`},
+		{name: "invalid JSON", status: http.StatusOK, body: `[`},
+		{name: "missing immutable node ID", status: http.StatusOK, body: `[{"id":44,"name":"private","full_name":"acme/private","permissions":{"pull":true}}]`},
+		{name: "invalid repository name", status: http.StatusOK, body: `[{"id":44,"node_id":"R_kgDOABC","name":"bad/name","full_name":"acme/bad/name","permissions":{"pull":true}}]`},
+		{name: "invalid default branch", status: http.StatusOK, body: `[{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","default_branch":"bad branch","permissions":{"pull":true}}]`},
+		{name: "network failure", transport: errors.New("private transport failure")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := NewGitHubAppClient(GitHubAppConfig{
+				AppID: DataTugGitHubAppID, ClientID: "client-id", ClientSecret: "client-secret",
+				CallbackURL: "https://datatug.app/github/callback",
+			}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path != "/user/repos" {
+					t.Fatalf("repository listing requested unexpected path %q", request.URL.Path)
+				}
+				if test.transport != nil {
+					return nil, test.transport
+				}
+				response := jsonResponse(test.body)
+				response.StatusCode = test.status
+				return response, nil
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			repositories, err := client.UserClient(testTokens(time.Now().Add(time.Hour), time.Now().Add(2*time.Hour))).Repositories(context.Background())
+			if !errors.Is(err, ErrGitHubRepositoryDenied) || repositories != nil {
+				t.Fatalf("Repositories() = (%+v, %v), want no partial authorization", repositories, err)
+			}
+		})
+	}
+}
+
 func TestRepoBoundTransportAllowsOnlySelectedRepositoryOperations(t *testing.T) {
 	ref := RepositoryRef{ID: 44, Owner: "acme", Name: "private"}
 	readQuery := `{"operationName":"GetRepo","query":"query GetRepo { repository(owner: \"acme\", name: \"private\") { id } }","variables":{"input":{"owner":"acme","name":"private"}}}`
 	writeCommit := `{"operationName":"CreateCommitOnBranch","query":"mutation CreateCommitOnBranch { createCommitOnBranch(input: $input) { commit { oid } } }","variables":{"input":{"branch":{"repositoryNameWithOwner":"acme/private"},"expectedHeadOid":"` + strings.Repeat("a", 40) + `"}}}`
 	updateRefs := `{"operationName":"UpdateRefs","query":"mutation UpdateRefs { updateRefs(input: $input) { clientMutationId } }","variables":{"input":{"repositoryId":"R_kgDOABC","refUpdates":[{"name":"refs/heads/main","beforeOid":"a","afterOid":"b","force":false}]}}}`
+	createRef := `{"operationName":"CreateRef","query":"mutation CreateRef { createRef(input: $input) { ref { id } } }","variables":{"input":{"repositoryId":"R_kgDOABC","name":"refs/heads/main","oid":"a"}}}`
 	tests := []struct {
 		name      string
 		method    string
@@ -231,8 +272,19 @@ func TestRepoBoundTransportAllowsOnlySelectedRepositoryOperations(t *testing.T) 
 		{name: "write-scoped client can issue selected repository query", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: readQuery, allowed: true},
 		{name: "write actor cannot mutate through read client", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryRead, body: writeCommit},
 		{name: "selected repository create commit", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: writeCommit, allowed: true},
+		{name: "create commit without operation name is parsed from query", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(writeCommit, `"operationName":"CreateCommitOnBranch"`, `"operationName":""`, 1), allowed: true},
+		{name: "create commit cannot target another repository", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(writeCommit, "acme/private", "acme/other", 1)},
+		{name: "create commit requires expected head", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(writeCommit, `,"expectedHeadOid":"`+strings.Repeat("a", 40)+`"`, "", 1)},
 		{name: "selected repository multi ref CAS", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: updateRefs, allowed: true},
 		{name: "query cannot smuggle force ref update", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(updateRefs, `"force":false`, `"force":true`, 1)},
+		{name: "multi ref CAS requires pinned repository ID", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(updateRefs, "R_kgDOABC", "R_kgDOOTHER", 1)},
+		{name: "multi ref CAS requires at least one ref", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(updateRefs, `"refUpdates":[{"name":"refs/heads/main","beforeOid":"a","afterOid":"b","force":false}]`, `"refUpdates":[]`, 1)},
+		{name: "multi ref CAS rejects malformed ref update", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(updateRefs, `"refUpdates":[{"name":"refs/heads/main","beforeOid":"a","afterOid":"b","force":false}]`, `"refUpdates":[null]`, 1)},
+		{name: "selected repository create ref", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: createRef, allowed: true},
+		{name: "create ref rejects another repository", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: strings.Replace(createRef, "R_kgDOABC", "R_kgDOOTHER", 1)},
+		{name: "unrecognized GraphQL mutation is denied", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: `{"operationName":"DeleteRepository","query":"mutation DeleteRepository { deleteRepository(input: $input) { clientMutationId } }","variables":{"input":{"owner":"acme","name":"private"}}}`},
+		{name: "malformed GraphQL JSON is denied", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite, body: `not-json`},
+		{name: "GraphQL GET is denied", method: http.MethodGet, url: "https://api.github.com/graphql", operation: RepositoryRead, body: readQuery},
 		{name: "empty GraphQL body", method: http.MethodPost, url: "https://api.github.com/graphql", operation: RepositoryWrite},
 	}
 	for _, test := range tests {
