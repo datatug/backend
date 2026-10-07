@@ -95,6 +95,57 @@ func TestGitHubAuthorizationRoutesFailClosedWithoutProvider(t *testing.T) {
 		}
 	}
 }
+
+func TestCompleteGitHubAuthorizationUsesStrictBoundedSecretSafeDecoder(t *testing.T) {
+	originalDecode := verifyAuthenticatedRequestAndDecodeBody
+	originalVerify := verifyAuthenticatedRequest
+	t.Cleanup(func() {
+		verifyAuthenticatedRequestAndDecodeBody = originalDecode
+		verifyAuthenticatedRequest = originalVerify
+	})
+	verifyAuthenticatedRequestAndDecodeBody = func(http.ResponseWriter, *http.Request, verify.RequestOptions, facade.Request) (facade.ContextWithUser, error) {
+		panic("credential-bearing OAuth request reached shared body decoder")
+	}
+	var authCalls int
+	verifyAuthenticatedRequest = func(_ http.ResponseWriter, r *http.Request, options verify.RequestOptions) (facade.ContextWithUser, error) {
+		authCalls++
+		if !options.AuthenticationRequired() || options.MaximumContentLength() >= 0 {
+			t.Fatalf("auth-only verification options = %+v; want authenticated with body bounds deferred to private decoder", options)
+		}
+		return githubTestUserContext(r), nil
+	}
+	service := &fakeGitHubAuthorizationService{}
+	handler := httpPostCompleteGitHubAuthorization(GitHubAuthorizationRouteOptions{Provider: service})
+	secretCode := "unique-oauth-code-secret"
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "malformed JSON", body: `{"code":"` + secretCode + `","state":`},
+		{name: "unknown field", body: `{"code":"` + secretCode + `","state":"opaque","secret":"do-not-echo"}`},
+		{name: "oversized body", body: `{"code":"` + secretCode + `","state":"` + strings.Repeat("x", maxGitHubAuthorizationRequestBytes) + `"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "http://local-api.sneat.ws/v0/datatug/github/authorization/complete", strings.NewReader(test.body))
+			response := httptest.NewRecorder()
+			handler(response, request)
+			if response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), secretCode) || strings.Contains(response.Body.String(), "do-not-echo") {
+				t.Fatalf("status=%d response=%q; want fixed error with no request contents", response.Code, response.Body.String())
+			}
+		})
+	}
+	valid := httptest.NewRequest(http.MethodPost, "http://local-api.sneat.ws/v0/datatug/github/authorization/complete", strings.NewReader(`{"code":"`+secretCode+`","state":"one-time-state"}`))
+	response := httptest.NewRecorder()
+	handler(response, valid)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), secretCode) || service.completedCode != secretCode {
+		t.Fatalf("local callback status=%d response=%q service code=%q", response.Code, response.Body.String(), service.completedCode)
+	}
+	if authCalls != len(tests)+1 {
+		t.Fatalf("auth verification calls=%d; want %d", authCalls, len(tests)+1)
+	}
+}
+
 func githubTestUserContext(r *http.Request) facade.ContextWithUser {
 	return facade.NewContextWithUser(context.Background(), facade.NewUserContext("firebase-actor"))
 }

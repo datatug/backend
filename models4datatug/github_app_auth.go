@@ -1,25 +1,31 @@
 package models4datatug
 
-import "github.com/dal-go/record"
+import (
+	"crypto/sha256"
+	"encoding/hex"
 
-const (
-	GithubAppCredentialsCollection = "github_app_credentials"
-	GithubOAuthStatesCollection    = "github_oauth_states"
-	GithubAppCredentialID          = "current"
+	"github.com/dal-go/record"
 )
 
-// NewGithubAppCredentialKey addresses the single DataTug GitHub App connection
-// owned by one Firebase user. The record is a child of that user's DataTug
-// extension record and contains ciphertext only.
-func NewGithubAppCredentialKey(userID, extID string) *record.Key {
-	parent := NewUserExtKey(userID, extID)
-	return record.NewKeyWithParentAndID(parent, GithubAppCredentialsCollection, GithubAppCredentialID)
+const (
+	GithubAppCredentialsCollection = "datatug_github_app_credentials"
+	GithubOAuthStatesCollection    = "datatug_github_oauth_states"
+)
+
+// NewGithubAppCredentialKey addresses a private root-collection record for one
+// Firebase user. It deliberately lives outside users/{uid}, whose recursive
+// client-read rule would otherwise expose even encrypted credential metadata.
+func NewGithubAppCredentialKey(userID string) *record.Key {
+	return record.NewKeyWithID(GithubAppCredentialsCollection, userRecordID(userID))
 }
 
-// NewGithubOAuthStateKey addresses one pending OAuth state under its Firebase
-// user's DataTug extension record. Callers store only a digest of the state as
-// the record id.
-func NewGithubOAuthStateKey(userID, extID, stateDigest string) *record.Key {
-	parent := NewUserExtKey(userID, extID)
-	return record.NewKeyWithParentAndID(parent, GithubOAuthStatesCollection, stateDigest)
+// NewGithubOAuthStateKey addresses a single-use state in the private root
+// collection. The id contains hashes of both the Firebase UID and OAuth state.
+func NewGithubOAuthStateKey(userID, stateDigest string) *record.Key {
+	return record.NewKeyWithID(GithubOAuthStatesCollection, userRecordID(userID)+"-"+stateDigest)
+}
+
+func userRecordID(userID string) string {
+	sum := sha256.Sum256([]byte(userID))
+	return hex.EncodeToString(sum[:])
 }

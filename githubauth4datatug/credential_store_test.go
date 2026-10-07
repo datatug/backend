@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/dal-go/record"
-	"github.com/datatug/backend/const4datatug"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/sneat-co/sneat-go-core/sneatcoretesting"
 )
@@ -30,7 +29,10 @@ func TestCredentialStoreEncryptsActorBoundTokenAndOneTimeState(t *testing.T) {
 	if err = store.saveOAuthTokens(ctx, "firebase-A", GitHubActor{ID: 101, Login: "alice"}, tokens); err != nil {
 		t.Fatal(err)
 	}
-	key := models4datatug.NewGithubAppCredentialKey("firebase-A", const4datatug.ExtensionID)
+	key := models4datatug.NewGithubAppCredentialKey("firebase-A")
+	if strings.Contains(key.String(), "users/") || strings.Contains(key.String(), "firebase-A") || !strings.Contains(key.String(), models4datatug.GithubAppCredentialsCollection) {
+		t.Fatalf("credential path is not private/root-scoped: %q", key.String())
+	}
 	var persisted credentialRecord
 	if err = db.Get(ctx, record.NewRecordWithData(key, &persisted)); err != nil {
 		t.Fatal(err)
@@ -47,7 +49,10 @@ func TestCredentialStoreEncryptsActorBoundTokenAndOneTimeState(t *testing.T) {
 	if err = store.saveOAuthState(ctx, "firebase-A", "one-time-state", "pkce-verifier", repo, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	stateKey := models4datatug.NewGithubOAuthStateKey("firebase-A", const4datatug.ExtensionID, stateDigest("one-time-state"))
+	stateKey := models4datatug.NewGithubOAuthStateKey("firebase-A", stateDigest("one-time-state"))
+	if strings.Contains(stateKey.String(), "users/") || strings.Contains(stateKey.String(), "firebase-A") || !strings.Contains(stateKey.String(), models4datatug.GithubOAuthStatesCollection) {
+		t.Fatalf("OAuth state path is not private/root-scoped: %q", stateKey.String())
+	}
 	var persistedState oauthStateRecord
 	if err = db.Get(ctx, record.NewRecordWithData(stateKey, &persistedState)); err != nil {
 		t.Fatal(err)
@@ -101,6 +106,9 @@ func TestProviderConnectsBeforeRepositorySelectionAndEnforcesLiveActorPermission
 	}
 	if _, err = provider.AuthorizeRepository(ctx, "firebase-A", RepositoryRef{ID: repo.ID, Owner: repo.Owner, Name: repo.Name}, RepositoryRead); err != nil {
 		t.Fatalf("read-only user read authorization: %v", err)
+	}
+	if _, err = provider.AuthorizeRepository(ctx, "firebase-A", RepositoryRef{ID: repo.ID + 1, Owner: repo.Owner, Name: repo.Name}, RepositoryRead); !errors.Is(err, ErrGitHubRepositoryDenied) {
+		t.Fatalf("immutable repository ID mismatch error = %v, want repository denied", err)
 	}
 	app.repositories[0].Permissions.Pull = false
 	if _, err = provider.AuthorizeRepository(ctx, "firebase-A", RepositoryRef{ID: repo.ID, Owner: repo.Owner, Name: repo.Name}, RepositoryRead); !errors.Is(err, ErrGitHubPermissionDenied) {

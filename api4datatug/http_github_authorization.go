@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/datatug/backend/githubauth4datatug"
@@ -26,6 +27,8 @@ type GitHubAuthorizationService interface {
 	CompleteAuthorization(context.Context, string, string, string) error
 	ListRepositories(context.Context, string) ([]githubauth4datatug.GitHubRepository, error)
 }
+
+const maxGitHubAuthorizationRequestBytes = 4 << 10
 
 type startGitHubAuthorizationRequest struct{}
 
@@ -74,7 +77,7 @@ func httpPostStartGitHubAuthorization(options GitHubAuthorizationRouteOptions) h
 			return
 		}
 		var request startGitHubAuthorizationRequest
-		ctx, err := verifyAuthenticatedRequestAndDecodeBody(w, r, verify.DefaultJsonWithAuthRequired, &request)
+		ctx, err := verifyAndDecodeGitHubAuthorizationRequest(w, r, &request)
 		if err != nil {
 			return
 		}
@@ -100,7 +103,7 @@ func httpPostCompleteGitHubAuthorization(options GitHubAuthorizationRouteOptions
 			return
 		}
 		var request CompleteGitHubAuthorizationRequest
-		ctx, err := verifyAuthenticatedRequestAndDecodeBody(w, r, verify.DefaultJsonWithAuthRequired, &request)
+		ctx, err := verifyAndDecodeGitHubAuthorizationRequest(w, r, &request)
 		if err != nil {
 			return
 		}
@@ -116,6 +119,36 @@ func httpPostCompleteGitHubAuthorization(options GitHubAuthorizationRouteOptions
 		}
 		writeGitHubJSON(w, http.StatusOK, CompleteGitHubAuthorizationResponse{Connected: true})
 	}
+}
+
+func verifyAndDecodeGitHubAuthorizationRequest(w http.ResponseWriter, r *http.Request, request facade.Request) (facade.ContextWithUser, error) {
+	ctx, err := verifyAuthenticatedRequest(w, r, verify.Request(
+		verify.AuthenticationRequired(true),
+		verify.MaximumContentLength(-1),
+	))
+	if err != nil {
+		return nil, err
+	}
+	if r.Method != http.MethodPost || request == nil || r.Body == nil {
+		githubAuthorizationError(w, http.StatusBadRequest, "invalid_request")
+		return nil, errors.New("invalid GitHub authorization request")
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxGitHubAuthorizationRequestBytes))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(request); err != nil {
+		githubAuthorizationError(w, http.StatusBadRequest, "invalid_request")
+		return nil, errors.New("invalid GitHub authorization request")
+	}
+	var trailing any
+	if err = decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		githubAuthorizationError(w, http.StatusBadRequest, "invalid_request")
+		return nil, errors.New("invalid GitHub authorization request")
+	}
+	if err = request.Validate(); err != nil {
+		githubAuthorizationError(w, http.StatusBadRequest, "invalid_request")
+		return nil, errors.New("invalid GitHub authorization request")
+	}
+	return ctx, nil
 }
 
 func httpGetGitHubRepositories(options GitHubAuthorizationRouteOptions) http.HandlerFunc {

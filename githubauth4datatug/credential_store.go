@@ -17,7 +17,6 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
-	"github.com/datatug/backend/const4datatug"
 	"github.com/datatug/backend/models4datatug"
 )
 
@@ -206,7 +205,7 @@ func (s *CredentialStore) saveOAuthState(ctx context.Context, userID, state, ver
 	if err != nil {
 		return err
 	}
-	key := models4datatug.NewGithubOAuthStateKey(userID, const4datatug.ExtensionID, stateDigest(state))
+	key := models4datatug.NewGithubOAuthStateKey(userID, stateDigest(state))
 	value := &oauthStateRecord{Verifier: sealed, Repository: repo, ExpiresAt: expiresAt}
 	return s.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		return tx.Insert(ctx, record.NewRecordWithData(key, value))
@@ -217,7 +216,7 @@ func (s *CredentialStore) consumeOAuthState(ctx context.Context, userID, state s
 	if userID == "" || state == "" {
 		return RepositoryRef{}, "", ErrOAuthStateInvalid
 	}
-	key := models4datatug.NewGithubOAuthStateKey(userID, const4datatug.ExtensionID, stateDigest(state))
+	key := models4datatug.NewGithubOAuthStateKey(userID, stateDigest(state))
 	var expired bool
 	err = s.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		value := new(oauthStateRecord)
@@ -260,7 +259,7 @@ func (s *CredentialStore) saveOAuthTokens(ctx context.Context, userID string, ac
 	if err != nil {
 		return err
 	}
-	key := models4datatug.NewGithubAppCredentialKey(userID, const4datatug.ExtensionID)
+	key := models4datatug.NewGithubAppCredentialKey(userID)
 	return s.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		value := new(credentialRecord)
 		err := tx.Get(ctx, record.NewRecordWithData(key, value))
@@ -289,7 +288,7 @@ func (s *CredentialStore) loadCredentials(ctx context.Context, userID string) (c
 		return credentialSnapshot{}, ErrCredentialMissing
 	}
 	value := new(credentialRecord)
-	key := models4datatug.NewGithubAppCredentialKey(userID, const4datatug.ExtensionID)
+	key := models4datatug.NewGithubAppCredentialKey(userID)
 	if err := s.db.Get(ctx, record.NewRecordWithData(key, value)); err != nil {
 		if errors.Is(err, record.ErrRecordNotFound) {
 			return credentialSnapshot{}, ErrCredentialMissing
@@ -322,7 +321,7 @@ func (s *CredentialStore) beginRefresh(ctx context.Context, userID string, revis
 	if userID == "" || attemptID == "" {
 		return false, ErrCredentialMissing
 	}
-	key := models4datatug.NewGithubAppCredentialKey(userID, const4datatug.ExtensionID)
+	key := models4datatug.NewGithubAppCredentialKey(userID)
 	var busy, changed, reconnect bool
 	err := s.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		value := new(credentialRecord)
@@ -382,7 +381,7 @@ func (s *CredentialStore) completeRefresh(ctx context.Context, userID, attemptID
 	if err != nil {
 		return err
 	}
-	key := models4datatug.NewGithubAppCredentialKey(userID, const4datatug.ExtensionID)
+	key := models4datatug.NewGithubAppCredentialKey(userID)
 	return s.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		value := new(credentialRecord)
 		if err := tx.Get(ctx, record.NewRecordWithData(key, value)); err != nil {
@@ -403,7 +402,7 @@ func (s *CredentialStore) completeRefresh(ctx context.Context, userID, attemptID
 }
 
 func (s *CredentialStore) requireReconnect(ctx context.Context, userID, attemptID string, revision int64) {
-	key := models4datatug.NewGithubAppCredentialKey(userID, const4datatug.ExtensionID)
+	key := models4datatug.NewGithubAppCredentialKey(userID)
 	_ = s.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		value := new(credentialRecord)
 		if err := tx.Get(ctx, record.NewRecordWithData(key, value)); err != nil {

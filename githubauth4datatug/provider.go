@@ -30,10 +30,11 @@ var (
 // App. Secret values are accepted only by the server and are never persisted by
 // this package.
 type GitHubAppConfig struct {
-	AppID        int64
-	ClientID     string
-	ClientSecret string
-	CallbackURL  string
+	AppID         int64
+	ClientID      string
+	ClientSecret  string
+	PrivateKeyPEM []byte
+	CallbackURL   string
 }
 
 type RepositoryOperation string
@@ -165,8 +166,15 @@ type Provider struct {
 }
 
 func NewProvider(db dal.DB, config GitHubAppConfig, platformCryptoRoot []byte, installation InstallationAuthorizer, options ProviderOptions) (*Provider, error) {
-	if config.AppID != DataTugGitHubAppID || strings.TrimSpace(config.ClientID) == "" || strings.TrimSpace(config.ClientSecret) == "" || strings.TrimSpace(config.CallbackURL) == "" || installation == nil {
+	if config.AppID != DataTugGitHubAppID || strings.TrimSpace(config.ClientID) == "" || strings.TrimSpace(config.ClientSecret) == "" || strings.TrimSpace(config.CallbackURL) == "" {
 		return nil, ErrGitHubAppNotConfigured
+	}
+	if installation == nil {
+		var err error
+		installation, err = NewGitHubAppInstallationAuthorizer(config.AppID, config.PrivateKeyPEM)
+		if err != nil {
+			return nil, ErrGitHubAppNotConfigured
+		}
 	}
 	store, err := NewCredentialStore(db, platformCryptoRoot, options.Now, options.RefreshLease)
 	if err != nil {

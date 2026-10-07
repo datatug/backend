@@ -66,29 +66,27 @@ func (r *AuthorizedGitHubRepository) getCommit(ctx context.Context, oid string) 
 		return GitHubCommit{}, ErrGitHubRepositoryDenied
 	}
 	var wire struct {
-		SHA    string `json:"sha"`
-		Commit struct {
-			Message string `json:"message"`
-			Parents []struct {
-				SHA string `json:"sha"`
-			} `json:"parents"`
-			Tree struct {
-				SHA string `json:"sha"`
-			} `json:"tree"`
-		} `json:"commit"`
+		SHA     string `json:"sha"`
+		Message string `json:"message"`
+		Parents []struct {
+			SHA string `json:"sha"`
+		} `json:"parents"`
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
 	}
 	path := "/repos/" + url.PathEscape(r.repository.Owner) + "/" + url.PathEscape(r.repository.Name) + "/git/commits/" + url.PathEscape(oid)
-	if err := r.getJSON(ctx, path, &wire); err != nil || !validOID(wire.SHA) || !validOID(wire.Commit.Tree.SHA) {
+	if err := r.getJSON(ctx, path, &wire); err != nil || !validOID(wire.SHA) || !strings.EqualFold(wire.SHA, oid) || !validOID(wire.Tree.SHA) {
 		return GitHubCommit{}, ErrGitHubRepositoryDenied
 	}
-	parents := make([]string, 0, len(wire.Commit.Parents))
-	for _, parent := range wire.Commit.Parents {
+	parents := make([]string, 0, len(wire.Parents))
+	for _, parent := range wire.Parents {
 		if !validOID(parent.SHA) {
 			return GitHubCommit{}, ErrGitHubRepositoryDenied
 		}
 		parents = append(parents, parent.SHA)
 	}
-	return GitHubCommit{OID: wire.SHA, TreeOID: wire.Commit.Tree.SHA, Message: wire.Commit.Message, ParentOIDs: parents}, nil
+	return GitHubCommit{OID: wire.SHA, TreeOID: wire.Tree.SHA, Message: wire.Message, ParentOIDs: parents}, nil
 }
 
 func (r *AuthorizedGitHubRepository) getTree(ctx context.Context, rootOID string) ([]GitHubTreeEntry, error) {

@@ -101,6 +101,42 @@ func TestPrivateRepositoryReadUsesActorCredentialAndNeverFallsBackToPublic(t *te
 	}
 }
 
+func TestGetCommitDecodesGitDatabaseShapeAndRequiresRequestedOID(t *testing.T) {
+	requestedOID := strings.Repeat("a", 40)
+	treeOID := strings.Repeat("b", 40)
+	parentOID := strings.Repeat("c", 40)
+	for _, test := range []struct {
+		name        string
+		responseOID string
+		wantErr     bool
+	}{
+		{name: "git database response uses top-level fields", responseOID: requestedOID},
+		{name: "returned SHA mismatch is rejected", responseOID: strings.Repeat("d", 40), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"sha":"` + test.responseOID + `","url":"https://api.github.com/repos/acme/private/git/commits/` + test.responseOID + `","html_url":"https://github.com/acme/private/commit/` + test.responseOID + `","author":{},"committer":{},"tree":{"sha":"` + treeOID + `","url":"https://api.github.com/repos/acme/private/git/trees/` + treeOID + `"},"message":"save pair","parents":[{"sha":"` + parentOID + `","url":"https://api.github.com/repos/acme/private/git/commits/` + parentOID + `"}]}`
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return jsonResponse(body), nil
+			})}
+			repository := &AuthorizedGitHubRepository{
+				repository: GitHubRepository{ID: 31, Owner: "acme", Name: "private"},
+				permission: RepositoryRead,
+				client:     client,
+			}
+			commit, err := repository.GetCommit(context.Background(), requestedOID)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("GetCommit() = %+v, nil error; want returned-SHA mismatch denied", commit)
+				}
+				return
+			}
+			if err != nil || commit.OID != requestedOID || commit.TreeOID != treeOID || commit.Message != "save pair" || len(commit.ParentOIDs) != 1 || commit.ParentOIDs[0] != parentOID {
+				t.Fatalf("GetCommit() = (%+v, %v), want top-level Git database response", commit, err)
+			}
+		})
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }

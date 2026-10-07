@@ -3,9 +3,11 @@
 This package implements server-side GitHub App user authorization for the
 existing DataTug App (`datatug`, App ID `5223634`). Browser code starts the
 OAuth redirect and receives only the callback result; the access and rotating
-refresh tokens stay encrypted under the Firebase user's DataTug extension
-record. Repository operations must obtain a fresh `AuthorizedGitHubRepository`
-from `Provider.AuthorizeRepository` for each request.
+refresh tokens stay encrypted in dedicated top-level DAL records keyed by a
+hash of the Firebase UID. These records are outside `/users/{uid}` and contain
+no client-membership fields. Repository operations must obtain a fresh
+`AuthorizedGitHubRepository` from `Provider.AuthorizeRepository` for each
+request.
 
 ## Operator setup
 
@@ -27,7 +29,21 @@ Before enabling the provider:
    the dedicated App installation authorizer), `DATATUG_GITHUB_APP_CALLBACK_URL`,
    and the existing `SNEAT_PLATFORM_CRYPTO_KEY` (32 decoded bytes).
 
-Do not reuse OpenVaultDB's App identity, grants, or credential records. Missing
+5. Before enabling production credentials, add both
+   `datatug_github_app_credentials` and `datatug_github_oauth_states` to the
+   server-only root exclusions in `sneat-firebase/firebase/firestore.rules`
+   (`isClientReadableRoot`). The records live outside `/users/{uid}` so the
+   recursive user read grant does not apply; the explicit exclusion prevents a
+   future membership-shaped field or broad client grant from exposing them.
+   This backend package does not change Firebase rules.
+
+Do not reuse OpenVaultDB's App identity, grants, or credential records. The
+production installation authorizer reuses the existing Sneat/WB App-JWT
+signing helper, verifies the current installation and immutable selected
+repository directly. It validates App ID, account, suspension state, and
+effective Contents permission. The actor provider separately verifies the
+repository's immutable ID/owner/name with the user token. No installation
+token is minted; all project operations use the GitHub user actor token. Missing
 or invalid DataTug configuration must leave the feature unavailable. GitHub
 tokens stay server-side and encrypted. The one-time OAuth code/state and PKCE
 challenge are protocol values; never log them, persist them in project files,
