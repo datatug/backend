@@ -8,6 +8,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ func TestGitHubAppInstallationAuthorizerChecksSelectedRepositoryInstallation(t *
 		suspended  bool
 		contents   string
 		status     int
+		body       string
+		transport  error
 		wantDenied bool
 		wantWrite  bool
 	}{
@@ -33,6 +36,8 @@ func TestGitHubAppInstallationAuthorizerChecksSelectedRepositoryInstallation(t *
 		{name: "suspended installation", appID: DataTugGitHubAppID, account: "acme", suspended: true, contents: "write", wantDenied: true},
 		{name: "App removed from repository", appID: DataTugGitHubAppID, account: "acme", status: http.StatusNotFound, wantDenied: true},
 		{name: "redirect is not followed", appID: DataTugGitHubAppID, account: "acme", status: http.StatusMovedPermanently, wantDenied: true},
+		{name: "network failure", appID: DataTugGitHubAppID, account: "acme", transport: errors.New("private transport failure"), wantDenied: true},
+		{name: "malformed installation response", appID: DataTugGitHubAppID, account: "acme", body: `{"id":`, wantDenied: true},
 		{name: "contents read only", appID: DataTugGitHubAppID, account: "acme", contents: "read"},
 		{name: "contents missing", appID: DataTugGitHubAppID, account: "acme", contents: "none", wantDenied: true},
 	}
@@ -56,6 +61,12 @@ func TestGitHubAppInstallationAuthorizerChecksSelectedRepositoryInstallation(t *
 					response := jsonResponse(`{"message":"denied"}`)
 					response.StatusCode = test.status
 					return response, nil
+				}
+				if test.transport != nil {
+					return nil, test.transport
+				}
+				if test.body != "" {
+					return jsonResponse(test.body), nil
 				}
 				suspended := "null"
 				if test.suspended {

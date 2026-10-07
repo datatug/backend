@@ -185,6 +185,9 @@ func TestCompleteGitHubAuthorizationUsesStrictBoundedSecretSafeDecoder(t *testin
 	}{
 		{name: "malformed JSON", body: `{"code":"` + secretCode + `","state":`},
 		{name: "unknown field", body: `{"code":"` + secretCode + `","state":"opaque","secret":"do-not-echo"}`},
+		{name: "missing code", body: `{"state":"opaque"}`},
+		{name: "missing state", body: `{"code":"` + secretCode + `"}`},
+		{name: "trailing JSON value", body: `{"code":"` + secretCode + `","state":"opaque"} {}`},
 		{name: "oversized body", body: `{"code":"` + secretCode + `","state":"` + strings.Repeat("x", maxGitHubAuthorizationRequestBytes) + `"}`},
 	}
 	for _, test := range tests {
@@ -205,6 +208,33 @@ func TestCompleteGitHubAuthorizationUsesStrictBoundedSecretSafeDecoder(t *testin
 	}
 	if authCalls != len(tests)+1 {
 		t.Fatalf("auth verification calls=%d; want %d", authCalls, len(tests)+1)
+	}
+}
+
+func TestVerifyAndDecodeGitHubAuthorizationRequestRejectsInvalidTransportShapes(t *testing.T) {
+	originalVerify := verifyAuthenticatedRequest
+	t.Cleanup(func() { verifyAuthenticatedRequest = originalVerify })
+	verifyAuthenticatedRequest = func(_ http.ResponseWriter, r *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		return githubTestUserContext(r), nil
+	}
+	validBody := `{"code":"one-use","state":"opaque"}`
+	tests := []struct {
+		name    string
+		request *http.Request
+		decode  facade.Request
+	}{
+		{name: "wrong method", request: httptest.NewRequest(http.MethodGet, "/", strings.NewReader(validBody)), decode: &CompleteGitHubAuthorizationRequest{}},
+		{name: "missing body", request: &http.Request{Method: http.MethodPost}, decode: &CompleteGitHubAuthorizationRequest{}},
+		{name: "missing decoder target", request: httptest.NewRequest(http.MethodPost, "/", strings.NewReader(validBody))},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			ctx, err := verifyAndDecodeGitHubAuthorizationRequest(response, test.request, test.decode)
+			if err == nil || ctx != nil || response.Code != http.StatusBadRequest || strings.Contains(response.Body.String(), "one-use") {
+				t.Fatalf("decoder = (%v, %v), response=%d %q; want fixed bad request", ctx, err, response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
