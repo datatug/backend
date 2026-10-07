@@ -69,6 +69,17 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 		return nil, ErrInvalidQuerySnapshot
 	}
 	if metadata, exists := snapshot[path.Join(queryDir, query.ID+".query.json")]; exists {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(metadata, &raw); err != nil || raw == nil {
+			return nil, ErrUnsupportedExistingQuery
+		}
+		for field := range raw {
+			switch field {
+			case "id", "title", "type", "draft", "federation":
+			default:
+				return nil, fmt.Errorf("%w: %s", ErrUnsupportedExistingQuery, field)
+			}
+		}
 		decoder := json.NewDecoder(bytes.NewReader(metadata))
 		decoder.DisallowUnknownFields()
 		var existing datatug.QueryDef

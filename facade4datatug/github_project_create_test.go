@@ -169,3 +169,28 @@ func TestGitHubCreateRejectsUnwritableRepoBeforeQuota(t *testing.T) {
 		t.Fatalf("unpaid operation leaked: %v", err)
 	}
 }
+
+func TestGitHubProjectReadRequiresReadyLocatorAndCurrentLinkedContact(t *testing.T) {
+	db, service, _ := paidCreateFixture(t)
+	repo := githubRepo()
+	command := githubCommand()
+	result, err := service.CreateGitHubProject(context.Background(), command, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	access, err := service.ResolveGitHubProject(context.Background(), "actor", 123, "owner", "repo", "datatug")
+	if err != nil || access.SharedProjectID != result.SharedProjectID || access.SpaceID != "space" {
+		t.Fatalf("owner read %+v: %v", access, err)
+	}
+	if _, err := service.ResolveGitHubProject(context.Background(), "actor", 124, "owner", "repo", "datatug"); !errors.Is(err, ErrGitHubProjectNotRegistered) {
+		t.Fatalf("unrelated immutable repo accepted: %v", err)
+	}
+	if _, err := service.ResolveGitHubProject(context.Background(), "other", 123, "owner", "repo", "datatug"); !errors.Is(err, ErrSharedProjectUnauthorized) {
+		t.Fatalf("unlinked actor accepted: %v", err)
+	}
+	contact, _ := models4datatug.NewProjectContactLinkageRecord(contactFixtureRef("space", "owner-contact"))
+	paidUpdate(t, db, contact.Key(), "active", false)
+	if _, err := service.ResolveGitHubProject(context.Background(), "actor", 123, "owner", "repo", "datatug"); !errors.Is(err, ErrSharedProjectUnauthorized) {
+		t.Fatalf("revoked contact accepted: %v", err)
+	}
+}

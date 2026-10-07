@@ -152,7 +152,7 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 		if err != nil || head != command.Source.ExpectedHead {
 			return zero, ErrGitHubOutcomeUncertain
 		}
-		committedHead, err = repo.CreateFilesCommit(ctx, binding.Branch, command.Source.ExpectedHead, "Create DataTug project\n\nDataTug-Operation: "+marker, files)
+		committedHead, err = repo.CreateFilesCommit(ctx, binding.Branch, command.Source.ExpectedHead, "Create DataTug project; DataTug-Operation: "+marker, files)
 		if err != nil {
 			// The provider can commit and lose the response. Recover only a
 			// verified marker in bounded ancestry of the selected branch.
@@ -206,6 +206,12 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, command 
 		}
 		opRecord, op := models4datatug.NewGitHubProjectCreateOperationRecord(command.ActorID, command.OperationID)
 		if err := tx.Get(txCtx, opRecord); err != nil && !record.IsNotFound(err) {
+			return err
+		}
+		queryOperationRecord, _ := models4datatug.NewGitHubQueryOperationRecord(command.ActorID, command.OperationID)
+		if err := tx.Get(txCtx, queryOperationRecord); err == nil {
+			return ErrGitHubProjectConflict
+		} else if !record.IsNotFound(err) {
 			return err
 		}
 		if opRecord.Exists() {

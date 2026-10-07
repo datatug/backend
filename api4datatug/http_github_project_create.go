@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/datatug/backend/facade4datatug"
+	"github.com/datatug/backend/githubauth4datatug"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/datatug/backend/template4datatug"
 	"github.com/sneat-co/sneat-go-core/apicore/verify"
@@ -21,7 +22,20 @@ import (
 // GitHub user, selected installation, immutable repository and write grant.
 type GitHubProjectRouteOptions struct {
 	Service             *facade4datatug.SharedProjectService
+	Provider            *githubauth4datatug.Provider
 	AuthorizeRepository func(context.Context, string, int64, string, string) (facade4datatug.GitHubCreateRepository, error)
+}
+
+func httpPostCreateProjectByStore(ids facade4datatug.IDGenerator, github GitHubProjectRouteOptions) http.HandlerFunc {
+	cloudHandler := httpPostCreateProject(ids)
+	githubHandler := httpPostCreateGitHubProject(github)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("store") == models4datatug.GithubStoreID {
+			githubHandler(w, r)
+			return
+		}
+		cloudHandler(w, r)
+	}
 }
 
 type CreateGitHubProjectRequest struct {
@@ -90,7 +104,8 @@ func httpPostCreateGitHubProject(options GitHubProjectRouteOptions) http.Handler
 		actorID := ctx.User().GetUserID()
 		repo, err := options.AuthorizeRepository(ctx, actorID, request.GitHub.RepositoryID, request.GitHub.Owner, request.GitHub.Name)
 		if err != nil {
-			sharedProjectError(w, http.StatusForbidden, "github_denied")
+			status, code := githubAuthorizationStatus(err)
+			sharedProjectError(w, status, code)
 			return
 		}
 		command := facade4datatug.GitHubProjectCreateCommand{
