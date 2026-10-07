@@ -101,6 +101,15 @@ func TestGitHubOperationRejectsChangedScopeAndUnfinishedReadyState(t *testing.T)
 	if err := op.Match("actor", "op", "space", "different-body"); err == nil {
 		t.Fatal("reused operation ID with a different payload was accepted")
 	}
+	if err := op.Match("other-actor", "op", "space", "digest"); err == nil {
+		t.Fatal("operation ID was accepted for a different actor")
+	}
+	if err := op.Match("actor", "other-op", "space", "digest"); err == nil {
+		t.Fatal("operation ID mismatch was accepted")
+	}
+	if err := op.Match("actor", "op", "space", "digest"); err != nil {
+		t.Fatalf("matching operation rejected: %v", err)
+	}
 	op.Status = GitHubProjectReady
 	if err := op.Validate(); err == nil {
 		t.Fatal("ready operation without provider commit was accepted")
@@ -108,6 +117,16 @@ func TestGitHubOperationRejectsChangedScopeAndUnfinishedReadyState(t *testing.T)
 	op.CommittedHead = "def"
 	if err := op.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	invalid := op
+	invalid.ActorID = ""
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("operation without an actor was accepted")
+	}
+	invalid = op
+	invalid.Status = "unknown"
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("operation with an unknown state was accepted")
 	}
 }
 
@@ -128,5 +147,11 @@ func TestGitHubSharedReceiptBindsRepositoryBranchHeadAndTemplate(t *testing.T) {
 	receipt.GitHub.ExpectedHead = "other"
 	if err := receipt.Validate(); err == nil {
 		t.Fatal("receipt accepted a changed branch head")
+	}
+}
+
+func TestNewGithubProjectIDMatchesClientReferenceContract(t *testing.T) {
+	if got, want := NewGithubProjectID("acme", "warehouse", "teams/analytics"), "warehouse@acme@teams/analytics"; got != want {
+		t.Fatalf("NewGithubProjectID() = %q, want %q", got, want)
 	}
 }

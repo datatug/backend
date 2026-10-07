@@ -3,9 +3,11 @@ package githubstore4datatug
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/datatug/backend/facade4datatug"
@@ -180,5 +182,34 @@ func TestCreateRepositoryRejectsEmptyCommitAndStaleHead(t *testing.T) {
 	fake.head = ""
 	if _, err := repo.CurrentHead(context.Background(), "work"); !errors.Is(err, ErrGitHubCreateProof) {
 		t.Fatalf("missing head accepted: %v", err)
+	}
+}
+
+func TestGitHubWriteRepositoryAdaptersFailClosedWithoutConfiguredActorProvider(t *testing.T) {
+	if _, err := AuthorizeQueryRepository(context.Background(), nil, "actor", 123, "owner", "repo"); !errors.Is(err, githubauth4datatug.ErrGitHubAppNotConfigured) {
+		t.Fatalf("query adapter without provider = %v", err)
+	}
+}
+
+func TestGitBlobOIDMatchesSupportedGitObjectHashesOnly(t *testing.T) {
+	content := []byte("project manifest")
+	header := []byte(fmt.Sprintf("blob %d\x00", len(content)))
+	sha1Hash := sha1.New()
+	_, _ = sha1Hash.Write(header)
+	_, _ = sha1Hash.Write(content)
+	if !gitBlobOIDMatches(hex.EncodeToString(sha1Hash.Sum(nil)), content) {
+		t.Fatal("valid SHA-1 Git blob was rejected")
+	}
+	sha256Hash := sha256.New()
+	_, _ = sha256Hash.Write(header)
+	_, _ = sha256Hash.Write(content)
+	if !gitBlobOIDMatches(hex.EncodeToString(sha256Hash.Sum(nil)), content) {
+		t.Fatal("valid SHA-256 Git blob was rejected")
+	}
+	if !gitBlobOIDMatches(strings.ToUpper(hex.EncodeToString(sha1Hash.Sum(nil))), content) {
+		t.Fatal("valid case-insensitive Git blob OID was rejected")
+	}
+	if gitBlobOIDMatches("short", content) || gitBlobOIDMatches(hex.EncodeToString(sha1Hash.Sum(nil)), append(content, '!')) {
+		t.Fatal("malformed or content-mismatched Git blob OID was accepted")
 	}
 }

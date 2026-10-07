@@ -84,6 +84,40 @@ func TestEnsureProtectedProjectQuotaForCreateUsesCompleteInventorySnapshot(t *te
 	}
 }
 
+func TestNewActivatingPaidSharedProjectServiceRejectsIncompleteHostComposition(t *testing.T) {
+	db, _, paid := paidCreateFixture(t)
+	valid := SharedProjectActivationOptions{
+		Activator:     &transactionalActivatorProbe{plan: &activationProbe{}},
+		RequiredRoles: []string{const4contactus.SpaceMemberRoleOwner}, InventoryQuery: db,
+	}
+	for _, test := range []struct {
+		name       string
+		activation SharedProjectActivationOptions
+		mutatePaid func(*PaidSharedProjectOptions)
+		now        func() time.Time
+	}{
+		{"missing activator", SharedProjectActivationOptions{RequiredRoles: valid.RequiredRoles, InventoryQuery: db}, nil, func() time.Time { return sharedTestTime }},
+		{"missing inventory source", SharedProjectActivationOptions{Activator: valid.Activator, RequiredRoles: valid.RequiredRoles}, nil, func() time.Time { return sharedTestTime }},
+		{"empty role catalog", SharedProjectActivationOptions{Activator: valid.Activator, InventoryQuery: db}, nil, func() time.Time { return sharedTestTime }},
+		{"duplicate roles", SharedProjectActivationOptions{Activator: valid.Activator, RequiredRoles: []string{"owner", "owner"}, InventoryQuery: db}, nil, func() time.Time { return sharedTestTime }},
+		{"blank role", SharedProjectActivationOptions{Activator: valid.Activator, RequiredRoles: []string{" owner"}, InventoryQuery: db}, nil, func() time.Time { return sharedTestTime }},
+		{"too many roles", SharedProjectActivationOptions{Activator: valid.Activator, RequiredRoles: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"}, InventoryQuery: db}, nil, func() time.Time { return sharedTestTime }},
+		{"missing contact authority", valid, func(options *PaidSharedProjectOptions) { options.ContactLinks = nil }, func() time.Time { return sharedTestTime }},
+		{"missing clock", valid, nil, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			paidOptions := snapshotPaidSharedProjectOptions(paid)
+			if test.mutatePaid != nil {
+				test.mutatePaid(&paidOptions)
+			}
+			service, err := NewActivatingPaidSharedProjectService(db, &sharedCounterIDs{}, test.now, paidOptions, test.activation)
+			if service != nil || !errors.Is(err, ErrSharedProjectActivationUnavailable) {
+				t.Fatalf("invalid activation composition = (%v, %v)", service, err)
+			}
+		})
+	}
+}
+
 func TestEnsureProtectedProjectQuotaForCreateConcurrentInitializersConverge(t *testing.T) {
 	db, _, paid := paidCreateFixture(t)
 	quotaRecord, _ := models4datatug.NewProtectedProjectQuotaRecord(paid.Mode, paid.Product, "personal-1")
@@ -174,6 +208,41 @@ func TestEnsureProtectedProjectQuotaForCreateRechecksAuthorityBeforeSeed(t *test
 			}
 			assertPaidQuotaAbsent(t, db)
 			assertDataTugNotActivated(t, db)
+		})
+	}
+}
+
+func TestEnsureProtectedProjectQuotaForCreateRejectsUnboundCommandBeforeSeeding(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*SharedProjectCreateBinding)
+	}{
+		{"different actor", func(binding *SharedProjectCreateBinding) { binding.ActorID = "another-actor" }},
+		{"different payer", func(binding *SharedProjectCreateBinding) { binding.PayerID = "another-payer" }},
+		{"malformed digest", func(binding *SharedProjectCreateBinding) { binding.RequestDigest = "not-a-digest" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, _, paid := paidCreateFixture(t)
+			deletePaidQuota(t, db)
+			seedCoreSpaceWithRole(t, db, "space", "actor", const4contactus.SpaceMemberRoleOwner)
+			activator := &transactionalActivatorProbe{plan: &activationProbe{}}
+			service, err := NewActivatingPaidSharedProjectService(db, &sharedCounterIDs{}, func() time.Time { return sharedTestTime }, paid, SharedProjectActivationOptions{
+				Activator: activator, RequiredRoles: []string{const4contactus.SpaceMemberRoleOwner}, InventoryQuery: db,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := paidBindingForCommand(sharedCommand(), paid)
+			test.mutate(&binding)
+			ctx := facade.NewContextWithUserID(context.Background(), "actor")
+			if err := service.EnsureProtectedProjectQuotaForCreate(ctx, binding); !errors.Is(err, ErrSharedProjectUnauthorized) {
+				t.Fatalf("unbound create command error = %v", err)
+			}
+			assertPaidQuotaAbsent(t, db)
+			assertDataTugNotActivated(t, db)
+			if activator.called != 0 {
+				t.Fatalf("Core activation planned for invalid command %d times", activator.called)
+			}
 		})
 	}
 }
@@ -273,6 +342,60 @@ func TestPlanExplicitProjectCreateActivationBindsVerifiedActorAndPaidCommand(t *
 	}
 	if activator.called != 1 {
 		t.Fatal("Core activator was called for another actor")
+	}
+}
+
+func TestPlanExplicitProjectCreateActivationFailsClosedOnInvalidBindingOrCorePlan(t *testing.T) {
+	db, _, paid := paidCreateFixture(t)
+	plan := &activationProbe{}
+	activator := &transactionalActivatorProbe{plan: plan}
+	service, err := NewActivatingPaidSharedProjectService(db, &sharedCounterIDs{}, func() time.Time { return sharedTestTime }, paid, SharedProjectActivationOptions{
+		Activator: activator, RequiredRoles: []string{const4contactus.SpaceMemberRoleOwner}, InventoryQuery: db,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := paidBindingForCommand(sharedCommand(), paid)
+	ctx := facade.NewContextWithUserID(context.Background(), "actor")
+	for _, test := range []struct {
+		name   string
+		mutate func(*SharedProjectCreateBinding)
+	}{
+		{"different actor", func(b *SharedProjectCreateBinding) { b.ActorID = "another-actor" }},
+		{"different product", func(b *SharedProjectCreateBinding) { b.Product = "other-product" }},
+		{"malformed digest", func(b *SharedProjectCreateBinding) { b.RequestDigest = "invalid" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := binding
+			test.mutate(&invalid)
+			if err := db.RunReadwriteTransaction(ctx, func(_ context.Context, tx dal.ReadwriteTransaction) error {
+				_, err := service.PlanExplicitProjectCreateActivationInTransaction(ctx, tx, invalid, sharedTestTime)
+				return err
+			}); !errors.Is(err, ErrSharedProjectUnauthorized) {
+				t.Fatalf("invalid activation binding error = %v", err)
+			}
+		})
+	}
+	if activator.called != 0 {
+		t.Fatalf("Core activator called for invalid bindings: %d", activator.called)
+	}
+	activator.plan = nil
+	if err := db.RunReadwriteTransaction(ctx, func(_ context.Context, tx dal.ReadwriteTransaction) error {
+		_, err := service.PlanExplicitProjectCreateActivationInTransaction(ctx, tx, binding, sharedTestTime)
+		return err
+	}); !errors.Is(err, ErrSharedProjectUnauthorized) {
+		t.Fatalf("empty Core plan error = %v", err)
+	}
+	activator.plan = plan
+	activator.err = errors.New("Core unavailable")
+	if err := db.RunReadwriteTransaction(ctx, func(_ context.Context, tx dal.ReadwriteTransaction) error {
+		_, err := service.PlanExplicitProjectCreateActivationInTransaction(ctx, tx, binding, sharedTestTime)
+		return err
+	}); !errors.Is(err, ErrSharedProjectUnauthorized) {
+		t.Fatalf("Core planning failure = %v", err)
+	}
+	if plan.applied {
+		t.Fatal("planning failure applied capability activation")
 	}
 }
 
