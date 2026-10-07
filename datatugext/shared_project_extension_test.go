@@ -9,5 +9,5 @@ import (
 )
 
 func TestSharedProjectExtensionOptionsAreAdditive(t *testing.T) {
-	extension.AssertExtension(t, ExtensionWithOptions(fakeIDs{}, api4datatug.RouteOptions{}), extension.Expected{ExtID: const4datatug.ExtensionID, HandlersCount: 7})
+	extension.AssertExtension(t, ExtensionWithOptions(fakeIDs{}, api4datatug.RouteOptions{}), extension.Expected{ExtID: const4datatug.ExtensionID, HandlersCount: 13})
 }

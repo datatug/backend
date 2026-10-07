@@ -1,7 +1,10 @@
 // Copyright 2026 Sneat.co
 package models4datatug
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestProjectQuotaLimitRequiresExplicitUnlimited(t *testing.T) {
 	for _, v := range []struct {
@@ -12,6 +15,35 @@ func TestProjectQuotaLimitRequiresExplicitUnlimited(t *testing.T) {
 		if got := v.limit.Allows(v.allocated); got != v.want {
 			t.Fatalf("limit %+v allocated %d = %v", v.limit, v.allocated, got)
 		}
+	}
+}
+
+func TestPaidAdmissionRecordsRefuseUnknownOrUnattributedState(t *testing.T) {
+	quota := ProtectedProjectQuota{Version: 1, Mode: "live", Product: "datatug", PayerID: "payer", BasisDigest: "proven-inventory", Allocated: 1, Revision: 1}
+	if err := quota.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	quota.Allocated = -1
+	if err := quota.Validate(); err == nil {
+		t.Fatal("negative allocation accepted")
+	}
+	quota.Allocated = 1
+	quota.BasisDigest = ""
+	if err := quota.Validate(); err == nil {
+		t.Fatal("quota without complete basis accepted")
+	}
+	admission := ProjectAdmission{Version: 1, Mode: "live", Product: "datatug", PayerID: "payer", ActorID: "actor", SpaceID: "space", ProjectID: "project", CommandID: "op", RequestDigest: "digest", LimitsVersion: "v1", SubscriptionID: "sub", ProfileVersion: "v1", QuotaBasisDigest: "basis", ProtectedProjectsLimit: 5, ProtectedUsersLimit: 5, QuotaRevision: 1, OwnerGeneration: 1, CreatedAt: time.Now().UTC()}
+	if err := admission.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	admission.QuotaRevision = 0
+	if err := admission.Validate(); err == nil {
+		t.Fatal("admission without quota revision accepted")
+	}
+	admission.QuotaRevision = 1
+	admission.ProjectID = "../other"
+	if err := admission.Validate(); err == nil {
+		t.Fatal("admission with ambiguous project ID accepted")
 	}
 }
 func TestProjectQuotaKeysIsolateModeProductPayerAndSpace(t *testing.T) {

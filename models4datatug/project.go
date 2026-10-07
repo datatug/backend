@@ -53,10 +53,13 @@ const (
 
 // Project is the data stored in a datatug_projects/{projectID} record.
 type Project struct {
-	Title   string   `json:"title" firestore:"title"`
-	Access  string   `json:"access,omitempty" firestore:"access,omitempty"`
-	UserIDs []string `json:"userIDs,omitempty" firestore:"userIDs,omitempty"`
-	Created *Created `json:"created,omitempty" firestore:"created,omitempty"`
+	Title   string                `json:"title" firestore:"title"`
+	Access  string                `json:"access,omitempty" firestore:"access,omitempty"`
+	UserIDs []string              `json:"userIDs,omitempty" firestore:"userIDs,omitempty"`
+	Created *Created              `json:"created,omitempty" firestore:"created,omitempty"`
+	Storage string                `json:"storage,omitempty" firestore:"storage,omitempty"`
+	Status  string                `json:"status,omitempty" firestore:"status,omitempty"`
+	GitHub  *GitHubProjectBinding `json:"github,omitempty" firestore:"github,omitempty"`
 }
 
 // Created holds the creation timestamp of a DataTug record.
@@ -93,8 +96,10 @@ type StoreBrief struct {
 
 // ProjectBrief is a brief of one project in a user's DataTug index.
 type ProjectBrief struct {
-	Title  string `json:"title" firestore:"title"`
-	Access string `json:"access,omitempty" firestore:"access,omitempty"`
+	Title      string `json:"title" firestore:"title"`
+	Access     string `json:"access,omitempty" firestore:"access,omitempty"`
+	ProjectAPI string `json:"projectApi,omitempty" firestore:"projectApi,omitempty"`
+	Branch     string `json:"branch,omitempty" firestore:"branch,omitempty"`
 }
 
 // NewUserExtKey builds the dalgo key of a user's DataTug index record:

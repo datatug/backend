@@ -90,6 +90,32 @@ type SharedProjectCreateReceipt struct {
 	PayerID       string                   `json:"payerID,omitempty" firestore:"payerID,omitempty"`
 	Mode          string                   `json:"mode,omitempty" firestore:"mode,omitempty"`
 	Product       string                   `json:"product,omitempty" firestore:"product,omitempty"`
+	GitHub        *GitHubCreateSource      `json:"github,omitempty" firestore:"github,omitempty"`
+}
+
+// GitHubCreateSource fixes the selected repository, branch head and pinned
+// template in the admission receipt. Provider credentials are never included.
+type GitHubCreateSource struct {
+	Binding        GitHubProjectBinding `json:"binding" firestore:"binding"`
+	ExpectedHead   string               `json:"expectedHead" firestore:"expectedHead"`
+	TemplateID     string               `json:"templateID" firestore:"templateID"`
+	TemplateCommit string               `json:"templateCommit" firestore:"templateCommit"`
+}
+
+func GitHubSharedProjectCreateDigest(actorID, spaceID, commandID, title, payer, mode, product string, source GitHubCreateSource) string {
+	b, _ := json.Marshal(struct {
+		Kind      string             `json:"kind"`
+		ActorID   string             `json:"actorID"`
+		SpaceID   string             `json:"spaceID"`
+		CommandID string             `json:"commandID"`
+		Title     string             `json:"title"`
+		Payer     string             `json:"payer"`
+		Mode      string             `json:"mode"`
+		Product   string             `json:"product"`
+		Source    GitHubCreateSource `json:"source"`
+	}{"github-shared-project-create/1", actorID, spaceID, commandID, title, payer, mode, product, source})
+	digest := sha256.Sum256(b)
+	return hex.EncodeToString(digest[:])
 }
 
 func (r SharedProjectCreateReceipt) Validate() error {
@@ -98,7 +124,7 @@ func (r SharedProjectCreateReceipt) Validate() error {
 			return err
 		}
 	}
-	if r.Version != 1 || r.ActorID == "" || len(r.ActorID) > 128 || r.ActorID != strings.TrimSpace(r.ActorID) || !utf8.ValidString(r.ActorID) || r.CreatedAt.IsZero() || r.CreatedAt.Location() != time.UTC {
+	if (r.Version != 1 && r.Version != 2) || r.ActorID == "" || len(r.ActorID) > 128 || r.ActorID != strings.TrimSpace(r.ActorID) || !utf8.ValidString(r.ActorID) || r.CreatedAt.IsZero() || r.CreatedAt.Location() != time.UTC {
 		return fmt.Errorf("invalid shared project create receipt")
 	}
 	for _, id := range []string{r.SpaceID, r.CommandID, r.ProjectID} {
@@ -115,6 +141,14 @@ func (r SharedProjectCreateReceipt) Validate() error {
 			return fmt.Errorf("invalid paid project binding")
 		}
 		digest = PaidSharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title, r.PayerID, r.Mode, r.Product)
+	}
+	if r.Version == 2 {
+		if r.GitHub == nil || r.GitHub.Binding.Validate() != nil || r.GitHub.ExpectedHead == "" || r.GitHub.TemplateID == "" || r.GitHub.TemplateCommit == "" || r.Mode != "live" || r.Product != "datatug" {
+			return fmt.Errorf("invalid GitHub shared project source")
+		}
+		digest = GitHubSharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title, r.PayerID, r.Mode, r.Product, *r.GitHub)
+	} else if r.GitHub != nil {
+		return fmt.Errorf("unexpected GitHub shared project source")
 	}
 	if r.RequestDigest != digest {
 		return fmt.Errorf("invalid shared project request digest")

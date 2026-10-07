@@ -13,7 +13,7 @@ func readLinkedProjectAdmission(ctx context.Context, tx dal.ReadTransaction, ref
 	if err := tx.Get(ctx, r); err != nil {
 		return nil, err
 	}
-	if admission.Validate() != nil || admission.Mode != "live" || admission.Product != "datatug" || admission.SpaceID != string(ref.SpaceID) || admission.ProjectID != ref.ItemRef.ItemID || admission.OwnerContact.Validate() != nil || project.Created == nil || !project.Created.At.Equal(admission.CreatedAt) {
+	if admission.Validate() != nil || admission.Mode != "live" || admission.Product != "datatug" || admission.SpaceID != string(ref.SpaceID) || admission.ProjectID != ref.ItemRef.ItemID || admission.OwnerContact.Validate() != nil || project.Created == nil || !project.Created.At.Equal(admission.CreatedAt) || project.Storage == models4datatug.GithubStoreID && project.Status != models4datatug.GitHubProjectReady {
 		return nil, ErrSharedProjectConflict
 	}
 	rr, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(admission.SpaceID, admission.CommandID)

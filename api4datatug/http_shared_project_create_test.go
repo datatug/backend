@@ -119,7 +119,7 @@ func TestSharedProjectHTTPDisabledAndAuthenticationFailure(t *testing.T) {
 func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	routes := map[string]http.HandlerFunc{}
 	RegisterHttpRoutesWithOptions(func(method, path string, h http.HandlerFunc) { routes[method+" "+path] = h }, fakeIDs{}, RouteOptions{})
-	if len(routes) != 7 {
+	if len(routes) != 13 {
 		t.Fatalf("routes %+v", routes)
 	}
 	h := routes["POST /v0/datatug/projects/create_shared_project"]
@@ -131,6 +131,15 @@ func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	}
 	if routes["POST /v0/datatug/github/authorization/start"] == nil || routes["POST /v0/datatug/github/authorization/complete"] == nil || routes["GET /v0/datatug/github/repositories"] == nil {
 		t.Fatalf("missing additive GitHub authorization routes: %+v", routes)
+	}
+	if branches := routes["GET /v0/datatug/projects/branches"]; branches == nil {
+		t.Fatal("missing GitHub project branch discovery route")
+	} else {
+		w := httptest.NewRecorder()
+		branches(w, httptest.NewRequest(http.MethodGet, "/v0/datatug/projects/branches?storage=github.com&project=repo@owner@datatug", nil))
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("unconfigured branch discovery status=%d", w.Code)
+		}
 	}
 	for _, route := range []string{"POST /v0/datatug/github/authorization/start", "POST /v0/datatug/github/authorization/complete", "GET /v0/datatug/github/repositories"} {
 		w := httptest.NewRecorder()

@@ -21,7 +21,11 @@ func RegisterHttpRoutes(handle extension.HTTPHandleFunc, ids facade4datatug.IDGe
 // RegisterHttpRoutesWithPlan adds the personal plan route with host-injected
 // verification and reads. An unbound route fails closed with 503.
 func RegisterHttpRoutesWithPlan(handle extension.HTTPHandleFunc, ids facade4datatug.IDGenerator, plan PlanRouteOptions) {
-	handle(http.MethodPost, "/v0/datatug/projects/create_project", httpPostCreateProject(ids))
+	registerBaseRoutes(handle, ids, plan, GitHubProjectRouteOptions{})
+}
+
+func registerBaseRoutes(handle extension.HTTPHandleFunc, ids facade4datatug.IDGenerator, plan PlanRouteOptions, github GitHubProjectRouteOptions) {
+	handle(http.MethodPost, "/v0/datatug/projects/create_project", httpPostCreateProjectByStore(ids, github))
 	handle(http.MethodPost, "/v0/datatug/projects/register_github_project", httpPostRegisterGithubProject(ids))
 	handle(http.MethodGet, "/v0/datatug/plan", httpGetPlan(plan))
 }
@@ -32,14 +36,21 @@ type RouteOptions struct {
 	Plan                PlanRouteOptions
 	SharedProjects      SharedProjectRouteOptions
 	GitHubAuthorization GitHubAuthorizationRouteOptions
+	GitHubProjects      GitHubProjectRouteOptions
 }
 
 // RegisterHttpRoutesWithOptions mounts the shared command as well as legacy
 // routes. An unbound shared service returns 503 without authentication/storage
 // effects. Binding this route requires independently reviewed host composition.
 func RegisterHttpRoutesWithOptions(handle extension.HTTPHandleFunc, ids facade4datatug.IDGenerator, options RouteOptions) {
-	RegisterHttpRoutesWithPlan(handle, ids, options.Plan)
+	registerBaseRoutes(handle, ids, options.Plan, options.GitHubProjects)
 	handle(http.MethodPost, "/v0/datatug/projects/create_shared_project", httpPostCreateSharedProject(options.SharedProjects))
+	handle(http.MethodGet, "/v0/datatug/projects/branches", httpGetGitHubProjectBranches(options.GitHubProjects))
+	handle(http.MethodGet, "/v0/datatug/projects/capabilities", httpGetGitHubProjectCapabilities(options.GitHubProjects))
+	handle(http.MethodGet, "/v0/datatug/projects/project_summary", httpGetGitHubProjectSummary(options.GitHubProjects))
+	handle(http.MethodGet, "/v0/datatug/queries/all_queries", httpGetGitHubAllQueries(options.GitHubProjects))
+	handle(http.MethodGet, "/v0/datatug/queries/query_revision", httpGetGitHubQueryRevision(options.GitHubProjects))
+	handle(http.MethodPost, "/v0/datatug/queries/save_query", httpPostGitHubSaveQuery(options.GitHubProjects))
 	handle(http.MethodPost, "/v0/datatug/github/authorization/start", httpPostStartGitHubAuthorization(options.GitHubAuthorization))
 	handle(http.MethodPost, "/v0/datatug/github/authorization/complete", httpPostCompleteGitHubAuthorization(options.GitHubAuthorization))
 	handle(http.MethodGet, "/v0/datatug/github/repositories", httpGetGitHubRepositories(options.GitHubAuthorization))
