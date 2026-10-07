@@ -10,6 +10,7 @@ require (
 	github.com/datatug/datatug-core v0.44.0
 	github.com/sneat-co/sneat-core-modules v0.92.0
 	github.com/sneat-co/sneat-go-core v0.71.3
+	github.com/sneat-dev/wb v0.171.0
 	github.com/strongo/validation v0.0.15
 	google.golang.org/api v0.300.0
 	google.golang.org/grpc v1.84.0
@@ -51,6 +52,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect

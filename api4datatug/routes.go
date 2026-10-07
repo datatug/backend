@@ -29,8 +29,9 @@ func RegisterHttpRoutesWithPlan(handle extension.HTTPHandleFunc, ids facade4data
 // RouteOptions preserve the existing plan binding and explicitly opt a host
 // into the new shared route. Old registration APIs retain their exact routes.
 type RouteOptions struct {
-	Plan           PlanRouteOptions
-	SharedProjects SharedProjectRouteOptions
+	Plan                PlanRouteOptions
+	SharedProjects      SharedProjectRouteOptions
+	GitHubAuthorization GitHubAuthorizationRouteOptions
 }
 
 // RegisterHttpRoutesWithOptions mounts the shared command as well as legacy
@@ -39,4 +40,7 @@ type RouteOptions struct {
 func RegisterHttpRoutesWithOptions(handle extension.HTTPHandleFunc, ids facade4datatug.IDGenerator, options RouteOptions) {
 	RegisterHttpRoutesWithPlan(handle, ids, options.Plan)
 	handle(http.MethodPost, "/v0/datatug/projects/create_shared_project", httpPostCreateSharedProject(options.SharedProjects))
+	handle(http.MethodPost, "/v0/datatug/github/authorization/start", httpPostStartGitHubAuthorization(options.GitHubAuthorization))
+	handle(http.MethodPost, "/v0/datatug/github/authorization/complete", httpPostCompleteGitHubAuthorization(options.GitHubAuthorization))
+	handle(http.MethodGet, "/v0/datatug/github/repositories", httpGetGitHubRepositories(options.GitHubAuthorization))
 }

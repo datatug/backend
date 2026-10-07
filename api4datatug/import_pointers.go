@@ -13,7 +13,15 @@ import (
 // without minting a real auth token.
 var verifyAuthenticatedRequestAndDecodeBody = apicore.VerifyAuthenticatedRequestAndDecodeBody
 
+// verifyAuthenticatedRequest is the no-body Firebase-auth seam used by GET
+// routes that still need the verified actor UID.
+var verifyAuthenticatedRequest = apicore.VerifyRequestAndCreateUserContext
+
 // The seam's shape, kept next to the variable so the two cannot drift.
 var _ func(
 	w http.ResponseWriter, r *http.Request, options verify.RequestOptions, request facade.Request,
 ) (facade.ContextWithUser, error) = verifyAuthenticatedRequestAndDecodeBody
+
+var _ func(
+	w http.ResponseWriter, r *http.Request, options verify.RequestOptions,
+) (facade.ContextWithUser, error) = verifyAuthenticatedRequest
