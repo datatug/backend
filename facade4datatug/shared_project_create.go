@@ -49,11 +49,12 @@ func (c SharedProjectCreateCommand) Validate() error {
 // SharedProjectService is deliberately separate from the private-project
 // Facade, so existing callers do not acquire shared creation implicitly.
 type SharedProjectService struct {
-	db        dal.DB
-	ids       IDGenerator
-	authority SharedProjectCreateAuthority
-	now       func() time.Time
-	paid      *PaidSharedProjectOptions
+	db         dal.DB
+	ids        IDGenerator
+	authority  SharedProjectCreateAuthority
+	now        func() time.Time
+	paid       *PaidSharedProjectOptions
+	ownerLinks *sharedProjectOwnerLinks
 }
 
 func sharedProjectPortAbsent(v any) bool {
@@ -125,7 +126,13 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		var admission *projectAdmissionState
 		if s.paid != nil {
 			var err error
-			admission, err = s.readPaidAdmission(txCtx, tx, binding, observedAt)
+			// Recheck paid-through against the actual time of every transaction
+			// attempt. Command entropy and audit time remain stable through retry.
+			paidAt := s.now().UTC()
+			if paidAt.IsZero() || paidAt.Before(observedAt) {
+				return ErrSharedProjectUnauthorized
+			}
+			admission, err = s.readPaidAdmission(txCtx, tx, binding, paidAt)
 			if err != nil {
 				return err
 			}
@@ -148,6 +155,9 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 				if err := admission.verifyReplay(txCtx, tx, binding, receipt.ProjectID); err != nil {
 					return err
 				}
+				if err := s.verifyProjectOwnerReplay(txCtx, tx, binding, receipt.ProjectID, receipt.OwnerContact); err != nil {
+					return err
+				}
 			}
 			result = models4datatug.SharedProjectRef{StoreID: models4datatug.FirestoreStoreID, SpaceID: receipt.SpaceID, ProjectID: receipt.ProjectID}
 			return nil
@@ -162,9 +172,23 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 				return err
 			}
 		}
+		var ownerPlan *projectOwnerLinkPlan
+		if admission != nil {
+			var err error
+			ownerPlan, err = s.prepareProjectOwnerLink(txCtx, tx, binding, projectID, observedAt)
+			if err != nil {
+				return err
+			}
+		}
 		// All authority and command reads precede the first write. No user index
 		// or Space/module record is mutated by this domain command.
 		projectRecord, project := models4datatug.NewSharedProjectRecord(command.SpaceID, projectID)
+		if ownerPlan != nil {
+			var linked *models4datatug.SharedLinkedProject
+			projectRecord, linked = models4datatug.NewSharedLinkedProjectRecord(command.SpaceID, projectID)
+			project = &linked.Project
+			linked.WithRelatedAndIDs = ownerPlan.graph
+		}
 		project.Title = command.Title
 		project.Access = models4datatug.AccessProtected
 		project.Created = &models4datatug.Created{At: observedAt}
@@ -173,6 +197,9 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			Title: command.Title, RequestDigest: binding.RequestDigest, ProjectID: projectID, CreatedAt: observedAt,
 			PayerID: binding.PayerID, Mode: binding.Mode, Product: binding.Product,
 		}
+		if ownerPlan != nil {
+			receipt.OwnerContact = ownerPlan.proof
+		}
 		if err := tx.Insert(txCtx, projectRecord); err != nil {
 			return fmt.Errorf("insert shared project: %w", err)
 		}
@@ -180,7 +207,12 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			return fmt.Errorf("insert shared project create receipt: %w", err)
 		}
 		if admission != nil {
-			if err := admission.writeAllocation(txCtx, tx, binding, projectID, observedAt); err != nil {
+			if err := admission.writeAllocation(txCtx, tx, binding, projectID, observedAt, ownerPlan.proof); err != nil {
+				return err
+			}
+		}
+		if ownerPlan != nil {
+			if err := ownerPlan.writeContact(txCtx, tx); err != nil {
 				return err
 			}
 		}

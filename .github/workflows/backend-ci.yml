@@ -34,10 +34,17 @@ jobs:
       contents: write
     secrets:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GOPRIVATE_GITHUB_APP_PRIVATE_KEY: ${{ secrets.SNEAT_RELEASER_PRIVATE_KEY }}
     with:
       tag_prefix: v
       code_coverage: true
       min_test_coverage_percent: 88
+      # Existing Sneat Releaser App; private-module tokens request read-only
+      # access to this one repository. Checkout/release still use GITHUB_TOKEN.
+      GOPRIVATE: github.com/sneat-co/sneat-core-modules
+      goprivate_github_app_client_id: Iv23li26w131Kv6u3IdM
+      goprivate_github_app_owner: sneat-co
+      goprivate_github_app_repositories: sneat-core-modules
 
   paid_shared_project_firestore:
     name: Paid shared project Firestore roundtrip
@@ -59,10 +66,71 @@ jobs:
           java-version: '21'
       - name: Install pinned emulator CLI
         run: npm install --global firebase-tools@15.22.4
+      - name: Mint read-only private Core module token
+        id: core-module-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: Iv23li26w131Kv6u3IdM
+          private-key: ${{ secrets.SNEAT_RELEASER_PRIVATE_KEY }}
+          owner: sneat-co
+          repositories: sneat-core-modules
+          permission-contents: read
+          skip-token-revoke: false
+      - name: Configure ephemeral exact-repository credential helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          config="${RUNNER_TEMP}/datatug-core-${GITHUB_RUN_ID}-${GITHUB_JOB}.gitconfig"
+          helper="${RUNNER_TEMP}/datatug-core-${GITHUB_RUN_ID}-${GITHUB_JOB}.credential-helper"
+          : > "$config"
+          cat > "$helper" <<'CREDENTIAL_HELPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [ "${1:-}" = get ] || exit 0
+          protocol= host= path=
+          while IFS='=' read -r key value; do
+            case "$key" in
+              protocol) protocol="$value" ;;
+              host) host="$value" ;;
+              path) path="$value" ;;
+            esac
+          done
+          [ "$protocol" = https ] && [ "$host" = github.com ] || exit 0
+          case "$path" in
+            sneat-co/sneat-core-modules|sneat-co/sneat-core-modules.git)
+              printf 'username=x-access-token\npassword=%s\n' "${CORE_READ_TOKEN:?missing Core module token}"
+              ;;
+          esac
+          CREDENTIAL_HELPER
+          chmod 700 "$helper"
+          git config --file "$config" credential.https://github.com.useHttpPath true
+          git config --file "$config" credential.helper ""
+          git config --file "$config" --add credential.helper "$helper"
+          echo "GIT_CONFIG_GLOBAL=$config" >> "$GITHUB_ENV"
+      - name: Download exact reviewed private Core dependency
+        env:
+          GOPRIVATE: github.com/sneat-co/sneat-core-modules
+          CORE_READ_TOKEN: ${{ steps.core-module-token.outputs.token }}
+        run: go mod download github.com/sneat-co/sneat-core-modules@v0.92.0
+      - name: Remove module credentials before running repository tests
+        shell: bash
+        run: |
+          rm -f -- "${RUNNER_TEMP}/datatug-core-${GITHUB_RUN_ID}-${GITHUB_JOB}.gitconfig" \
+            "${RUNNER_TEMP}/datatug-core-${GITHUB_RUN_ID}-${GITHUB_JOB}.credential-helper"
       - name: Commit, replay and quota-fence against owned Firestore emulator
         env:
           GCLOUD_PROJECT: demo-datatug-paid-create
+          GOPRIVATE: github.com/sneat-co/sneat-core-modules
         run: |
           firebase emulators:exec --only firestore --project demo-datatug-paid-create \
             --config facade4datatug/testdata/firestore-emulator.json \
             "go test -tags=integration -race -count=1 -run '^TestPaidSharedProjectFirestoreRoundtrip$' ./facade4datatug"
+
+      - name: Remove ephemeral module credential configuration
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- "${RUNNER_TEMP}/datatug-core-${GITHUB_RUN_ID}-${GITHUB_JOB}.gitconfig" \
+            "${RUNNER_TEMP}/datatug-core-${GITHUB_RUN_ID}-${GITHUB_JOB}.credential-helper"
+        # create-github-app-token's post action also revokes on job failure.

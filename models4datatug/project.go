@@ -1,6 +1,6 @@
 // Package models4datatug holds this extension's database objects and the
-// dalgo keys they are stored under. Like the rest of the module it depends on
-// dal-go only — no database client, no platform package.
+// DALgo keys they are stored under. Shared linkage reuses published contract
+// DTOs; no database client or peer extension implementation is imported.
 package models4datatug
 
 import (
