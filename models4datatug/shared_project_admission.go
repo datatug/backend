@@ -60,7 +60,8 @@ func NewProtectedProjectQuotaRecord(mode, product, payer string) (record.Record,
 // ProjectAdmission is immutable attribution for future write/AI enforcement.
 // It does not grant membership, included guest AI, or local execution authority.
 type ProjectAdmission struct {
-	Version                                                                       int `firestore:"v"`
+	OwnerContact                                                                  ProjectOwnerContactProof `json:"ownerContact,omitempty" firestore:"ownerContact,omitempty"`
+	Version                                                                       int                      `firestore:"v"`
 	Mode, Product, PayerID, ActorID, SpaceID, ProjectID, CommandID, RequestDigest string
 	LimitsVersion, SubscriptionID                                                 string
 	ProfileVersion, QuotaBasisDigest                                              string
@@ -70,6 +71,11 @@ type ProjectAdmission struct {
 }
 
 func (a ProjectAdmission) Validate() error {
+	if a.OwnerContact.Present() {
+		if err := a.OwnerContact.Validate(); err != nil {
+			return err
+		}
+	}
 	if a.Version != 1 || (a.Mode != "live" && a.Mode != "test") || a.ActorID == "" || a.RequestDigest == "" || a.LimitsVersion == "" || a.ProfileVersion == "" || a.QuotaBasisDigest == "" || a.ProtectedProjectsLimit < 1 || a.ProtectedUsersLimit < 1 || a.QuotaRevision < 1 || a.SubscriptionID == "" || a.OwnerGeneration < 1 || a.CreatedAt.IsZero() || a.CreatedAt.Location() != time.UTC {
 		return fmt.Errorf("invalid project admission")
 	}

@@ -56,7 +56,7 @@ func paidCreateFixtureWithDB(t *testing.T, db dal.DB) (dal.DB, *SharedProjectSer
 	t.Helper()
 	base, _, _, _, _, _ := validPlanTestService()
 	config := base.Config.(testConfigReader).config
-	o := PaidSharedProjectOptions{Version: "reviewed-1", Mode: "live", Product: "datatug", Config: config, Directory: paidCreateDirectory{payer: "personal-1"}, Personal: paidCreateAuthority{}, Owner: paidCreateAuthority{}}
+	o := PaidSharedProjectOptions{ContactLinks: paidFixtureOwnerLinks(), Version: "reviewed-1", Mode: "live", Product: "datatug", Config: config, Directory: paidCreateDirectory{payer: "personal-1"}, Personal: paidCreateAuthority{}, Owner: paidCreateAuthority{}}
 	f := PlanOwnerFence{Mode: o.Mode, Family: o.Product, AccountID: "personal-1", OwnerSubscriptionID: "subscription-1", OwnerGeneration: 1, SubscriptionRevision: 1}
 	end := sharedTestTime.Add(24 * time.Hour)
 	plan := models4datatug.PlanRecord{V: 1, Plan: "pro", Status: "active", Period: "month", PaidUntil: &end, Limits: &config.ProLimits}
@@ -72,6 +72,9 @@ func paidCreateFixtureWithDB(t *testing.T, db dal.DB) (dal.DB, *SharedProjectSer
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	for _, space := range []string{"space", "other-space", "space-0", "space-1", "space-2", "space-3", "space-4", "space-5"} {
+		seedPaidOwnerContact(t, db, space)
 	}
 	s, err := NewPaidSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, o)
 	if err != nil {
@@ -509,7 +512,7 @@ func paidWriterCreateFixture(t *testing.T, db dal.DB, explicit bool) (*planWrite
 	f := newPlanWriterFixtureWithDB(t, db)
 	base, _, _, _, _, _ := validPlanTestService()
 	config := base.Config.(testConfigReader).config
-	o := PaidSharedProjectOptions{Version: "reviewed-1", Mode: "live", Product: "datatug", Config: config, Directory: paidCreateDirectory{payer: "personal-1"}, Personal: paidCreateAuthority{}, Owner: paidCreateAuthority{}}
+	o := PaidSharedProjectOptions{ContactLinks: paidFixtureOwnerLinks(), Version: "reviewed-1", Mode: "live", Product: "datatug", Config: config, Directory: paidCreateDirectory{payer: "personal-1"}, Personal: paidCreateAuthority{}, Owner: paidCreateAuthority{}}
 
 	f.effect.BuyerID = "actor"
 	f.effect.LastPaidEnd = sharedTestTime.Add(24 * time.Hour)
@@ -536,6 +539,7 @@ func paidWriterCreateFixture(t *testing.T, db dal.DB, explicit bool) (*planWrite
 	if err := f.db.RunReadwriteTransaction(ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Insert(ctx, qr) }); err != nil {
 		t.Fatal(err)
 	}
+	seedPaidOwnerContact(t, f.db, "space")
 	s, err := NewPaidSharedProjectService(f.db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, o)
 	if err != nil {
 		t.Fatal(err)

@@ -7,9 +7,9 @@ import (
 	"github.com/dal-go/dalgo/dal"
 )
 
-// IDGenerator is a PORT: the module must not import sneat-go-core,
-// sneat-core-modules or another extension's backend, so anything it needs from
-// outside crosses a small interface defined here and is satisfied by an
+// IDGenerator is a PORT: extension implementation packages stay outside this
+// module. Published contracts and their DTO aliases may be reused; behavior
+// crosses a small interface defined here and is satisfied by an
 // adapter in the host composition root
 // (sneat-go/pkg/modules/datatug/adapters.go). Domain tests fake the port — see
 // facade_test.go's fakeIDGenerator.

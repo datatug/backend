@@ -78,20 +78,26 @@ func PaidSharedProjectCreateDigest(actorID, spaceID, commandID, title, payer, mo
 // SharedProjectCreateReceipt is immutable, private command evidence. It is not
 // a project index, a module-enablement record, or a billing entitlement.
 type SharedProjectCreateReceipt struct {
-	Version       int       `json:"v" firestore:"v"`
-	ActorID       string    `json:"actorID" firestore:"actorID"`
-	SpaceID       string    `json:"spaceID" firestore:"spaceID"`
-	CommandID     string    `json:"commandID" firestore:"commandID"`
-	Title         string    `json:"title" firestore:"title"`
-	RequestDigest string    `json:"requestDigest" firestore:"requestDigest"`
-	ProjectID     string    `json:"projectID" firestore:"projectID"`
-	CreatedAt     time.Time `json:"createdAt" firestore:"createdAt"`
-	PayerID       string    `json:"payerID,omitempty" firestore:"payerID,omitempty"`
-	Mode          string    `json:"mode,omitempty" firestore:"mode,omitempty"`
-	Product       string    `json:"product,omitempty" firestore:"product,omitempty"`
+	OwnerContact  ProjectOwnerContactProof `json:"ownerContact,omitempty" firestore:"ownerContact,omitempty"`
+	Version       int                      `json:"v" firestore:"v"`
+	ActorID       string                   `json:"actorID" firestore:"actorID"`
+	SpaceID       string                   `json:"spaceID" firestore:"spaceID"`
+	CommandID     string                   `json:"commandID" firestore:"commandID"`
+	Title         string                   `json:"title" firestore:"title"`
+	RequestDigest string                   `json:"requestDigest" firestore:"requestDigest"`
+	ProjectID     string                   `json:"projectID" firestore:"projectID"`
+	CreatedAt     time.Time                `json:"createdAt" firestore:"createdAt"`
+	PayerID       string                   `json:"payerID,omitempty" firestore:"payerID,omitempty"`
+	Mode          string                   `json:"mode,omitempty" firestore:"mode,omitempty"`
+	Product       string                   `json:"product,omitempty" firestore:"product,omitempty"`
 }
 
 func (r SharedProjectCreateReceipt) Validate() error {
+	if r.OwnerContact.Present() {
+		if err := r.OwnerContact.Validate(); err != nil {
+			return err
+		}
+	}
 	if r.Version != 1 || r.ActorID == "" || len(r.ActorID) > 128 || r.ActorID != strings.TrimSpace(r.ActorID) || !utf8.ValidString(r.ActorID) || r.CreatedAt.IsZero() || r.CreatedAt.Location() != time.UTC {
 		return fmt.Errorf("invalid shared project create receipt")
 	}

@@ -76,8 +76,36 @@ func TestPaidSharedProjectFirestoreRoundtrip(t *testing.T) {
 			t.Fatal(err)
 		}
 		var a models4datatug.ProjectAdmission
-		if err := aSnapshot.DataTo(&a); err != nil || a.Validate() != nil || a.ProtectedProjectsLimit != 5 || a.ProtectedUsersLimit != 5 || a.PayerID != "personal-1" || a.ActorID != c.ActorID {
+		if err := aSnapshot.DataTo(&a); err != nil || a.Validate() != nil || a.ProtectedProjectsLimit != 5 || a.ProtectedUsersLimit != 5 || a.PayerID != "personal-1" || a.ActorID != c.ActorID || a.OwnerContact.Validate() != nil {
 			t.Fatalf("allocation roundtrip %+v %v", a, err)
+		}
+
+		// Decode through the actual SDK: aliases/embedded linkage fields and
+		// owner provenance must round-trip at the existing Space project key.
+		pr, linked := models4datatug.NewSharedLinkedProjectRecord(ref.SpaceID, ref.ProjectID)
+		ps, err := client.Doc(pr.Key().String()).Get(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ps.DataTo(linked); err != nil {
+			t.Fatal(err)
+		}
+		roles, err := readProjectContactRoles(a.OwnerContact.Contact.SpaceID, linked.WithRelatedAndIDs, s.ownerLinks.catalog)
+		if err != nil || assignedProjectContacts(roles) != 1 || len(linked.UserIDs) != 0 {
+			t.Fatalf("project linkage wire %+v %v", linked, err)
+		}
+		cr, _ := models4datatug.NewProjectContactLinkageRecord(a.OwnerContact.Contact)
+		cs, err := client.Doc(cr.Key().String()).Get(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var contact projectContactFixture
+		if err := cs.DataTo(&contact); err != nil {
+			t.Fatal(err)
+		}
+		edge, err := graphItem(contact.WithRelatedAndIDs, a.OwnerContact.Contact.SpaceID, projectFixtureRef(ref.SpaceID, ref.ProjectID))
+		if err != nil || len(rolesOf(edge, false)) != 1 || contact.UserID != c.ActorID || !contact.Active {
+			t.Fatalf("contact linkage wire %+v %v", contact, err)
 		}
 
 		// Fill the paid allowance before replay: a full quota cannot prevent
@@ -85,6 +113,7 @@ func TestPaidSharedProjectFirestoreRoundtrip(t *testing.T) {
 		for i := range 4 {
 			other := c
 			other.SpaceID, other.CommandID = fmt.Sprintf("other-space-%d", i), fmt.Sprintf("other-command-%d", i)
+			seedPaidOwnerContact(t, db, other.SpaceID)
 			if _, err := s.Create(ctx, other); err != nil {
 				t.Fatal(err)
 			}

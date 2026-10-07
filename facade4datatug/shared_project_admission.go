@@ -22,6 +22,7 @@ var ErrProtectedProjectQuota = errors.New("protected project quota unavailable o
 // shared projects. Future TEST product isolation needs a separate ref namespace.
 type PaidSharedProjectOptions struct {
 	Version, Mode, Product string
+	ContactLinks           *PaidProjectOwnerLinksOptions
 	Config                 PlanConfig
 	Directory              PersonalAccountDirectory
 	Personal               PersonalPlanOwnerPort
@@ -39,7 +40,7 @@ func (o PaidSharedProjectOptions) validate() error {
 
 // NewPaidSharedProjectService connects admission to Create's own transaction.
 // Activation still requires proved quota initialization/import, private rules,
-// per-project user grants and project-scoped hosted-write/AI enforcement. The
+// project contact-role guards and project-scoped hosted-write/AI enforcement. The
 // legacy constructor remains ownership-only and must not activate paid routes.
 func NewPaidSharedProjectService(db dal.DB, ids IDGenerator, authority SharedProjectCreateAuthority, now func() time.Time, options PaidSharedProjectOptions) (*SharedProjectService, error) {
 	if err := options.validate(); err != nil {
@@ -49,13 +50,25 @@ func NewPaidSharedProjectService(db dal.DB, ids IDGenerator, authority SharedPro
 	if err != nil {
 		return nil, err
 	}
+	ownerLinks, err := snapshotProjectOwnerLinks(options.ContactLinks)
+	if err != nil {
+		return nil, err
+	}
+	s.ownerLinks = ownerLinks
+	options = snapshotPaidSharedProjectOptions(options)
+	s.paid = &options
+	return s, nil
+}
+
+func snapshotPaidSharedProjectOptions(options PaidSharedProjectOptions) PaidSharedProjectOptions {
+	// Owner ports/catalog have their own snapshot; paid-proof readers need only money configuration.
+	options.ContactLinks = nil
 	options.Config.ProLimits = clonePlanLimits(options.Config.ProLimits)
 	options.Config.FreeFirstMonthLimits = clonePlanLimits(options.Config.FreeFirstMonthLimits)
 	options.Config.FreeLaterMonthLimits = clonePlanLimits(options.Config.FreeLaterMonthLimits)
 	options.Config.ProModels = append([]PlanModel(nil), options.Config.ProModels...)
 	options.Config.FreeModels = append([]PlanModel(nil), options.Config.FreeModels...)
-	s.paid = &options
-	return s, nil
+	return options
 }
 
 type projectAdmissionState struct {
@@ -70,39 +83,7 @@ type projectAdmissionState struct {
 
 func (s *SharedProjectService) readPaidAdmission(ctx context.Context, tx dal.ReadwriteTransaction, b SharedProjectCreateBinding, at time.Time) (*projectAdmissionState, error) {
 	o := *s.paid
-	if err := o.Personal.VerifyPersonalOwner(ctx, tx, b.ActorID, b.PayerID); err != nil {
-		return nil, ErrSharedProjectUnauthorized
-	}
-	f, err := o.Owner.ReadOwner(ctx, tx, o.Mode, o.Product, b.PayerID)
-	if err != nil {
-		return nil, err
-	}
-	if f.Mode != o.Mode || f.Family != o.Product || f.AccountID != b.PayerID || f.OwnerSubscriptionID == "" || f.OwnerGeneration < 1 || f.SubscriptionRevision < 1 {
-		return nil, ErrPlanEffectUnproved
-	}
-	app, exists, err := readPlanApplication(ctx, tx, f)
-	if err != nil {
-		return nil, err
-	}
-	if !exists || app.V != 1 || app.Mode != f.Mode || app.Family != f.Family || app.AccountID != f.AccountID || app.OwnerSubscriptionID != f.OwnerSubscriptionID || app.OwnerGeneration != f.OwnerGeneration || app.SubscriptionRevision != f.SubscriptionRevision || app.LastProSubscriptionID != f.OwnerSubscriptionID || app.LastProOwnerGeneration != f.OwnerGeneration || (app.LastProPlanID != "datatug-pro-monthly" && app.LastProPlanID != "datatug-pro-annual") || app.LastProQuoteKey == "" || app.LastProPaidServiceProofID == "" || app.LimitsVersion == "" || app.LastProProtectedProjects <= 0 || app.LastProProtectedProjectUsers <= 0 {
-		return nil, ErrPlanEffectUnproved
-	}
-	plan, exists, err := readPublicPlan(ctx, tx, f)
-	if err != nil {
-		return nil, err
-	}
-	// Reuse effective-Pro status/config validation, with a strict paid-through
-	// boundary for new hosted mutations: display/purchase grace cannot extend
-	// this write authority. Match private verified source grants to the public
-	// projection before the legacy helper can fill missing pairs from config.
-	if !exists || plan.V != 1 || plan.Limits == nil || plan.Limits.ProtectedProjects == nil || plan.Limits.ProtectedProjectUsers == nil || !effectiveProForPurchase(plan, o.Config, at) || plan.PaidUntil == nil || !at.Before(*plan.PaidUntil) {
-		return nil, ErrSharedProjectUnauthorized
-	}
-
-	if *plan.Limits.ProtectedProjects != app.LastProProtectedProjects || *plan.Limits.ProtectedProjectUsers != app.LastProProtectedProjectUsers {
-		return nil, ErrPlanEffectUnproved
-	}
-	limits, err := resolvedProLimits(*plan.Limits, o.Config.ProLimits)
+	access, err := readCurrentPaidProjectAccess(ctx, sharedProjectReadTransaction{tx}, o, b.ActorID, b.PayerID, at)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +97,7 @@ func (s *SharedProjectService) readPaidAdmission(ctx context.Context, tx dal.Rea
 	if q.Validate() != nil || q.Mode != o.Mode || q.Product != o.Product || q.PayerID != b.PayerID {
 		return nil, ErrProtectedProjectQuota
 	}
-	return &projectAdmissionState{options: o, fence: f, limitsVersion: app.LimitsVersion, quotaRecord: qrec, quota: q, limit: models4datatug.ProjectQuotaLimit{Count: *limits.ProtectedProjects}, usersLimit: *limits.ProtectedProjectUsers}, nil
+	return &projectAdmissionState{options: o, fence: access.fence, limitsVersion: access.limitsVersion, quotaRecord: qrec, quota: q, limit: models4datatug.ProjectQuotaLimit{Count: access.projectLimit}, usersLimit: access.contactLimit}, nil
 }
 
 func (a *projectAdmissionState) verifyReplay(ctx context.Context, tx dal.ReadwriteTransaction, b SharedProjectCreateBinding, projectID string) error {
@@ -145,9 +126,9 @@ func (a *projectAdmissionState) readNewAllocation(ctx context.Context, tx dal.Re
 	return nil
 }
 
-func (a *projectAdmissionState) writeAllocation(ctx context.Context, tx dal.ReadwriteTransaction, b SharedProjectCreateBinding, projectID string, at time.Time) error {
+func (a *projectAdmissionState) writeAllocation(ctx context.Context, tx dal.ReadwriteTransaction, b SharedProjectCreateBinding, projectID string, at time.Time, owner models4datatug.ProjectOwnerContactProof) error {
 	r, v := models4datatug.NewProjectAdmissionRecord(b.SpaceID, projectID)
-	*v = models4datatug.ProjectAdmission{Version: 1, Mode: b.Mode, Product: b.Product, PayerID: b.PayerID, ActorID: b.ActorID, SpaceID: b.SpaceID, ProjectID: projectID, CommandID: b.CommandID, RequestDigest: b.RequestDigest, LimitsVersion: a.limitsVersion, SubscriptionID: a.fence.OwnerSubscriptionID, OwnerGeneration: a.fence.OwnerGeneration, CreatedAt: at, ProfileVersion: a.options.Version, QuotaBasisDigest: a.quota.BasisDigest, ProtectedProjectsLimit: a.limit.Count, ProtectedUsersLimit: a.usersLimit, QuotaRevision: a.quota.Revision + 1}
+	*v = models4datatug.ProjectAdmission{OwnerContact: owner, Version: 1, Mode: b.Mode, Product: b.Product, PayerID: b.PayerID, ActorID: b.ActorID, SpaceID: b.SpaceID, ProjectID: projectID, CommandID: b.CommandID, RequestDigest: b.RequestDigest, LimitsVersion: a.limitsVersion, SubscriptionID: a.fence.OwnerSubscriptionID, OwnerGeneration: a.fence.OwnerGeneration, CreatedAt: at, ProfileVersion: a.options.Version, QuotaBasisDigest: a.quota.BasisDigest, ProtectedProjectsLimit: a.limit.Count, ProtectedUsersLimit: a.usersLimit, QuotaRevision: a.quota.Revision + 1}
 	if err := tx.Insert(ctx, r); err != nil {
 		return err
 	}
