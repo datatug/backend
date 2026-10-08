@@ -49,6 +49,7 @@ func RegisterHttpRoutesWithOptions(handle extension.HTTPHandleFunc, ids facade4d
 	handle(http.MethodGet, "/v0/datatug/projects/branches", httpGetGitHubProjectBranches(options.GitHubProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/capabilities", httpGetGitHubProjectCapabilities(options.GitHubProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/project_summary", httpGetGitHubProjectSummary(options.GitHubProjects))
+	handle(http.MethodGet, "/v0/datatug/projects/connection_catalog", httpGetGitHubConnectionCatalog(options.GitHubProjects))
 	handle(http.MethodGet, "/v0/datatug/queries/all_queries", httpGetGitHubAllQueries(options.GitHubProjects))
 	handle(http.MethodGet, "/v0/datatug/queries/query_revision", httpGetGitHubQueryRevision(options.GitHubProjects))
 	handle(http.MethodPost, "/v0/datatug/queries/save_query", httpPostGitHubSaveQuery(options.GitHubProjects))

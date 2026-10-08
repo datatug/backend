@@ -119,7 +119,7 @@ func TestSharedProjectHTTPDisabledAndAuthenticationFailure(t *testing.T) {
 func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	routes := map[string]http.HandlerFunc{}
 	RegisterHttpRoutesWithOptions(func(method, path string, h http.HandlerFunc) { routes[method+" "+path] = h }, fakeIDs{}, RouteOptions{})
-	if len(routes) != 14 {
+	if len(routes) != 15 {
 		t.Fatalf("routes %+v", routes)
 	}
 	h := routes["POST /v0/datatug/projects/create_shared_project"]

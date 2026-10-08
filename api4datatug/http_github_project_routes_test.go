@@ -231,6 +231,7 @@ func TestHostedGitHubProjectReadRoutesPinOneHeadAndPreserveRichQuery(t *testing.
 		contains string
 	}{
 		{"projects/project_summary", httpGetGitHubProjectSummary(options), `"title":"Owned project"`},
+		{"projects/connection_catalog", httpGetGitHubConnectionCatalog(options), `"id":"chinook-sqlite"`},
 		{"queries/all_queries", httpGetGitHubAllQueries(options), `"recordsets"`},
 		{"queries/query_revision", httpGetGitHubQueryRevision(options), `"saveSupported":false`},
 	} {
@@ -244,7 +245,7 @@ func TestHostedGitHubProjectReadRoutesPinOneHeadAndPreserveRichQuery(t *testing.
 			t.Fatalf("%s status=%d header=%v body=%s", test.path, w.Code, w.Header(), w.Body.String())
 		}
 	}
-	if provider.repo.refCalls != 3 || provider.authorized != 3 || service.readCalls != 3 {
+	if provider.repo.refCalls != 4 || provider.authorized != 4 || service.readCalls != 4 {
 		t.Fatalf("reads refs=%d auth=%d links=%d", provider.repo.refCalls, provider.authorized, service.readCalls)
 	}
 }
@@ -350,7 +351,7 @@ func TestHostedGitHubCreateRoutePassesVerifiedActorAndSelectedHead(t *testing.T)
 		}
 		return &routeCreateRepo{}, nil
 	}
-	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
+	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"436350d41371103be11144ffa346c605f85e1342"}}`
 	w := httptest.NewRecorder()
 	httpPostCreateGitHubProject(options)(w, httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/create_project?store=github.com", strings.NewReader(body)))
 	if w.Code != http.StatusCreated || service.createCalls != 1 || service.createCommand.ActorID != "firebase-actor" || service.createCommand.Source.ExpectedHead != routeHead {
@@ -436,6 +437,7 @@ func TestHostedGitHubRoutesFailClosedBeforePrivateProviderRead(t *testing.T) {
 		url         string
 	}{
 		{"summary", httpGetGitHubProjectSummary, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
+		{"catalog", httpGetGitHubConnectionCatalog, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
 		{"queries", httpGetGitHubAllQueries, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
 		{"revision", httpGetGitHubQueryRevision, "/?storage=github.com&project=repo@owner@datatug&branch=work&id=demodb/chinook-top-customer-spend"},
 		{"branches", httpGetGitHubProjectBranches, "/?storage=github.com&project=repo@owner@datatug"},
@@ -479,6 +481,7 @@ func TestHostedGitHubRoutesRefuseConfiguredProviderWithoutPaidService(t *testing
 		method, url string
 	}{
 		{"summary", httpGetGitHubProjectSummary(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
+		{"catalog", httpGetGitHubConnectionCatalog(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
 		{"branches", httpGetGitHubProjectBranches(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug"},
 		{"capabilities", httpGetGitHubProjectCapabilities(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug"},
 		{"query listing", httpGetGitHubAllQueries(options), http.MethodGet, "/?storage=github.com&project=repo@owner@datatug&branch=work"},
@@ -529,7 +532,7 @@ func TestHostedGitHubSaveRejectsUnknownFieldsAndLostAuthorityWithoutMutation(t *
 }
 
 func TestHostedGitHubCreateRejectsUnknownInputAndUnavailableApp(t *testing.T) {
-	valid := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
+	valid := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"436350d41371103be11144ffa346c605f85e1342"}}`
 	for _, body := range []string{
 		strings.Replace(valid, `"branch":"work"`, `"branch":"work","unhandledGrant":"x"`, 1),
 		strings.Replace(valid, `"title":"Owned"`, `"title":"Owned","unknown":"x"`, 1),
@@ -579,7 +582,7 @@ func TestHostedGitHubCreateMapsProviderAndAdmissionFailures(t *testing.T) {
 		}
 		return githubTestUserContext(r), nil
 	}
-	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
+	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"436350d41371103be11144ffa346c605f85e1342"}}`
 	for _, tc := range []struct {
 		name               string
 		authErr, createErr error

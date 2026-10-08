@@ -145,6 +145,24 @@ func httpGetGitHubAllQueries(options GitHubProjectRouteOptions) http.HandlerFunc
 	})
 }
 
+// The browser SQL runner needs the project's source declaration even when its
+// GitHub repository is private. Expose this one fixed, bounded file through
+// the same membership and GitHub App authorization as query reads.
+func httpGetGitHubConnectionCatalog(options GitHubProjectRouteOptions) http.HandlerFunc {
+	return withGitHubProjectSnapshot(options, func(w http.ResponseWriter, r *http.Request, snapshot *githubstore4datatug.ProjectSnapshot) {
+		content, err := snapshot.ReadFile(r.Context(), "connections/demo-db.json")
+		if err != nil {
+			githubReadError(w, err)
+			return
+		}
+		if len(content) > 256<<10 || !json.Valid(content) {
+			sharedProjectError(w, http.StatusUnprocessableEntity, "invalid_connection_catalog")
+			return
+		}
+		writeGitHubSnapshotJSON(w, snapshot.Head, json.RawMessage(content))
+	})
+}
+
 func httpGetGitHubQueryRevision(options GitHubProjectRouteOptions) http.HandlerFunc {
 	return withGitHubProjectSnapshot(options, func(w http.ResponseWriter, r *http.Request, snapshot *githubstore4datatug.ProjectSnapshot) {
 		location := r.URL.Query().Get("id")
