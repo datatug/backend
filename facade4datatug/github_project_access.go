@@ -3,7 +3,6 @@ package facade4datatug
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 
 	"github.com/dal-go/dalgo/dal"
@@ -85,37 +84,11 @@ func (s *SharedProjectService) ResolveGitHubProject(ctx context.Context, actorID
 			SpaceID: coretypes.SpaceID(locator.SpaceID),
 			ItemRef: contract4linkage.ItemRef{ExtID: "datatug", Collection: "projects", ItemID: locator.ProjectID},
 		}
-		admission, err := readLinkedProjectAdmission(txCtx, tx, projectRef, project)
-		if err != nil || admission == nil {
+		if _, err := readCurrentProjectMember(txCtx, tx, *s.ownerLinks, projectRef, project, actorID); err != nil {
 			return ErrSharedProjectUnauthorized
 		}
-		rolesByContact, err := readProjectContactRoles(projectRef.SpaceID, project.WithRelatedAndIDs, s.ownerLinks.catalog)
-		if err != nil {
-			return ErrSharedProjectUnauthorized
-		}
-		for contactRef, roles := range rolesByContact {
-			if len(roles) == 0 || string(contactRef.SpaceID) != locator.SpaceID {
-				continue
-			}
-			state, err := s.ownerLinks.contacts.ReadCurrentProjectContact(txCtx, sharedProjectReadTransaction{tx}, contactRef)
-			if err != nil {
-				return ErrSharedProjectUnauthorized
-			}
-			if state.Ref != contactRef || !state.Exists || !state.Active || state.UserID != actorID {
-				continue
-			}
-			contactRecord, graph := models4datatug.NewProjectContactLinkageRecord(contactRef)
-			if err := tx.Get(txCtx, contactRecord); err != nil || graph.Validate() != nil {
-				return ErrSharedProjectUnauthorized
-			}
-			edge, err := graphItem(*graph, contactRef.SpaceID, projectRef)
-			if err != nil || !slices.Equal(rolesOf(edge, false), roles) {
-				return ErrSharedProjectUnauthorized
-			}
-			result = GitHubProjectAccess{SpaceID: locator.SpaceID, SharedProjectID: locator.ProjectID, Binding: *b}
-			return nil
-		}
-		return ErrSharedProjectUnauthorized
+		result = GitHubProjectAccess{SpaceID: locator.SpaceID, SharedProjectID: locator.ProjectID, Binding: *b}
+		return nil
 	})
 	return result, err
 }

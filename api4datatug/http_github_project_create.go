@@ -36,6 +36,7 @@ type GitHubProjectRouteOptions struct {
 type githubProjectService interface {
 	CreateGitHubProject(context.Context, facade4datatug.GitHubProjectCreateCommand, facade4datatug.GitHubCreateRepository) (facade4datatug.GitHubProjectCreateResult, error)
 	ResolveGitHubProject(context.Context, string, int64, string, string, string) (facade4datatug.GitHubProjectAccess, error)
+	ReadGitHubProjectAIEligibility(context.Context, string, int64, string, string, string) (facade4datatug.ProjectAIEligibility, error)
 	AuthorizeGitHubProjectWrite(context.Context, string, int64, string, string, string) (facade4datatug.GitHubProjectAccess, error)
 	SaveGitHubQuery(context.Context, string, int64, string, string, string, dto.SaveQueryRequest, facade4datatug.GitHubQueryRepository) (*dto.SaveQueryResponse, error)
 }

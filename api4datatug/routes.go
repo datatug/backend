@@ -45,6 +45,7 @@ type RouteOptions struct {
 func RegisterHttpRoutesWithOptions(handle extension.HTTPHandleFunc, ids facade4datatug.IDGenerator, options RouteOptions) {
 	registerBaseRoutes(handle, ids, options.Plan, options.GitHubProjects)
 	handle(http.MethodPost, "/v0/datatug/projects/create_shared_project", httpPostCreateSharedProject(options.SharedProjects))
+	handle(http.MethodGet, "/v0/datatug/projects/ai_eligibility", httpGetSharedProjectAIEligibility(options.SharedProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/branches", httpGetGitHubProjectBranches(options.GitHubProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/capabilities", httpGetGitHubProjectCapabilities(options.GitHubProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/project_summary", httpGetGitHubProjectSummary(options.GitHubProjects))

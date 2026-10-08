@@ -11,11 +11,10 @@ import (
 	"github.com/strongo/validation"
 )
 
-// SharedProjectRouteOptions are opt-in. No host currently configures these;
-// absent options do not enable creation or infer a Business billing binding.
-// This stage proves Space/role ownership only. A later host activation must
-// separately enforce paid-Space/shared-project limits and ended-plan read-only
-// policy; Core membership alone is not a commercial entitlement.
+// SharedProjectRouteOptions are supplied only by RegisterHttpRoutesWithOptions;
+// the legacy route registration leaves shared-project routes unmounted. A
+// configured service proves current linked membership and sponsor status for
+// AI eligibility, while project writes still require mutation-time paid checks.
 // Host activation also requires reviewed Firebase rules: today's broad Space
 // member grants do not make the separate create-receipt subtree private.
 type SharedProjectRouteOptions struct {

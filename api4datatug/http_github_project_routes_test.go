@@ -125,6 +125,9 @@ type routeService struct {
 	readCalls, writeCalls, saveCalls, createCalls int
 	createCommand                                 facade4datatug.GitHubProjectCreateCommand
 	received                                      dto.SaveQueryRequest
+	aiEligibility                                 facade4datatug.ProjectAIEligibility
+	aiEligibilityErr                              error
+	aiEligibilityCalls                            int
 }
 
 func (s *routeService) ResolveGitHubProject(_ context.Context, uid string, id int64, owner, name, folder string) (facade4datatug.GitHubProjectAccess, error) {
@@ -140,6 +143,19 @@ func (s *routeService) ResolveGitHubProject(_ context.Context, uid string, id in
 func (s *routeService) AuthorizeGitHubProjectWrite(_ context.Context, _ string, _ int64, _, _, _ string) (facade4datatug.GitHubProjectAccess, error) {
 	s.writeCalls++
 	return facade4datatug.GitHubProjectAccess{}, s.writeErr
+}
+func (s *routeService) ReadGitHubProjectAIEligibility(_ context.Context, uid string, id int64, owner, name, folder string) (facade4datatug.ProjectAIEligibility, error) {
+	s.aiEligibilityCalls++
+	if uid != "firebase-actor" || id != 91 || owner != "owner" || name != "repo" || folder != "datatug" {
+		return facade4datatug.ProjectAIEligibility{}, errors.New("wrong project")
+	}
+	if s.aiEligibilityErr != nil {
+		return facade4datatug.ProjectAIEligibility{}, s.aiEligibilityErr
+	}
+	if s.aiEligibility == (facade4datatug.ProjectAIEligibility{}) {
+		return facade4datatug.ProjectAIEligibility{AIAllowed: true}, nil
+	}
+	return s.aiEligibility, nil
 }
 func (s *routeService) SaveGitHubQuery(_ context.Context, _ string, _ int64, _, _, _ string, request dto.SaveQueryRequest, _ facade4datatug.GitHubQueryRepository) (*dto.SaveQueryResponse, error) {
 	s.saveCalls++
@@ -257,6 +273,27 @@ func TestHostedGitHubBranchAndCapabilityRoutesReflectCurrentAuthority(t *testing
 	httpGetGitHubProjectCapabilities(options)(w, httptest.NewRequest(http.MethodGet, "/?storage=github.com&project=repo@owner@datatug", nil))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"querySave":false`) {
 		t.Fatalf("ended write capability %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHostedGitHubCapabilitiesIncludeCurrentProjectAIEligibility(t *testing.T) {
+	stubRoutePrincipal(t)
+	options, provider, service := routeOptions(t, githubauth4datatug.RepositoryRead)
+	service.aiEligibility = facade4datatug.ProjectAIEligibility{AIAllowed: false, Reason: "plan_ended"}
+	w := httptest.NewRecorder()
+	httpGetGitHubProjectCapabilities(options)(w, httptest.NewRequest(http.MethodGet, "/v0/datatug/projects/capabilities?storage=github.com&project=repo@owner@datatug", nil))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queryRead":true`) || !strings.Contains(w.Body.String(), `"projectAI":{"aiAllowed":false,"reason":"plan_ended"}`) {
+		t.Fatalf("capabilities %d %s", w.Code, w.Body.String())
+	}
+	if provider.authorized != 1 || service.readCalls != 1 || service.aiEligibilityCalls != 1 {
+		t.Fatalf("read authorities github=%d linkage=%d entitlement=%d", provider.authorized, service.readCalls, service.aiEligibilityCalls)
+	}
+
+	service.aiEligibilityErr = facade4datatug.ErrProjectAIEligibilityUnavailable
+	w = httptest.NewRecorder()
+	httpGetGitHubProjectCapabilities(options)(w, httptest.NewRequest(http.MethodGet, "/v0/datatug/projects/capabilities?storage=github.com&project=repo@owner@datatug", nil))
+	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), `"plan_ended"`) {
+		t.Fatalf("unproved eligibility was reported as an expired plan: %d %s", w.Code, w.Body.String())
 	}
 }
 
