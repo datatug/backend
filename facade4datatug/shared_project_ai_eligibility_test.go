@@ -48,6 +48,43 @@ func TestSharedProjectAIEligibilitySeparatesSponsorFromReadOnlyActor(t *testing.
 	}
 }
 
+type aiEligibilityOwnerProofProbe struct {
+	t              *testing.T
+	actor, payer   string
+	readTx         dal.ReadTransaction
+	personalCalls  int
+	ownerReadCalls int
+}
+
+func (p *aiEligibilityOwnerProofProbe) VerifyPersonalOwner(ctx context.Context, tx dal.ReadTransaction, actor, payer string) error {
+	p.t.Helper()
+	if actor != p.actor || payer != p.payer || tx == nil {
+		p.t.Fatalf("personal sponsor proof used actor=%q payer=%q tx=%T", actor, payer, tx)
+	}
+	p.readTx = tx
+	p.personalCalls++
+	return (paidCreateAuthority{}).VerifyPersonalOwner(ctx, tx, actor, payer)
+}
+
+func (p *aiEligibilityOwnerProofProbe) ReadOwner(ctx context.Context, tx dal.ReadTransaction, mode, product, payer string) (PlanOwnerFence, error) {
+	p.t.Helper()
+	if tx == nil || tx != p.readTx || payer != p.payer {
+		p.t.Fatalf("plan owner read escaped sponsor proof transaction: tx=%T payer=%q", tx, payer)
+	}
+	p.ownerReadCalls++
+	return (paidCreateAuthority{}).ReadOwner(ctx, tx, mode, product, payer)
+}
+
+func TestSharedProjectAIEligibilityProvesAdmittedCreatorInSameReadTransaction(t *testing.T) {
+	f, _ := paidSharedProjectWithReader(t)
+	probe := &aiEligibilityOwnerProofProbe{t: t, actor: "actor", payer: "personal-1"}
+	f.service.paid.Personal, f.service.paid.Owner = probe, probe
+	eligibility, err := f.service.ReadSharedProjectAIEligibility(context.Background(), "reader", string(f.project.SpaceID), f.project.ItemRef.ItemID)
+	if err != nil || !eligibility.AIAllowed || probe.personalCalls != 1 || probe.ownerReadCalls != 1 {
+		t.Fatalf("admitted sponsor proof %+v calls=%d/%d error=%v", eligibility, probe.personalCalls, probe.ownerReadCalls, err)
+	}
+}
+
 func TestSharedProjectAIEligibilityClassifiesEndedAndUnprovedPlansSeparately(t *testing.T) {
 	f, _ := paidSharedProjectWithReader(t)
 	planKey := models4datatug.NewCurrentPlanKey("personal-1")
@@ -67,6 +104,50 @@ func TestSharedProjectAIEligibilityClassifiesEndedAndUnprovedPlansSeparately(t *
 	if !errors.Is(err, ErrPlanEffectUnproved) || eligibility.AIAllowed || eligibility.Reason == "plan_ended" {
 		t.Fatalf("unproved sponsor was conflated with plan expiry: %+v, %v", eligibility, err)
 	}
+}
+
+func TestSharedProjectAIEligibilityRejectsMalformedSponsorEvidence(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *linkagePolicyFixture)
+	}{
+		{name: "missing paid until", mutate: func(t *testing.T, f *linkagePolicyFixture) {
+			paidUpdate(t, f.db, models4datatug.NewCurrentPlanKey("personal-1"), "paidUntil", nil)
+		}},
+		{name: "unknown plan", mutate: func(t *testing.T, f *linkagePolicyFixture) {
+			paidUpdate(t, f.db, models4datatug.NewCurrentPlanKey("personal-1"), "plan", "business")
+		}},
+		{name: "unknown status", mutate: func(t *testing.T, f *linkagePolicyFixture) {
+			paidUpdate(t, f.db, models4datatug.NewCurrentPlanKey("personal-1"), "status", "paused")
+		}},
+		{name: "malformed limits", mutate: func(t *testing.T, f *linkagePolicyFixture) {
+			paidUpdate(t, f.db, models4datatug.NewCurrentPlanKey("personal-1"), "limits", nil)
+		}},
+		{name: "malformed models", mutate: func(_ *testing.T, f *linkagePolicyFixture) {
+			f.service.paid.Config.ProModels = []PlanModel{{ID: "model", Class: "unknown", Weight: 1, Default: true}}
+		}},
+		{name: "admitted owner mismatch", mutate: func(_ *testing.T, f *linkagePolicyFixture) {
+			f.service.paid.Personal = personalOwnerProofFunc(func(context.Context, dal.ReadTransaction, string, string) error {
+				return errors.New("owner mismatch")
+			})
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f, _ := paidSharedProjectWithReader(t)
+			test.mutate(t, f)
+			eligibility, err := f.service.ReadSharedProjectAIEligibility(context.Background(), "reader", string(f.project.SpaceID), f.project.ItemRef.ItemID)
+			if err == nil || eligibility.AIAllowed || eligibility.Reason == "plan_ended" {
+				t.Fatalf("malformed evidence reported as confirmed expiry: %+v, %v", eligibility, err)
+			}
+		})
+	}
+}
+
+type personalOwnerProofFunc func(context.Context, dal.ReadTransaction, string, string) error
+
+func (f personalOwnerProofFunc) VerifyPersonalOwner(ctx context.Context, tx dal.ReadTransaction, actor, payer string) error {
+	return f(ctx, tx, actor, payer)
 }
 
 func TestSharedProjectAIEligibilityRequiresCurrentLinkedReaderAndFullLocator(t *testing.T) {

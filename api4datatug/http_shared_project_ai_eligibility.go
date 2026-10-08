@@ -1,3 +1,4 @@
+// Copyright 2026 Sneat.co
 package api4datatug
 
 import (

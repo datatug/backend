@@ -115,8 +115,7 @@ func (s *SharedProjectService) projectAIEligibilityForAdmission(ctx context.Cont
 	if admission == nil {
 		return ProjectAIEligibility{}, ErrProjectAIEligibilityUnavailable
 	}
-	creator, err := options.Directory.PersonalAccount(ctx, admission.ActorID)
-	if err != nil || creator.ID != admission.PayerID || creator.Title == "" {
+	if err := options.Personal.VerifyPersonalOwner(ctx, tx, admission.ActorID, admission.PayerID); err != nil {
 		return ProjectAIEligibility{}, ErrPlanEffectUnproved
 	}
 	entitled, err := readCurrentPaidSponsorAccess(ctx, tx, options, admission.PayerID, at)
@@ -204,18 +203,21 @@ func readCurrentPaidSponsorAccess(ctx context.Context, tx dal.ReadTransaction, o
 	if !exists || plan.V != 1 {
 		return false, ErrPlanEffectUnproved
 	}
-	if plan.Plan == "free" && plan.Status == "ended" && plan.Period == "none" && !plan.Founding && plan.Limits == nil && knownPlanEndReason(plan.EndedReason) {
+	if plan.Plan == "free" && plan.Status == "ended" && plan.Period == "none" && !plan.Founding && plan.Limits == nil && plan.EndsAt == nil && (plan.PaidUntil == nil || !plan.PaidUntil.IsZero()) && plan.AIExtraQuestions == 0 && knownPlanEndReason(plan.EndedReason) {
 		return false, nil
 	}
-	if plan.Limits == nil || plan.Limits.ProtectedProjects == nil || plan.Limits.ProtectedProjectUsers == nil || *plan.Limits.ProtectedProjects != app.LastProProtectedProjects || *plan.Limits.ProtectedProjectUsers != app.LastProProtectedProjectUsers {
+	if plan.Plan != "pro" || (plan.Status != "active" && plan.Status != "trialing" && plan.Status != "past_due") || (plan.Period != "month" && plan.Period != "year") || plan.EndedReason != "" || plan.PaidUntil == nil || plan.PaidUntil.IsZero() || (plan.EndsAt != nil && plan.EndsAt.IsZero()) || plan.Limits == nil || plan.Limits.ProtectedProjects == nil || plan.Limits.ProtectedProjectUsers == nil || *plan.Limits.ProtectedProjects != app.LastProProtectedProjects || *plan.Limits.ProtectedProjectUsers != app.LastProProtectedProjectUsers {
 		return false, ErrPlanEffectUnproved
-	}
-	if plan.Plan != "pro" || !effectiveProForPurchase(plan, o.Config, at) || plan.PaidUntil == nil || !at.Before(*plan.PaidUntil) {
-		return false, nil
 	}
 	limits, err := resolvedProLimits(*plan.Limits, o.Config.ProLimits)
 	if err != nil || limits.ProtectedProjects == nil || limits.ProtectedProjectUsers == nil || validateLimits(limits) != nil || validateModels(o.Config.ProModels, limits) != nil || plan.AIExtraQuestions < 0 || limits.AIQuestions > math.MaxInt64-plan.AIExtraQuestions {
 		return false, ErrPlanEffectUnproved
+	}
+	// Expiry is a confirmed denial only after the sponsor's current Pro record,
+	// paid-through timestamp, source grants and configured AI model contract all
+	// validate. Malformed or unknown records above remain unproved.
+	if !at.Before(*plan.PaidUntil) || (plan.EndsAt != nil && !at.Before(*plan.EndsAt)) {
+		return false, nil
 	}
 	return true, nil
 }
