@@ -3,6 +3,7 @@ package api4datatug
 import (
 	"net/http"
 
+	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/datatug/datatug-core/pkg/dto"
@@ -40,7 +41,15 @@ func httpGetGitHubProjectCapabilities(options GitHubProjectRouteOptions) http.Ha
 			githubReadError(w, err)
 			return
 		}
-		result := dto.ProjectCapabilities{QueryRead: true, Branches: true}
+		projectAI, err := options.service().ReadGitHubProjectAIEligibility(ctx, actorID, selected.ID, owner, repo, folder)
+		if err != nil {
+			githubReadError(w, err)
+			return
+		}
+		result := struct {
+			dto.ProjectCapabilities
+			ProjectAI facade4datatug.ProjectAIEligibility `json:"projectAI"`
+		}{ProjectCapabilities: dto.ProjectCapabilities{QueryRead: true, Branches: true}, ProjectAI: projectAI}
 		if client.Scope().Permission == githubauth4datatug.RepositoryWrite {
 			_, err = options.service().AuthorizeGitHubProjectWrite(ctx, actorID, selected.ID, owner, repo, folder)
 			result.QuerySave = err == nil

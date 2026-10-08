@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
@@ -257,6 +258,19 @@ func TestGitHubProjectReadRequiresReadyLocatorAndCurrentLinkedContact(t *testing
 	access, err := service.ResolveGitHubProject(context.Background(), "actor", 123, "owner", "repo", "datatug")
 	if err != nil || access.SharedProjectID != result.SharedProjectID || access.SpaceID != "space" {
 		t.Fatalf("owner read %+v: %v", access, err)
+	}
+	ai, err := service.ReadGitHubProjectAIEligibility(context.Background(), "actor", 123, "owner", "repo", "datatug")
+	if err != nil || !ai.AIAllowed || ai.Reason != "" {
+		t.Fatalf("registered active GitHub project AI %+v: %v", ai, err)
+	}
+	if _, err := service.ReadGitHubProjectAIEligibility(context.Background(), "actor", 124, "owner", "repo", "datatug"); !errors.Is(err, ErrSharedProjectUnauthorized) {
+		t.Fatalf("unrelated immutable repo AI eligibility accepted: %v", err)
+	}
+	paidUpdate(t, db, models4datatug.NewCurrentPlanKey("personal-1"), "paidUntil", sharedTestTime)
+	service.now = func() time.Time { return sharedTestTime }
+	ai, err = service.ReadGitHubProjectAIEligibility(context.Background(), "actor", 123, "owner", "repo", "datatug")
+	if err != nil || ai.AIAllowed || ai.Reason != "plan_ended" {
+		t.Fatalf("GitHub project AI ignored paid-through boundary: %+v, %v", ai, err)
 	}
 	if _, err := service.ResolveGitHubProject(context.Background(), "actor", 124, "owner", "repo", "datatug"); !errors.Is(err, ErrGitHubProjectNotRegistered) {
 		t.Fatalf("unrelated immutable repo accepted: %v", err)

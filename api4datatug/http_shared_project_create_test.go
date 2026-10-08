@@ -119,7 +119,7 @@ func TestSharedProjectHTTPDisabledAndAuthenticationFailure(t *testing.T) {
 func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	routes := map[string]http.HandlerFunc{}
 	RegisterHttpRoutesWithOptions(func(method, path string, h http.HandlerFunc) { routes[method+" "+path] = h }, fakeIDs{}, RouteOptions{})
-	if len(routes) != 13 {
+	if len(routes) != 14 {
 		t.Fatalf("routes %+v", routes)
 	}
 	h := routes["POST /v0/datatug/projects/create_shared_project"]
@@ -128,6 +128,15 @@ func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	}
 	if w := postShared(h, `{}`); w.Code != http.StatusServiceUnavailable {
 		t.Fatal(w.Code)
+	}
+	if eligibility := routes["GET /v0/datatug/projects/ai_eligibility"]; eligibility == nil {
+		t.Fatal("missing shared-project AI eligibility route")
+	} else {
+		w := httptest.NewRecorder()
+		eligibility(w, httptest.NewRequest(http.MethodGet, "/v0/datatug/projects/ai_eligibility?storage=firestore&spaceID=space&project=project", nil))
+		if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("unconfigured AI eligibility status=%d headers=%v", w.Code, w.Header())
+		}
 	}
 	if routes["POST /v0/datatug/github/authorization/start"] == nil || routes["POST /v0/datatug/github/authorization/complete"] == nil || routes["GET /v0/datatug/github/repositories"] == nil {
 		t.Fatalf("missing additive GitHub authorization routes: %+v", routes)
