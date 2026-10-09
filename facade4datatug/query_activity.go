@@ -96,6 +96,7 @@ func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceI
 		if err != nil {
 			return err
 		}
+		persistedBinding := canonicalActivityBinding(binding)
 		contextID := models4datatug.NewQueryActivityContextID(actorID, projectID, binding.Period)
 		contextRecord, activityContext := models4datatug.NewQueryActivityContextRecord(spaceID, contextID)
 		if err := tx.Get(txCtx, contextRecord); err != nil && !record.IsNotFound(err) {
@@ -113,24 +114,24 @@ func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceI
 		if !contextRecord.Exists() {
 			*activityContext = models4datatug.QueryActivityContext{
 				Version: 1, ContextID: contextID, ActorID: actorID, SpaceID: spaceID, ProjectID: projectID,
-				Period: binding.Period, PeriodStartUTC: binding.PeriodStartUTC, PeriodEndUTC: binding.PeriodEndUTC, PaidUntilUTC: binding.PaidUntilUTC,
-				BindingDigest:      models4datatug.QueryActivityBindingDigest(actorID, spaceID, projectID, binding.Period, binding.PeriodStartUTC, binding.PeriodEndUTC, binding.PaidUntilUTC, binding.PaidBindingProofID, binding.QueryUseProofID),
+				Period: persistedBinding.Period, PeriodStartUTC: persistedBinding.PeriodStartUTC, PeriodEndUTC: persistedBinding.PeriodEndUTC, PaidUntilUTC: persistedBinding.PaidUntilUTC,
+				BindingDigest:      queryActivityBindingDigest(actorID, spaceID, projectID, persistedBinding),
 				PaidBindingProofID: binding.PaidBindingProofID, QueryUseProofID: binding.QueryUseProofID,
-				IssuedAtUTC: at, ExpiresAtUTC: earlierActivityTime(binding.PeriodEndUTC, binding.PaidUntilUTC),
+				IssuedAtUTC: models4datatug.CanonicalQueryActivityTime(at), ExpiresAtUTC: earlierActivityTime(persistedBinding.PeriodEndUTC, persistedBinding.PaidUntilUTC),
 			}
 			if err := activityContext.Validate(); err != nil {
 				return ErrQueryActivityUnavailable
 			}
 		} else if activityContext.Validate() != nil || activityContext.ActorID != actorID || activityContext.SpaceID != spaceID ||
 			activityContext.ProjectID != projectID || activityContext.Period != binding.Period ||
-			activityContext.PeriodStartUTC != binding.PeriodStartUTC || activityContext.PeriodEndUTC != binding.PeriodEndUTC {
+			activityContext.PeriodStartUTC != persistedBinding.PeriodStartUTC || activityContext.PeriodEndUTC != persistedBinding.PeriodEndUTC {
 			return ErrQueryActivityConflict
 		} else {
-			activityContext.BindingDigest = models4datatug.QueryActivityBindingDigest(actorID, spaceID, projectID, binding.Period, binding.PeriodStartUTC, binding.PeriodEndUTC, binding.PaidUntilUTC, binding.PaidBindingProofID, binding.QueryUseProofID)
+			activityContext.BindingDigest = queryActivityBindingDigest(actorID, spaceID, projectID, persistedBinding)
 			activityContext.PaidBindingProofID = binding.PaidBindingProofID
 			activityContext.QueryUseProofID = binding.QueryUseProofID
-			activityContext.PaidUntilUTC = binding.PaidUntilUTC
-			activityContext.ExpiresAtUTC = earlierActivityTime(binding.PeriodEndUTC, binding.PaidUntilUTC)
+			activityContext.PaidUntilUTC = persistedBinding.PaidUntilUTC
+			activityContext.ExpiresAtUTC = earlierActivityTime(persistedBinding.PeriodEndUTC, persistedBinding.PaidUntilUTC)
 			if activityContext.Validate() != nil {
 				return ErrQueryActivityConflict
 			}
@@ -139,14 +140,15 @@ func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceI
 		if err != nil || !at.Before(activityContext.ExpiresAtUTC) {
 			return ErrQueryActivityUnauthorized
 		}
+		persistedAt := models4datatug.CanonicalQueryActivityTime(at)
 		if !contextRecord.Exists() {
-			activityContext.IssuedAtUTC = at
+			activityContext.IssuedAtUTC = persistedAt
 			if activityContext.Validate() != nil {
 				return ErrQueryActivityUnavailable
 			}
 		}
-		if quota.ContextsInWindow == 0 || at.Sub(quota.ContextWindowStartUTC) >= time.Minute || at.Before(quota.ContextWindowStartUTC) {
-			quota.ContextWindowStartUTC, quota.ContextsInWindow = at, 0
+		if quota.ContextsInWindow == 0 || persistedAt.Sub(quota.ContextWindowStartUTC) >= time.Minute || persistedAt.Before(quota.ContextWindowStartUTC) {
+			quota.ContextWindowStartUTC, quota.ContextsInWindow = persistedAt, 0
 		}
 		if quota.ContextsInWindow >= models4datatug.QueryActivityMaxContextsPerMinute {
 			return ErrQueryActivityRateLimited
@@ -209,9 +211,10 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 		if err != nil || !at.Before(activityContext.ExpiresAtUTC) {
 			return ErrQueryActivityUnauthorized
 		}
-		if binding.Period != activityContext.Period || binding.PeriodStartUTC != activityContext.PeriodStartUTC || binding.PeriodEndUTC != activityContext.PeriodEndUTC || binding.PaidUntilUTC != activityContext.PaidUntilUTC ||
+		persistedBinding := canonicalActivityBinding(binding)
+		if binding.Period != activityContext.Period || persistedBinding.PeriodStartUTC != activityContext.PeriodStartUTC || persistedBinding.PeriodEndUTC != activityContext.PeriodEndUTC || persistedBinding.PaidUntilUTC != activityContext.PaidUntilUTC ||
 			binding.PaidBindingProofID != activityContext.PaidBindingProofID || binding.QueryUseProofID != activityContext.QueryUseProofID ||
-			models4datatug.QueryActivityBindingDigest(actorID, activityContext.SpaceID, activityContext.ProjectID, binding.Period, binding.PeriodStartUTC, binding.PeriodEndUTC, binding.PaidUntilUTC, binding.PaidBindingProofID, binding.QueryUseProofID) != activityContext.BindingDigest {
+			queryActivityBindingDigest(actorID, activityContext.SpaceID, activityContext.ProjectID, persistedBinding) != activityContext.BindingDigest {
 			return ErrQueryActivityUnauthorized
 		}
 		receiptRecord, receipt := models4datatug.NewQueryActivityReceiptRecord(actorID, binding.Period)
@@ -229,8 +232,9 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 		if err != nil || !at.Before(activityContext.ExpiresAtUTC) {
 			return ErrQueryActivityUnauthorized
 		}
-		if quota.ReportsInWindow == 0 || at.Sub(quota.ReportWindowStartUTC) >= time.Minute || at.Before(quota.ReportWindowStartUTC) {
-			quota.ReportWindowStartUTC, quota.ReportsInWindow = at, 0
+		persistedAt := models4datatug.CanonicalQueryActivityTime(at)
+		if quota.ReportsInWindow == 0 || persistedAt.Sub(quota.ReportWindowStartUTC) >= time.Minute || persistedAt.Before(quota.ReportWindowStartUTC) {
+			quota.ReportWindowStartUTC, quota.ReportsInWindow = persistedAt, 0
 		}
 		if quota.ReportsInWindow >= models4datatug.QueryActivityMaxReportsPerMinute {
 			return ErrQueryActivityRateLimited
@@ -244,7 +248,8 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 			if receipt.OperationID == report.OperationID && (receipt.ContextID != report.ContextID || receipt.Kind != report.Kind) {
 				return ErrQueryActivityConflict
 			}
-			result = QueryActivityReportResult{Accepted: receipt.OperationID == report.OperationID && receipt.ContextID == report.ContextID && receipt.Kind == report.Kind, Coalesced: !(receipt.OperationID == report.OperationID && receipt.ContextID == report.ContextID && receipt.Kind == report.Kind), ReceiptID: receipt.ReceiptID}
+			accepted := receipt.OperationID == report.OperationID && receipt.ContextID == report.ContextID && receipt.Kind == report.Kind
+			result = QueryActivityReportResult{Accepted: accepted, Coalesced: !accepted, ReceiptID: receipt.ReceiptID}
 			if err := quota.Validate(); err != nil {
 				return ErrQueryActivityUnavailable
 			}
@@ -256,15 +261,15 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 		structural := models4datatug.QueryActivityReceipt{
 			Version: 1, ContextID: report.ContextID, OperationID: report.OperationID, Kind: report.Kind,
 			ActorID: actorID, SpaceID: activityContext.SpaceID, ProjectID: activityContext.ProjectID, Period: binding.Period,
-			PeriodStartUTC: binding.PeriodStartUTC, PeriodEndUTC: binding.PeriodEndUTC, PaidUntilUTC: binding.PaidUntilUTC,
+			PeriodStartUTC: persistedBinding.PeriodStartUTC, PeriodEndUTC: persistedBinding.PeriodEndUTC, PaidUntilUTC: persistedBinding.PaidUntilUTC,
 			BindingDigest: activityContext.BindingDigest, PaidBindingProofID: activityContext.PaidBindingProofID,
-			QueryUseProofID: activityContext.QueryUseProofID, AcceptedAtUTC: at,
+			QueryUseProofID: activityContext.QueryUseProofID, AcceptedAtUTC: persistedAt,
 		}
 		structural.ReceiptID = models4datatug.NewQueryActivityReceiptID(actorID, binding.Period)
 		structural.Activity = contract4paymentus.UsageActivity{
 			Ref: binding.Period, SourceID: models4datatug.QueryActivitySourceID,
 			EventID: models4datatug.NewQueryActivityEventID(report.ContextID, report.OperationID),
-			UserID:  actorID, OccurredAtUTC: at,
+			UserID:  actorID, OccurredAtUTC: persistedAt,
 		}
 		structural.StructuralDigest = models4datatug.QueryActivityStructuralDigest(structural)
 		structural.Activity.EvidenceDigest = structural.StructuralDigest
@@ -275,7 +280,7 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 		pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord(activityContext.SpaceID, structural.ReceiptID)
 		*pending = models4datatug.QueryActivityPending{
 			Version: 1, ReceiptID: structural.ReceiptID, SpaceID: activityContext.SpaceID, Period: binding.Period,
-			Activity: structural.Activity, DeliveryState: models4datatug.QueryActivityPendingStatePending, UpdatedAtUTC: at,
+			Activity: structural.Activity, DeliveryState: models4datatug.QueryActivityPendingStatePending, UpdatedAtUTC: persistedAt,
 		}
 		if pending.Validate() != nil {
 			return ErrQueryActivityUnavailable
@@ -334,7 +339,7 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 			return ErrQueryActivityUnavailable
 		}
 		stored.Attempts++
-		stored.UpdatedAtUTC = s.now().UTC()
+		stored.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
 		if !validQueryActivityTime(stored.UpdatedAtUTC) {
 			return ErrQueryActivityUnavailable
 		}
@@ -366,7 +371,7 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 			return nil
 		}
 		stored.DeliveryState = models4datatug.QueryActivityPendingStateDelivered
-		stored.UpdatedAtUTC = s.now().UTC()
+		stored.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
 		if !validQueryActivityTime(stored.UpdatedAtUTC) {
 			return ErrQueryActivityUnavailable
 		}
@@ -403,6 +408,17 @@ func validQueryActivityID(value string) bool {
 }
 func validQueryActivityTime(value time.Time) bool {
 	return !value.IsZero() && value.Location() == time.UTC && value.Year() >= 1 && value.Year() <= 9999
+}
+
+func canonicalActivityBinding(binding BusinessActivityBinding) BusinessActivityBinding {
+	binding.PeriodStartUTC = models4datatug.CanonicalQueryActivityTime(binding.PeriodStartUTC)
+	binding.PeriodEndUTC = models4datatug.CanonicalQueryActivityTime(binding.PeriodEndUTC)
+	binding.PaidUntilUTC = models4datatug.CanonicalQueryActivityTime(binding.PaidUntilUTC)
+	return binding
+}
+
+func queryActivityBindingDigest(actorID, spaceID, projectID string, binding BusinessActivityBinding) string {
+	return models4datatug.QueryActivityBindingDigest(actorID, spaceID, projectID, binding.Period, binding.PeriodStartUTC, binding.PeriodEndUTC, binding.PaidUntilUTC, binding.PaidBindingProofID, binding.QueryUseProofID)
 }
 
 func earlierActivityTime(a, b time.Time) time.Time {

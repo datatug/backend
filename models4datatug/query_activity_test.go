@@ -74,6 +74,26 @@ func TestQueryActivityReceiptRejectsTamperAndUntrustedTime(t *testing.T) {
 	}
 }
 
+func TestQueryActivityDurableTimesUseMicrosecondPrecision(t *testing.T) {
+	nanosecond := time.Date(2026, 10, 9, 12, 0, 0, 123456789, time.UTC)
+	canonical := time.Date(2026, 10, 9, 12, 0, 0, 123456000, time.UTC)
+	if got := CanonicalQueryActivityTime(nanosecond); !got.Equal(canonical) || got.Nanosecond() != 123456000 {
+		t.Fatalf("canonical durable time = %s, want %s", got, canonical)
+	}
+	period := validQueryActivityReceipt().Period
+	first := QueryActivityBindingDigest("actor-a", "space-a", "project-a", period, nanosecond, nanosecond.Add(time.Hour), nanosecond.Add(2*time.Hour), "paid-proof-a", "query-proof-a")
+	second := QueryActivityBindingDigest("actor-a", "space-a", "project-a", period, canonical, canonical.Add(time.Hour), canonical.Add(2*time.Hour), "paid-proof-a", "query-proof-a")
+	if first != second {
+		t.Fatalf("binding digest varies below durable precision: %s != %s", first, second)
+	}
+	receipt := validQueryActivityReceipt()
+	receipt.AcceptedAtUTC = nanosecond
+	receipt.Activity.OccurredAtUTC = nanosecond
+	if err := receipt.Validate(); err == nil {
+		t.Fatal("receipt with a noncanonical durable timestamp validated")
+	}
+}
+
 func TestQueryActivityContextAndQuotaBounds(t *testing.T) {
 	period := validQueryActivityReceipt().Period
 	at := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)

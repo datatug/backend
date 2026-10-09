@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/dal-go/dalgo/dal"
+	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 )
@@ -37,7 +38,10 @@ func (QueryActivityUsageAuthority) VerifyUsage(ctx context.Context, tx dal.ReadT
 	}
 	receiptRecord, receipt := models4datatug.NewQueryActivityReceiptRecord(activity.UserID, activity.Ref)
 	if err := tx.Get(ctx, receiptRecord); err != nil {
-		return contract4paymentus.ErrUsageAuthority
+		if record.IsNotFound(err) {
+			return contract4paymentus.ErrUsageAuthority
+		}
+		return err
 	}
 	if receipt.Validate() != nil || receipt.Activity != activity || receipt.Period != operation.Period.Ref ||
 		receipt.PeriodStartUTC != operation.Period.StartUTC || receipt.PeriodEndUTC != operation.Period.EndUTC {

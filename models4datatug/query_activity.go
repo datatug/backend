@@ -212,15 +212,18 @@ func QueryActivityStructuralDigest(r QueryActivityReceipt) string {
 	return activityDigest("query-activity-evidence/1", r.ContextID, r.OperationID, string(r.Kind), r.ActorID,
 		r.SpaceID, r.ProjectID, r.Period.Scope.SpaceID, string(r.Period.Scope.Mode), r.Period.Scope.ProductID,
 		r.Period.Scope.PayerID, r.Period.Scope.ServiceID, r.Period.PeriodID, r.BindingDigest,
-		r.PaidBindingProofID, r.QueryUseProofID, r.PeriodStartUTC.Format(time.RFC3339Nano),
-		r.PeriodEndUTC.Format(time.RFC3339Nano), r.PaidUntilUTC.Format(time.RFC3339Nano),
-		r.AcceptedAtUTC.Format(time.RFC3339Nano), r.Activity.EventID)
+		r.PaidBindingProofID, r.QueryUseProofID, CanonicalQueryActivityTime(r.PeriodStartUTC).Format(time.RFC3339Nano),
+		CanonicalQueryActivityTime(r.PeriodEndUTC).Format(time.RFC3339Nano), CanonicalQueryActivityTime(r.PaidUntilUTC).Format(time.RFC3339Nano),
+		CanonicalQueryActivityTime(r.AcceptedAtUTC).Format(time.RFC3339Nano), r.Activity.EventID)
 }
 
 // QueryActivityBindingDigest freezes the canonical paid and query-use binding
 // that authorized the first accepted report. It deliberately excludes later
 // mutable authority revisions while retaining the original period fence.
 func QueryActivityBindingDigest(actorID, spaceID, projectID string, period contract4paymentus.UsagePeriodRef, startUTC, endUTC, paidUntilUTC time.Time, paidProofID, queryUseProofID string) string {
+	startUTC = CanonicalQueryActivityTime(startUTC)
+	endUTC = CanonicalQueryActivityTime(endUTC)
+	paidUntilUTC = CanonicalQueryActivityTime(paidUntilUTC)
 	values := struct {
 		Version                             int
 		ActorID, SpaceID, ProjectID         string
@@ -231,6 +234,13 @@ func QueryActivityBindingDigest(actorID, spaceID, projectID string, period contr
 	encoded, _ := json.Marshal(values)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])
+}
+
+// CanonicalQueryActivityTime truncates to Firestore's durable microsecond
+// timestamp precision. Callers must check raw server time against raw paid
+// boundaries before using this value for any persisted time or digest.
+func CanonicalQueryActivityTime(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Microsecond)
 }
 
 func periodKeyValues(period contract4paymentus.UsagePeriodRef) []string {
@@ -250,7 +260,9 @@ func validActivityPeriod(p contract4paymentus.UsagePeriodRef, spaceID string) bo
 		validActivityID(s.ServiceID) && validActivityID(p.PeriodID)
 }
 
-func validActivityUTC(t time.Time) bool { return !t.IsZero() && t.Location() == time.UTC }
+func validActivityUTC(t time.Time) bool {
+	return !t.IsZero() && t.Location() == time.UTC && t.Equal(CanonicalQueryActivityTime(t))
+}
 func validActivityDigest(value string) bool {
 	if len(value) != 64 || strings.ToLower(value) != value {
 		return false
