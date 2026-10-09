@@ -35,6 +35,7 @@ func registerBaseRoutes(handle extension.HTTPHandleFunc, ids facade4datatug.IDGe
 type RouteOptions struct {
 	Plan                PlanRouteOptions
 	SharedProjects      SharedProjectRouteOptions
+	QueryActivity       QueryActivityRouteOptions
 	GitHubAuthorization GitHubAuthorizationRouteOptions
 	GitHubProjects      GitHubProjectRouteOptions
 }
@@ -44,6 +45,8 @@ type RouteOptions struct {
 // effects. Binding this route requires independently reviewed host composition.
 func RegisterHttpRoutesWithOptions(handle extension.HTTPHandleFunc, ids facade4datatug.IDGenerator, options RouteOptions) {
 	registerBaseRoutes(handle, ids, options.Plan, options.GitHubProjects)
+	handle(http.MethodGet, "/v0/datatug/projects/query_activity_context", httpGetQueryActivityContext(options.QueryActivity))
+	handle(http.MethodPost, "/v0/datatug/projects/query_activity_report", httpPostQueryActivityReport(options.QueryActivity))
 	handle(http.MethodPost, "/v0/datatug/projects/create_shared_project", httpPostCreateSharedProject(options.SharedProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/ai_eligibility", httpGetSharedProjectAIEligibility(options.SharedProjects))
 	handle(http.MethodGet, "/v0/datatug/projects/branches", httpGetGitHubProjectBranches(options.GitHubProjects))

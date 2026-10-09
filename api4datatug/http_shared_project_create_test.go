@@ -119,8 +119,23 @@ func TestSharedProjectHTTPDisabledAndAuthenticationFailure(t *testing.T) {
 func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 	routes := map[string]http.HandlerFunc{}
 	RegisterHttpRoutesWithOptions(func(method, path string, h http.HandlerFunc) { routes[method+" "+path] = h }, fakeIDs{}, RouteOptions{})
-	if len(routes) != 15 {
+	if len(routes) != 17 {
 		t.Fatalf("routes %+v", routes)
+	}
+	for _, route := range []string{"GET /v0/datatug/projects/query_activity_context", "POST /v0/datatug/projects/query_activity_report"} {
+		if h := routes[route]; h == nil {
+			t.Fatalf("missing opt-in route %s", route)
+		} else if w := httptest.NewRecorder(); route[:3] == "GET" {
+			h(w, httptest.NewRequest(http.MethodGet, "/v0/datatug/projects/query_activity_context", nil))
+			if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("unconfigured activity handler status=%d headers=%v", w.Code, w.Header())
+			}
+		} else {
+			h(w, httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/query_activity_report", strings.NewReader(`{}`)))
+			if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("unconfigured activity handler status=%d headers=%v", w.Code, w.Header())
+			}
+		}
 	}
 	h := routes["POST /v0/datatug/projects/create_shared_project"]
 	if h == nil {
