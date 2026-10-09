@@ -34,7 +34,7 @@ type QueryMutationPreview struct {
 	Response dto.SaveQueryResponse
 }
 
-// PreviewQueryMutation runs the published Core v0.44.0 revisioned query store
+// PreviewQueryMutation runs the published Core revisioned query store
 // in a fresh private scratch directory. The returned changes are the exact
 // metadata/body files to send together in one Git commit at an expected head.
 // All temp data is removed on every result, including conflicts and faults.
@@ -75,7 +75,7 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 		}
 		for field := range raw {
 			switch field {
-			case "id", "title", "type", "draft", "federation":
+			case "id", "title", "type", "draft", "connectionId", "federation":
 			default:
 				return nil, fmt.Errorf("%w: %s", ErrUnsupportedExistingQuery, field)
 			}

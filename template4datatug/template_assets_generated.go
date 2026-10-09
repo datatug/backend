@@ -2,11 +2,11 @@
 package template4datatug
 
 const (
-	DemoProjectCommit = "d32475de887f65fc18276fae2c8c7a6af5b3fcf6"
+	DemoProjectCommit = "436350d41371103be11144ffa346c605f85e1342"
 	// DemoProjectFileCount is the exact number of regular files in this pinned template.
 	DemoProjectFileCount = 637
-	archiveSHA256        = "e14fb481f7bb18ad87b973c600c1cf0cfb5d367a45352c3cabc2fe7bd8f7de56"
-	manifestSHA256       = "1bfc3616ff939366aceccf079918819f4f69b556ae15ba77958a596520a45cc3"
+	archiveSHA256        = "acb6ee2767a4e5ca62596d2212d7fbba5515a74edaad47c72e60df9cfe6a0c23"
+	manifestSHA256       = "c9bb528ca9088e684defdb7a5162d0fa9e17fe6480bb1afb0395d05a798616ae"
 	maxTemplateFiles     = DemoProjectFileCount
-	maxTemplateBytes     = 284267
+	maxTemplateBytes     = 284565
 )

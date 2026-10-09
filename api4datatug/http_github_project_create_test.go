@@ -9,7 +9,7 @@ import (
 )
 
 func TestGitHubCreateRequestRefusesUnknownNestedFields(t *testing.T) {
-	valid := `{"title":"Queries","spaceID":"space","operationId":"op","github":{"repositoryID":123,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"d32475de887f65fc18276fae2c8c7a6af5b3fcf6"}}`
+	valid := `{"title":"Queries","spaceID":"space","operationId":"op","github":{"repositoryID":123,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"436350d41371103be11144ffa346c605f85e1342"}}`
 	for _, body := range []string{
 		strings.Replace(valid, `"folder":"datatug"`, `"folder":"datatug","accessToken":"secret"`, 1),
 		strings.Replace(valid, `"title":"Queries"`, `"title":"Queries","unknownMetadata":{"bounds":[1,2]}`, 1),

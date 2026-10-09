@@ -23,7 +23,7 @@ from pathlib import Path
 
 SOURCE = "datatug/datatug-demo-project"
 TEMPLATE_ID = "demo-project-1"
-SOURCE_COMMIT = "d32475de887f65fc18276fae2c8c7a6af5b3fcf6"
+SOURCE_COMMIT = "436350d41371103be11144ffa346c605f85e1342"
 MAX_TEMPLATE_FILE = 1 << 20
 
 

@@ -14,7 +14,7 @@ func TestGitHubSnapshotHeaderIsReadableByBrowserAndRoutesFailClosed(t *testing.T
 	if response.StatusCode != http.StatusOK || response.Header.Get("X-Datatug-Branch-Head") != "abc123" || !strings.Contains(response.Header.Get("Access-Control-Expose-Headers"), "X-Datatug-Branch-Head") || !strings.Contains(w.Body.String(), `"id":"project"`) {
 		t.Fatalf("response status=%d header=%v body=%s", response.StatusCode, response.Header, w.Body.String())
 	}
-	for _, handler := range []http.HandlerFunc{httpGetGitHubProjectSummary(GitHubProjectRouteOptions{}), httpGetGitHubAllQueries(GitHubProjectRouteOptions{}), httpGetGitHubQueryRevision(GitHubProjectRouteOptions{})} {
+	for _, handler := range []http.HandlerFunc{httpGetGitHubProjectSummary(GitHubProjectRouteOptions{}), httpGetGitHubConnectionCatalog(GitHubProjectRouteOptions{}), httpGetGitHubAllQueries(GitHubProjectRouteOptions{}), httpGetGitHubQueryRevision(GitHubProjectRouteOptions{})} {
 		w = httptest.NewRecorder()
 		handler(w, httptest.NewRequest(http.MethodGet, "/?storage=github.com&project=repo@owner@datatug&branch=work", nil))
 		if w.Code != http.StatusServiceUnavailable || w.Header().Get("Cache-Control") != "no-store" {

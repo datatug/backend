@@ -8,6 +8,7 @@ import (
 
 	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
+	"github.com/datatug/datatug-core/pkg/datatug"
 	"github.com/datatug/datatug-core/pkg/dto"
 )
 
@@ -70,6 +71,11 @@ func (r *queryRepository) PrepareQuerySave(ctx context.Context, folder, projectI
 		return nil, ErrInvalidProjectSnapshot
 	}
 	query := request.Query
+	if query.ConnectionID != "" {
+		if err := validateBrowserSqliteConnection(ctx, snapshot, query.QueryDef); err != nil {
+			return nil, err
+		}
+	}
 	queryFolder := query.FolderPath
 	if queryFolder == "~" {
 		queryFolder = ""
@@ -104,6 +110,51 @@ func (r *queryRepository) PrepareQuerySave(ctx context.Context, folder, projectI
 		plan.Changes = append(plan.Changes, facade4datatug.GitHubQueryFileChange{Path: folder + "/" + change.Path, Content: append([]byte(nil), change.Content...), Delete: change.Delete})
 	}
 	return plan, nil
+}
+
+func validateBrowserSqliteConnection(ctx context.Context, snapshot *ProjectSnapshot, query datatug.QueryDef) error {
+	if query.Type != "SQL" || query.Federation != nil || len(query.Parameters) != 0 || query.ConnectionID != "chinook-sqlite" {
+		return facade4datatug.ErrGitHubQueryInvalid
+	}
+	content, err := snapshot.ReadFile(ctx, "connections/demo-db.json")
+	if err != nil || len(content) > 256<<10 {
+		return facade4datatug.ErrGitHubQueryInvalid
+	}
+	var catalog struct {
+		Format      string `json:"format"`
+		Connections []struct {
+			ID             string `json:"id"`
+			Dataset        string `json:"dataset"`
+			Storage        string `json:"storage"`
+			Readiness      string `json:"readiness"`
+			Source         string `json:"source"`
+			FixtureSHA256  string `json:"fixtureSha256"`
+			BrowserFixture struct {
+				URL   string `json:"url"`
+				Bytes int64  `json:"bytes"`
+			} `json:"browserFixture"`
+		} `json:"connections"`
+	}
+	if json.Unmarshal(content, &catalog) != nil || catalog.Format != datatug.ConnectionCatalogFormat {
+		return facade4datatug.ErrGitHubQueryInvalid
+	}
+	count := 0
+	for _, connection := range catalog.Connections {
+		if connection.ID != query.ConnectionID {
+			continue
+		}
+		count++
+		if connection.Dataset != "chinook" || connection.Storage != "sqlite" || connection.Readiness != "public-api" ||
+			connection.Source != "https://demodb.dev/ovdb/v1/databases/chinook" ||
+			connection.FixtureSHA256 != "7651ba378ac2fcd0dfc3c66fb101f7a7eed3ba39a612ec642b96e20702061f15" ||
+			connection.BrowserFixture.URL != "https://chinook.demodb.dev/data/chinook.sqlite" || connection.BrowserFixture.Bytes != 1007616 {
+			return facade4datatug.ErrGitHubQueryInvalid
+		}
+	}
+	if count != 1 {
+		return facade4datatug.ErrGitHubQueryInvalid
+	}
+	return nil
 }
 
 func (r *queryRepository) CreateQueryCommit(ctx context.Context, branch, expectedHead, message string, plan *facade4datatug.GitHubQuerySavePlan) (string, error) {

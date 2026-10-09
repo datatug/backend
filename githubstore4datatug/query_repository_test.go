@@ -101,6 +101,41 @@ func TestQueryRepositoryRejectsStaleBaseAndLossyLegacyDefinition(t *testing.T) {
 	}
 }
 
+func TestQueryRepositoryRequiresPinnedProjectConnectionForBrowserSQL(t *testing.T) {
+	request := queryRequest()
+	request.Query.ID, request.Query.Title = "genre-mix", "Genre mix"
+	request.Query.Type, request.Query.Text = "SQL", "SELECT 1"
+	request.Query.Federation = nil
+	request.Query.ConnectionID = "chinook-sqlite"
+	request.ExpectedBranchHead = createCommittedHead
+	baseCatalog := `{"format":"datatug-demo-connections/v1","connections":[{"id":"chinook-sqlite","dataset":"chinook","storage":"sqlite","readiness":"public-api","source":"https://demodb.dev/ovdb/v1/databases/chinook","fixtureSha256":"7651ba378ac2fcd0dfc3c66fb101f7a7eed3ba39a612ec642b96e20702061f15","browserFixture":{"url":"https://chinook.demodb.dev/data/chinook.sqlite","bytes":1007616}}]}`
+	for _, tc := range []struct {
+		name, catalog string
+		wantOK        bool
+	}{
+		{"pinned source", baseCatalog, true},
+		{"different fixture", strings.Replace(baseCatalog, `"bytes":1007616`, `"bytes":12`, 1), false},
+		{"different URL", strings.Replace(baseCatalog, `chinook.demodb.dev`, `private.example`, 1), false},
+		{"missing connection", `{"format":"datatug-demo-connections/v1","connections":[]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &queryFake{snapshotFake: newSnapshotFake(t)}
+			content := []byte(tc.catalog)
+			oid := testGitBlobOID(content)
+			fake.files[oid] = content
+			for i := range fake.tree {
+				if fake.tree[i].Path == "demo-project-1/connections/demo-db.json" {
+					fake.tree[i].OID, fake.tree[i].Size = oid, int64(len(content))
+				}
+			}
+			_, err := (&queryRepository{client: fake}).PrepareQuerySave(context.Background(), "demo-project-1", "datatug-demo-project", "work", request)
+			if tc.wantOK && err != nil || !tc.wantOK && !errors.Is(err, facade4datatug.ErrGitHubQueryInvalid) {
+				t.Fatalf("save validation error=%v", err)
+			}
+		})
+	}
+}
+
 func TestQueryRepositoryReportsOnlyVerifiedProviderCommit(t *testing.T) {
 	request := queryRequest()
 	request.Query.ID, request.Query.Title = "customers", "Customers"

@@ -62,6 +62,7 @@ func TestPreviewQueryMutationCreatesCompletePairAndDeletesOldBody(t *testing.T) 
 	request := queryRequest()
 	request.Query.ID = "customers"
 	request.Query.Title = "Customers"
+	request.Query.ConnectionID = "chinook-sqlite"
 	created, err := PreviewQueryMutation(context.Background(), request, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +74,7 @@ func TestPreviewQueryMutationCreatesCompletePairAndDeletesOldBody(t *testing.T) 
 	for _, change := range created.Changes {
 		snapshot[change.Path] = change.Content
 	}
-	if !strings.Contains(string(snapshot["queries/customers.query.json"]), `"ovdbBaseUrl"`) || strings.Contains(string(snapshot["queries/customers.query.json"]), "SELECT CustomerId") || string(snapshot["queries/customers.query.dtql"]) != request.Query.Text {
+	if !strings.Contains(string(snapshot["queries/customers.query.json"]), `"ovdbBaseUrl"`) || !strings.Contains(string(snapshot["queries/customers.query.json"]), `"connectionId": "chinook-sqlite"`) || strings.Contains(string(snapshot["queries/customers.query.json"]), "SELECT CustomerId") || string(snapshot["queries/customers.query.dtql"]) != request.Query.Text {
 		t.Fatal("Core pair layout or metadata/body separation changed")
 	}
 	request.IfNoneMatch = false
