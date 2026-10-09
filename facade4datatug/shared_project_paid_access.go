@@ -36,6 +36,12 @@ func readCurrentPaidProjectAccess(ctx context.Context, tx dal.ReadTransaction, o
 	if err != nil {
 		return nil, err
 	}
+	// Paymentus projects a missing owner record as an empty fence. That is a
+	// proved absence of current paid ownership, while any partially populated
+	// fence below remains an incomplete or contradictory proof.
+	if f == (PlanOwnerFence{}) {
+		return nil, ErrSharedProjectUnauthorized
+	}
 	if f.Mode != o.Mode || f.Family != o.Product || f.AccountID != payer || f.OwnerSubscriptionID == "" || f.OwnerGeneration < 1 || f.SubscriptionRevision < 1 {
 		return nil, ErrPlanEffectUnproved
 	}
