@@ -36,10 +36,12 @@ func readCurrentPaidProjectAccess(ctx context.Context, tx dal.ReadTransaction, o
 	if err != nil {
 		return nil, err
 	}
-	// Paymentus projects a missing owner record as an empty fence. That is a
-	// proved absence of current paid ownership, while any partially populated
-	// fence below remains an incomplete or contradictory proof.
-	if f == (PlanOwnerFence{}) {
+	// Paymentus preserves the lookup identity when its optional owner row is
+	// absent, leaving only the ownership tuple empty. Classify exactly that
+	// shape as no current paid owner; mismatched identities and partial tuples
+	// remain incomplete or contradictory proof below.
+	if f.Mode == o.Mode && f.Family == o.Product && f.AccountID == payer &&
+		f.OwnerSubscriptionID == "" && f.OwnerGeneration == 0 && f.SubscriptionRevision == 0 {
 		return nil, ErrSharedProjectUnauthorized
 	}
 	if f.Mode != o.Mode || f.Family != o.Product || f.AccountID != payer || f.OwnerSubscriptionID == "" || f.OwnerGeneration < 1 || f.SubscriptionRevision < 1 {

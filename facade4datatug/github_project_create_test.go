@@ -230,8 +230,11 @@ func TestGitHubCreateClassifiesAbsentOwnerAsUnauthorizedBeforeReservation(t *tes
 		prepare       func(t *testing.T, db dal.DB)
 		want          error
 	}{
-		{name: "absent LIVE owner fence", overrideOwner: true, want: ErrSharedProjectUnauthorized},
+		{name: "absent LIVE owner fence", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "personal-1"}}, overrideOwner: true, want: ErrSharedProjectUnauthorized},
 		{name: "partial contradictory owner fence", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "personal-1", OwnerGeneration: 1, SubscriptionRevision: 1}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "mismatched owner mode", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "test", Family: "datatug", AccountID: "personal-1"}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "mismatched owner family", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "other", AccountID: "personal-1"}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "mismatched owner account", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "other-account"}}, overrideOwner: true, want: ErrPlanEffectUnproved},
 		{name: "owner store failure", owner: paidCreateOwnerResult{err: ownerStoreErr}, overrideOwner: true, want: ownerStoreErr},
 		{name: "missing plan application", prepare: func(t *testing.T, db dal.DB) {
 			t.Helper()
