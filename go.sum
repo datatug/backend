@@ -26,8 +26,8 @@ github.com/crediterra/money v0.4.2 h1:jywtH44L+BwPV3Yy+VxAmvk18eayaUXfVxvz1dnk5w
 github.com/crediterra/money v0.4.2/go.mod h1:v1LjiUrGIVmK0L070iz4ghVDhqVGiyd9vNX0XJOLGak=
 github.com/dal-go/dalgo v0.92.0 h1:cJDC60FQKdx1ttcF5PMqT65Rkb2t8lomj8I5BkshYvk=
 github.com/dal-go/dalgo v0.92.0/go.mod h1:Pvqn4YCOqLxKeim0M/0wzGDwtuaZKi18TRdaZ3PCS3c=
-github.com/dal-go/dalgo2firestore v0.10.34 h1:1YFlinObCBDgu+lYhZJ6IZlmQVDQntoPf8Xrl30eQw4=
-github.com/dal-go/dalgo2firestore v0.10.34/go.mod h1:27zrib7xZszgav1/EuoZoDI4Ld0J3I6c272A7ihsb24=
+github.com/dal-go/dalgo2firestore v0.10.35 h1:mC9zJT9HKj5NmSKinBndkuQXXtoLqMWay8RZ96MF2C0=
+github.com/dal-go/dalgo2firestore v0.10.35/go.mod h1:27zrib7xZszgav1/EuoZoDI4Ld0J3I6c272A7ihsb24=
 github.com/dal-go/record v0.1.4 h1:21IJNlUASNw9TytcB5V5a2jHQKa1pycr//dGvj8zNH8=
 github.com/dal-go/record v0.1.4/go.mod h1:PuoOCH74/Vf+pIVWSdrMg7OdUmlSlPgj68yJ+gM42To=
 github.com/datatug/datatug-core v0.46.0 h1:sPbrKouwwlY/D2htnIV+2tWMRVXBSoBYf3Spztysom8=
