@@ -32,6 +32,10 @@ type QueryFileChange struct {
 type QueryMutationPreview struct {
 	Changes  []QueryFileChange
 	Response dto.SaveQueryResponse
+	// BodyChanged is false when the previous sidecar cannot be proved exactly;
+	// ambiguity never makes an otherwise valid save billable or changes its
+	// existing mutation eligibility.
+	BodyChanged bool
 }
 
 // PreviewQueryMutation runs the published Core revisioned query store
@@ -68,7 +72,10 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 	if total > maxQueryPreviewBytes {
 		return nil, ErrInvalidQuerySnapshot
 	}
-	if metadata, exists := snapshot[path.Join(queryDir, query.ID+".query.json")]; exists {
+	metadataPath := path.Join(queryDir, query.ID+".query.json")
+	var previousType datatug.QueryType
+	metadata, hadPrevious := snapshot[metadataPath]
+	if hadPrevious {
 		var raw map[string]json.RawMessage
 		if err := json.Unmarshal(metadata, &raw); err != nil || raw == nil {
 			return nil, ErrUnsupportedExistingQuery
@@ -89,7 +96,22 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 		if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 			return nil, ErrUnsupportedExistingQuery
 		}
+		previousType = existing.Type
 	}
+	var previousBody []byte
+	previousBodyCount := 0
+	previousBodyMatched := false
+	for name, content := range snapshot {
+		if name == metadataPath {
+			continue
+		}
+		previousBodyCount++
+		if hadPrevious && previousType != "" && name == path.Join(queryDir, query.ID+".query."+strings.ToLower(string(previousType))) {
+			previousBody = content
+			previousBodyMatched = true
+		}
+	}
+	previousBodyProved := previousBodyCount == 0 && !hadPrevious || previousBodyCount == 1 && hadPrevious && previousBodyMatched
 	tmp, err := os.MkdirTemp("", "datatug-query-preview-")
 	if err != nil {
 		return nil, err
@@ -141,6 +163,7 @@ func PreviewQueryMutation(ctx context.Context, request dto.SaveQueryRequest, sna
 	}
 	result := &QueryMutationPreview{Response: dto.SaveQueryResponse{Query: saved.Query, Revision: string(saved.Revision)}}
 	result.Response.Query.FolderPath = request.Query.FolderPath
+	result.BodyChanged = previousBodyProved && !bytes.Equal(previousBody, []byte(saved.Query.Text)) && (len(previousBody) > 0 || saved.Query.Text != "")
 	seen := make(map[string]bool, len(snapshot))
 	for _, entry := range entries {
 		if !strings.HasPrefix(entry.Name(), prefix) {

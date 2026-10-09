@@ -250,7 +250,7 @@ func TestQueryRepositorySavesPairAtExpectedHeadAndRecoversExactCommit(t *testing
 	repo := &queryRepository{client: fake}
 	request := dto.SaveQueryRequest{ProjectRef: dto.ProjectRef{StoreID: "github.com", ProjectID: "repo@owner@demo-project-1"}, Branch: "work", ExpectedBranchHead: createCommittedHead, OperationID: "save-1", IfNoneMatch: true, Query: datatug.QueryDefWithFolderPath{FolderPath: "~", QueryDef: datatug.QueryDef{ProjectItem: datatug.ProjectItem{ProjItemBrief: datatug.ProjItemBrief{ID: "new-query", Title: "New query"}}, Type: "DTQL", Text: "SELECT CustomerId FROM chinook.Customer"}}}
 	plan, err := repo.PrepareQuerySave(context.Background(), "demo-project-1", "datatug-demo-project", "work", request)
-	if err != nil || len(plan.Changes) != 2 || plan.Response.Revision == "" {
+	if err != nil || len(plan.Changes) != 2 || plan.Response.Revision == "" || !plan.BodyChanged {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 	message := "Save DataTug query; DataTug-Operation: exact-marker"

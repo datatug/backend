@@ -22,11 +22,15 @@ var ErrProtectedProjectQuota = errors.New("protected project quota unavailable o
 // shared projects. Future TEST product isolation needs a separate ref namespace.
 type PaidSharedProjectOptions struct {
 	Version, Mode, Product string
-	ContactLinks           *PaidProjectOwnerLinksOptions
-	Config                 PlanConfig
-	Directory              PersonalAccountDirectory
-	Personal               PersonalPlanOwnerPort
-	Owner                  interface {
+	// EnableQueryEditCandidates is an explicit host opt-in. Existing paid
+	// project routes keep their current behavior until private rules and the
+	// observe-only source journey are reviewed and wired by the host.
+	EnableQueryEditCandidates bool
+	ContactLinks              *PaidProjectOwnerLinksOptions
+	Config                    PlanConfig
+	Directory                 PersonalAccountDirectory
+	Personal                  PersonalPlanOwnerPort
+	Owner                     interface {
 		ReadOwner(context.Context, dal.ReadTransaction, string, string, string) (PlanOwnerFence, error)
 	}
 }
@@ -57,6 +61,7 @@ func NewPaidSharedProjectService(db dal.DB, ids IDGenerator, authority SharedPro
 	s.ownerLinks = ownerLinks
 	options = snapshotPaidSharedProjectOptions(options)
 	s.paid = &options
+	s.recordQueryEditCandidates = options.EnableQueryEditCandidates
 	return s, nil
 }
 

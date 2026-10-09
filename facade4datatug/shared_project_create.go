@@ -50,13 +50,14 @@ func (c SharedProjectCreateCommand) Validate() error {
 // SharedProjectService is deliberately separate from the private-project
 // Facade, so existing callers do not acquire shared creation implicitly.
 type SharedProjectService struct {
-	db         dal.DB
-	ids        IDGenerator
-	authority  SharedProjectCreateAuthority
-	now        func() time.Time
-	paid       *PaidSharedProjectOptions
-	ownerLinks *sharedProjectOwnerLinks
-	activation *sharedProjectActivation
+	db                        dal.DB
+	ids                       IDGenerator
+	authority                 SharedProjectCreateAuthority
+	now                       func() time.Time
+	paid                      *PaidSharedProjectOptions
+	ownerLinks                *sharedProjectOwnerLinks
+	activation                *sharedProjectActivation
+	recordQueryEditCandidates bool
 }
 
 func sharedProjectPortAbsent(v any) bool {

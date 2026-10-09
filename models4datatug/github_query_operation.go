@@ -20,6 +20,9 @@ type GitHubQueryOperation struct {
 	ActorID       string                `firestore:"actorID"`
 	OperationID   string                `firestore:"operationID"`
 	RequestDigest string                `firestore:"requestDigest"`
+	SpaceID       string                `firestore:"spaceID,omitempty"`
+	ProjectID     string                `firestore:"projectID,omitempty"`
+	BodyChanged   bool                  `firestore:"bodyChanged,omitempty"`
 	RepositoryID  int64                 `firestore:"repositoryID"`
 	Folder        string                `firestore:"folder"`
 	Branch        string                `firestore:"branch"`
@@ -31,7 +34,10 @@ type GitHubQueryOperation struct {
 }
 
 func (o GitHubQueryOperation) Validate() error {
-	if o.Version != 1 || o.ActorID == "" || o.OperationID == "" || o.RequestDigest == "" || o.RepositoryID < 1 || o.Folder == "" || o.Branch == "" || o.ExpectedHead == "" || o.QueryPath == "" || o.CreatedAt.IsZero() || o.CreatedAt.Location() != time.UTC {
+	if (o.Version != 1 && o.Version != 2) || o.ActorID == "" || o.OperationID == "" || o.RequestDigest == "" || o.RepositoryID < 1 || o.Folder == "" || o.Branch == "" || o.ExpectedHead == "" || o.QueryPath == "" || o.CreatedAt.IsZero() || o.CreatedAt.Location() != time.UTC {
+		return ErrInvalidGitHubQueryOperation
+	}
+	if o.Version == 2 && (ValidateSharedProjectIdentifier(o.SpaceID) != nil || ValidateSharedProjectIdentifier(o.ProjectID) != nil) {
 		return ErrInvalidGitHubQueryOperation
 	}
 	return nil
