@@ -89,11 +89,12 @@ func newRouteRepo(t *testing.T, permission githubauth4datatug.RepositoryOperatio
 }
 
 type routeProvider struct {
-	repo             *routeRepo
-	listErr, authErr error
-	listedRepos      []githubauth4datatug.GitHubRepository
-	listed           int
-	authorized       int
+	repo                         *routeRepo
+	listErr, resolveErr, authErr error
+	listedRepos                  []githubauth4datatug.GitHubRepository
+	listed                       int
+	resolved                     int
+	authorized                   int
 }
 
 func (p *routeProvider) ListRepositories(_ context.Context, uid string) ([]githubauth4datatug.GitHubRepository, error) {
@@ -108,6 +109,27 @@ func (p *routeProvider) ListRepositories(_ context.Context, uid string) ([]githu
 		return p.listedRepos, nil
 	}
 	return []githubauth4datatug.GitHubRepository{{ID: 91, Owner: "owner", Name: "repo", DefaultBranch: p.repo.scope.Repository.DefaultBranch, EffectivePermission: p.repo.scope.Permission}}, nil
+}
+func (p *routeProvider) ResolveRepositoryByName(_ context.Context, uid, owner, name string) (githubauth4datatug.GitHubRepository, error) {
+	p.resolved++
+	if uid != "firebase-actor" {
+		return githubauth4datatug.GitHubRepository{}, errors.New("wrong actor")
+	}
+	if p.resolveErr != nil {
+		return githubauth4datatug.GitHubRepository{}, p.resolveErr
+	}
+	if p.listedRepos != nil {
+		for _, repo := range p.listedRepos {
+			if strings.EqualFold(repo.Owner, owner) && strings.EqualFold(repo.Name, name) {
+				return repo, nil
+			}
+		}
+		return githubauth4datatug.GitHubRepository{}, githubauth4datatug.ErrGitHubRepositoryDenied
+	}
+	if !strings.EqualFold(owner, "owner") || !strings.EqualFold(name, "repo") {
+		return githubauth4datatug.GitHubRepository{}, githubauth4datatug.ErrGitHubRepositoryDenied
+	}
+	return githubauth4datatug.GitHubRepository{ID: 91, Owner: owner, Name: name, DefaultBranch: p.repo.scope.Repository.DefaultBranch}, nil
 }
 func (p *routeProvider) AuthorizeReadRepository(_ context.Context, uid string, ref githubauth4datatug.RepositoryRef) (githubProjectReadRepository, error) {
 	p.authorized++
@@ -245,14 +267,14 @@ func TestHostedGitHubProjectReadRoutesPinOneHeadAndPreserveRichQuery(t *testing.
 			t.Fatalf("%s status=%d header=%v body=%s", test.path, w.Code, w.Header(), w.Body.String())
 		}
 	}
-	if provider.repo.refCalls != 4 || provider.authorized != 4 || service.readCalls != 4 {
-		t.Fatalf("reads refs=%d auth=%d links=%d", provider.repo.refCalls, provider.authorized, service.readCalls)
+	if provider.listed != 0 || provider.resolved != 4 || provider.repo.refCalls != 4 || provider.authorized != 4 || service.readCalls != 4 {
+		t.Fatalf("reads list=%d resolve=%d refs=%d auth=%d links=%d", provider.listed, provider.resolved, provider.repo.refCalls, provider.authorized, service.readCalls)
 	}
 }
 
 func TestHostedGitHubBranchAndCapabilityRoutesReflectCurrentAuthority(t *testing.T) {
 	stubRoutePrincipal(t)
-	options, _, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
+	options, provider, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
 	for _, test := range []struct {
 		handler        http.HandlerFunc
 		path, contains string
@@ -266,8 +288,8 @@ func TestHostedGitHubBranchAndCapabilityRoutesReflectCurrentAuthority(t *testing
 			t.Fatalf("%s %d %s", test.path, w.Code, w.Body.String())
 		}
 	}
-	if service.writeCalls != 1 {
-		t.Fatalf("write checks=%d", service.writeCalls)
+	if provider.listed != 0 || provider.resolved != 2 || service.writeCalls != 1 {
+		t.Fatalf("repository discovery list=%d resolve=%d write checks=%d", provider.listed, provider.resolved, service.writeCalls)
 	}
 	service.writeErr = facade4datatug.ErrSharedProjectUnauthorized
 	w := httptest.NewRecorder()
@@ -286,8 +308,8 @@ func TestHostedGitHubCapabilitiesIncludeCurrentProjectAIEligibility(t *testing.T
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"queryRead":true`) || !strings.Contains(w.Body.String(), `"projectAI":{"aiAllowed":false,"reason":"plan_ended"}`) {
 		t.Fatalf("capabilities %d %s", w.Code, w.Body.String())
 	}
-	if provider.authorized != 1 || service.readCalls != 1 || service.aiEligibilityCalls != 1 {
-		t.Fatalf("read authorities github=%d linkage=%d entitlement=%d", provider.authorized, service.readCalls, service.aiEligibilityCalls)
+	if provider.listed != 0 || provider.resolved != 1 || provider.authorized != 1 || service.readCalls != 1 || service.aiEligibilityCalls != 1 {
+		t.Fatalf("read authorities list=%d resolve=%d github=%d linkage=%d entitlement=%d", provider.listed, provider.resolved, provider.authorized, service.readCalls, service.aiEligibilityCalls)
 	}
 
 	service.aiEligibilityErr = facade4datatug.ErrProjectAIEligibilityUnavailable
@@ -306,14 +328,14 @@ func TestHostedGitHubSaveRouteBoundsUnknownLengthAndAvoidsSharedBodyDecoder(t *t
 		t.Fatal("shared body decoder called")
 		return nil, errors.New("forbidden")
 	}
-	options, _, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
+	options, provider, service := routeOptions(t, githubauth4datatug.RepositoryWrite)
 	valid := `{"storage":"github.com","project":"repo@owner@datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operationId":"save-1","ifNoneMatch":true,"query":{"folderPath":"~","id":"customers","title":"Customers","type":"DTQL","text":"SELECT CustomerId FROM chinook.Customer"}}`
 	w := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v0/datatug/queries/save_query", strings.NewReader(valid))
 	request.ContentLength = -1
 	httpPostGitHubSaveQuery(options)(w, request)
-	if w.Code != http.StatusOK || service.saveCalls != 1 || service.received.Query.Text != "SELECT CustomerId FROM chinook.Customer" {
-		t.Fatalf("save %d %s calls=%d", w.Code, w.Body.String(), service.saveCalls)
+	if w.Code != http.StatusOK || service.saveCalls != 1 || service.received.Query.Text != "SELECT CustomerId FROM chinook.Customer" || provider.listed != 0 || provider.resolved != 1 {
+		t.Fatalf("save %d %s calls=%d list=%d resolve=%d", w.Code, w.Body.String(), service.saveCalls, provider.listed, provider.resolved)
 	}
 	for _, test := range []struct {
 		body string
@@ -376,7 +398,7 @@ func TestHostedGitHubReadsRefuseRevokedOrUnlinkedActor(t *testing.T) {
 	}{
 		{"repository access revoked", func() { provider.authErr = githubauth4datatug.ErrGitHubPermissionDenied }, http.StatusForbidden},
 		{"contact unlinked", func() { provider.authErr = nil; service.readErr = facade4datatug.ErrSharedProjectUnauthorized }, http.StatusForbidden},
-		{"grant expired", func() { service.readErr = nil; provider.listErr = githubauth4datatug.ErrReauthorizationRequired }, http.StatusConflict},
+		{"grant expired", func() { service.readErr = nil; provider.resolveErr = githubauth4datatug.ErrReauthorizationRequired }, http.StatusConflict},
 	} {
 		test.before()
 		w := httptest.NewRecorder()
@@ -385,7 +407,7 @@ func TestHostedGitHubReadsRefuseRevokedOrUnlinkedActor(t *testing.T) {
 			t.Fatalf("%s status=%d body=%s", test.name, w.Code, w.Body.String())
 		}
 	}
-	provider.listErr = nil
+	provider.resolveErr = nil
 	w := httptest.NewRecorder()
 	httpGetGitHubProjectSummary(options)(w, httptest.NewRequest(http.MethodGet, "/?storage=github.com&project=repo@owner@datatug", nil))
 	if w.Code != http.StatusBadRequest {
@@ -452,15 +474,15 @@ func TestHostedGitHubRoutesFailClosedBeforePrivateProviderRead(t *testing.T) {
 			}
 			w = httptest.NewRecorder()
 			tc.makeHandler(options)(w, httptest.NewRequest(http.MethodGet, strings.Replace(tc.url, "storage=github.com", "storage=other", 1), nil))
-			if w.Code != http.StatusBadRequest || provider.listed != 0 || service.readCalls != 0 {
+			if w.Code != http.StatusBadRequest || provider.listed != 0 || provider.resolved != 0 || service.readCalls != 0 {
 				t.Fatalf("wrong store=%d provider=%d service=%d", w.Code, provider.listed, service.readCalls)
 			}
 			w = httptest.NewRecorder()
 			tc.makeHandler(options)(w, httptest.NewRequest(http.MethodGet, strings.Replace(tc.url, "repo@owner@datatug", "invalid", 1), nil))
-			if w.Code != http.StatusBadRequest || provider.listed != 0 {
+			if w.Code != http.StatusBadRequest || provider.listed != 0 || provider.resolved != 0 {
 				t.Fatalf("wrong project=%d provider=%d", w.Code, provider.listed)
 			}
-			provider.listErr = githubauth4datatug.ErrReauthorizationRequired
+			provider.resolveErr = githubauth4datatug.ErrReauthorizationRequired
 			w = httptest.NewRecorder()
 			tc.makeHandler(options)(w, httptest.NewRequest(http.MethodGet, tc.url, nil))
 			if w.Code != http.StatusConflict || provider.authorized != 0 || service.readCalls != 0 {

@@ -138,7 +138,8 @@ type InstallationAuthorizer interface {
 type repositoryUserClient interface {
 	CurrentUser(context.Context) (GitHubActor, error)
 	Repository(context.Context, RepositoryRef) (GitHubRepository, error)
-	Repositories(context.Context) ([]GitHubRepository, error)
+	RepositoryByName(context.Context, string, string) (GitHubRepository, error)
+	DataTugRepositories(context.Context) ([]GitHubRepository, error)
 }
 
 type appOAuthClient interface {
@@ -314,26 +315,47 @@ func (p *Provider) ListRepositories(ctx context.Context, firebaseUID string) ([]
 	if err != nil || actor.ID != snapshot.ActorID || !strings.EqualFold(actor.Login, snapshot.ActorLogin) {
 		return nil, ErrGitHubActorMismatch
 	}
-	repositories, err := client.Repositories(ctx)
+	repositories, err := client.DataTugRepositories(ctx)
 	if err != nil {
 		return nil, ErrGitHubRepositoryDenied
 	}
 	result := make([]GitHubRepository, 0, len(repositories))
 	for _, repo := range repositories {
-		if repo.ID <= 0 || !validGitHubName(repo.Owner) || !validGitHubName(repo.Name) || !repo.Permissions.Pull {
+		if repo.ID <= 0 || repo.NodeID == "" || !validGitHubName(repo.Owner) || !validGitHubName(repo.Name) {
+			return nil, ErrGitHubRepositoryDenied
+		}
+		if !repo.Permissions.Pull {
 			continue
 		}
-		ref := RepositoryRef{ID: repo.ID, Owner: repo.Owner, Name: repo.Name}
-		access, accessErr := p.installation.AuthorizeDataTugAppRepository(ctx, ref)
-		if accessErr == nil && access.InstallationID > 0 && access.RepositoryID == repo.ID && access.ContentsRead {
-			repo.EffectivePermission = RepositoryRead
-			if (repo.Permissions.Push || repo.Permissions.Admin) && access.ContentsWrite {
-				repo.EffectivePermission = RepositoryWrite
-			}
-			result = append(result, repo)
-		}
+		result = append(result, repo)
 	}
 	return result, nil
+}
+
+// ResolveRepositoryByName resolves a selected owner/name through the current
+// connected actor token. The caller must still run the fresh App and operation
+// authorization path using the returned immutable ID.
+func (p *Provider) ResolveRepositoryByName(ctx context.Context, firebaseUID, owner, name string) (GitHubRepository, error) {
+	if err := p.ready(); err != nil {
+		return GitHubRepository{}, err
+	}
+	if err := validateUserID(firebaseUID); err != nil || !validGitHubName(owner) || !validGitHubName(name) {
+		return GitHubRepository{}, ErrGitHubRepositoryDenied
+	}
+	snapshot, tokens, err := p.accessTokens(ctx, firebaseUID)
+	if err != nil {
+		return GitHubRepository{}, err
+	}
+	client := p.app.UserClient(tokens)
+	actor, err := client.CurrentUser(ctx)
+	if err != nil || actor.ID != snapshot.ActorID || !strings.EqualFold(actor.Login, snapshot.ActorLogin) {
+		return GitHubRepository{}, ErrGitHubActorMismatch
+	}
+	repo, err := client.RepositoryByName(ctx, owner, name)
+	if err != nil || repo.ID <= 0 || repo.NodeID == "" || !strings.EqualFold(repo.Owner, owner) || !strings.EqualFold(repo.Name, name) {
+		return GitHubRepository{}, ErrGitHubRepositoryDenied
+	}
+	return repo, nil
 }
 
 // AuthorizedGitHubRepository is an ephemeral, actor-bound API client. The

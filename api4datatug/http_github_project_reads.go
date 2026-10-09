@@ -45,19 +45,9 @@ func openAuthorizedGitHubSnapshot(ctx context.Context, options GitHubProjectRout
 
 func authorizeRegisteredGitHubProject(ctx context.Context, options GitHubProjectRouteOptions, actorID, repo, owner, folder string) (*githubauth4datatug.GitHubRepository, githubProjectReadRepository, facade4datatug.GitHubProjectAccess, error) {
 	var noAccess facade4datatug.GitHubProjectAccess
-	repositories, err := options.provider().ListRepositories(ctx, actorID)
+	selected, err := options.provider().ResolveRepositoryByName(ctx, actorID, owner, repo)
 	if err != nil {
 		return nil, nil, noAccess, err
-	}
-	var selected *githubauth4datatug.GitHubRepository
-	for i := range repositories {
-		if strings.EqualFold(repositories[i].Owner, owner) && strings.EqualFold(repositories[i].Name, repo) {
-			selected = &repositories[i]
-			break
-		}
-	}
-	if selected == nil {
-		return nil, nil, noAccess, githubauth4datatug.ErrGitHubRepositoryDenied
 	}
 	client, err := options.provider().AuthorizeReadRepository(ctx, actorID, githubauth4datatug.RepositoryRef{ID: selected.ID, Owner: selected.Owner, Name: selected.Name})
 	if err != nil {
@@ -67,7 +57,7 @@ func authorizeRegisteredGitHubProject(ctx context.Context, options GitHubProject
 	if err != nil {
 		return nil, nil, noAccess, err
 	}
-	return selected, client, access, nil
+	return &selected, client, access, nil
 }
 
 func githubReadError(w http.ResponseWriter, err error) {

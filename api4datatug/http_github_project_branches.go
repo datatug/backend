@@ -60,21 +60,10 @@ func httpGetGitHubProjectBranches(options GitHubProjectRouteOptions) http.Handle
 			sharedProjectError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		accessible, err := provider.ListRepositories(ctx, actorID)
+		selected, err := provider.ResolveRepositoryByName(ctx, actorID, owner, repoName)
 		if err != nil {
 			status, code := githubAuthorizationStatus(err)
 			sharedProjectError(w, status, code)
-			return
-		}
-		var selected *githubauth4datatug.GitHubRepository
-		for i := range accessible {
-			if strings.EqualFold(accessible[i].Owner, owner) && strings.EqualFold(accessible[i].Name, repoName) {
-				selected = &accessible[i]
-				break
-			}
-		}
-		if selected == nil {
-			sharedProjectError(w, http.StatusForbidden, "repository_denied")
 			return
 		}
 		client, err := provider.AuthorizeReadRepository(ctx, actorID, githubauth4datatug.RepositoryRef{ID: selected.ID, Owner: selected.Owner, Name: selected.Name})

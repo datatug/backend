@@ -20,6 +20,9 @@ const (
 	githubAPIURL            = "https://api.github.com"
 	githubAPIVersion        = "2022-11-28"
 	maxGitHubResponseBytes  = 2 << 20
+	githubInventoryPageSize = 100
+	maxGitHubInventoryPages = 100
+	maxGitHubInventoryItems = githubInventoryPageSize * maxGitHubInventoryPages
 )
 
 type GitHubAppClient struct {
@@ -195,52 +198,167 @@ func (c *githubUserClient) Repository(ctx context.Context, ref RepositoryRef) (G
 	return GitHubRepository{ID: wire.ID, NodeID: wire.NodeID, Owner: owner, Name: wire.Name, DefaultBranch: wire.DefaultBranch, Permissions: wire.Permissions}, nil
 }
 
-func (c *githubUserClient) Repositories(ctx context.Context) ([]GitHubRepository, error) {
-	repositories := make([]GitHubRepository, 0)
-	for page := 1; page <= maxGitHubPages; page++ {
-		path := fmt.Sprintf("/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&page=%d", page)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIURL+path, nil)
-		if err != nil {
+func (c *githubUserClient) RepositoryByName(ctx context.Context, owner, name string) (GitHubRepository, error) {
+	if !validGitHubName(owner) || !validGitHubName(name) {
+		return GitHubRepository{}, ErrGitHubRepositoryDenied
+	}
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+	var wire struct {
+		ID            int64   `json:"id"`
+		NodeID        string  `json:"node_id"`
+		Name          string  `json:"name"`
+		FullName      string  `json:"full_name"`
+		DefaultBranch *string `json:"default_branch"`
+		Owner         struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+		Permissions GitHubRepositoryPermissions `json:"permissions"`
+	}
+	if err := c.get(ctx, path, &wire); err != nil {
+		return GitHubRepository{}, ErrGitHubRepositoryDenied
+	}
+	if wire.ID <= 0 || strings.TrimSpace(wire.NodeID) == "" || !validGitHubName(wire.Name) || !strings.EqualFold(wire.Name, name) ||
+		!validGitHubName(wire.Owner.Login) || !strings.EqualFold(wire.Owner.Login, owner) ||
+		!strings.EqualFold(wire.FullName, wire.Owner.Login+"/"+wire.Name) || wire.DefaultBranch == nil || (*wire.DefaultBranch != "" && !validBranchName(*wire.DefaultBranch)) {
+		return GitHubRepository{}, ErrGitHubRepositoryDenied
+	}
+	return GitHubRepository{ID: wire.ID, NodeID: wire.NodeID, Owner: wire.Owner.Login, Name: wire.Name, DefaultBranch: *wire.DefaultBranch, Permissions: wire.Permissions}, nil
+}
+
+func (c *githubUserClient) DataTugRepositories(ctx context.Context) ([]GitHubRepository, error) {
+	type installation struct {
+		ID          int64           `json:"id"`
+		AppID       int64           `json:"app_id"`
+		SuspendedAt json.RawMessage `json:"suspended_at"`
+		Permissions struct {
+			Contents string `json:"contents"`
+		} `json:"permissions"`
+	}
+	installations, err := listGitHubPages[installation](ctx, c, "/user/installations", "installations")
+	if err != nil {
+		return nil, ErrGitHubRepositoryDenied
+	}
+
+	result := make([]GitHubRepository, 0)
+	seenInstallations := make(map[int64]struct{}, len(installations))
+	seenRepositories := make(map[int64]struct{})
+	seenRepositoryNames := make(map[string]struct{})
+	inventoryRepositoryCount := 0
+	for _, install := range installations {
+		if install.ID <= 0 || install.AppID <= 0 || len(install.SuspendedAt) == 0 {
 			return nil, ErrGitHubRepositoryDenied
 		}
-		req.Header.Set("Accept", "application/vnd.github+json")
-		req.Header.Set("X-GitHub-Api-Version", githubAPIVersion)
-		req.Header.Set("Authorization", "Bearer "+c.accessToken)
-		resp, err := doWithoutRedirects(c.client, req)
-		if err != nil {
+		if _, exists := seenInstallations[install.ID]; exists {
 			return nil, ErrGitHubRepositoryDenied
 		}
-		var wire []struct {
-			ID            int64  `json:"id"`
-			NodeID        string `json:"node_id"`
-			Name          string `json:"name"`
-			FullName      string `json:"full_name"`
-			DefaultBranch string `json:"default_branch"`
+		seenInstallations[install.ID] = struct{}{}
+		suspended := string(install.SuspendedAt) != "null"
+		if suspended {
+			var suspendedAt time.Time
+			if json.Unmarshal(install.SuspendedAt, &suspendedAt) != nil || suspendedAt.IsZero() {
+				return nil, ErrGitHubRepositoryDenied
+			}
+		}
+		if install.AppID != DataTugGitHubAppID || suspended {
+			continue
+		}
+		contents := strings.ToLower(install.Permissions.Contents)
+		if contents != "read" && contents != "write" {
+			return nil, ErrGitHubRepositoryDenied
+		}
+		path := fmt.Sprintf("/user/installations/%d/repositories", install.ID)
+		type repositoryItem struct {
+			ID            int64   `json:"id"`
+			NodeID        string  `json:"node_id"`
+			Name          string  `json:"name"`
+			FullName      string  `json:"full_name"`
+			DefaultBranch *string `json:"default_branch"`
 			Owner         struct {
 				Login string `json:"login"`
 			} `json:"owner"`
-			Permissions GitHubRepositoryPermissions `json:"permissions"`
+			Permissions struct {
+				Pull  *bool `json:"pull"`
+				Push  *bool `json:"push"`
+				Admin *bool `json:"admin"`
+			} `json:"permissions"`
 		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, maxGitHubResponseBytes)).Decode(&wire) != nil {
-			_ = resp.Body.Close()
+		items, listErr := listGitHubPages[repositoryItem](ctx, c, path, "repositories")
+		if listErr != nil {
 			return nil, ErrGitHubRepositoryDenied
 		}
-		_ = resp.Body.Close()
-		for _, item := range wire {
-			owner := item.Owner.Login
-			if owner == "" {
-				owner, _, _ = strings.Cut(item.FullName, "/")
-			}
-			if item.ID <= 0 || item.NodeID == "" || !validGitHubName(owner) || !validGitHubName(item.Name) {
-				return nil, ErrGitHubRepositoryDenied
-			}
-			if item.DefaultBranch != "" && !validBranchName(item.DefaultBranch) {
-				return nil, ErrGitHubRepositoryDenied
-			}
-			repositories = append(repositories, GitHubRepository{ID: item.ID, NodeID: item.NodeID, Owner: owner, Name: item.Name, DefaultBranch: item.DefaultBranch, Permissions: item.Permissions})
+		inventoryRepositoryCount += len(items)
+		if inventoryRepositoryCount > maxGitHubInventoryItems {
+			return nil, ErrGitHubRepositoryDenied
 		}
-		if len(wire) < 100 {
-			return repositories, nil
+		for _, item := range items {
+			if item.ID <= 0 || strings.TrimSpace(item.NodeID) == "" || !validGitHubName(item.Owner.Login) || !validGitHubName(item.Name) ||
+				!strings.EqualFold(item.FullName, item.Owner.Login+"/"+item.Name) || item.DefaultBranch == nil || (*item.DefaultBranch != "" && !validBranchName(*item.DefaultBranch)) ||
+				item.Permissions.Pull == nil || item.Permissions.Push == nil || item.Permissions.Admin == nil {
+				return nil, ErrGitHubRepositoryDenied
+			}
+			if _, exists := seenRepositories[item.ID]; exists {
+				return nil, ErrGitHubRepositoryDenied
+			}
+			nameKey := strings.ToLower(item.FullName)
+			if _, exists := seenRepositoryNames[nameKey]; exists {
+				return nil, ErrGitHubRepositoryDenied
+			}
+			seenRepositories[item.ID] = struct{}{}
+			seenRepositoryNames[nameKey] = struct{}{}
+			userPermissions := GitHubRepositoryPermissions{Pull: *item.Permissions.Pull, Push: *item.Permissions.Push, Admin: *item.Permissions.Admin}
+			if !userPermissions.Pull {
+				continue
+			}
+			repository := GitHubRepository{ID: item.ID, NodeID: item.NodeID, Owner: item.Owner.Login, Name: item.Name, DefaultBranch: *item.DefaultBranch, Permissions: userPermissions, EffectivePermission: RepositoryRead}
+			if contents == "write" && (userPermissions.Push || userPermissions.Admin) {
+				repository.EffectivePermission = RepositoryWrite
+			}
+			result = append(result, repository)
+			if len(result) > maxGitHubInventoryItems {
+				return nil, ErrGitHubRepositoryDenied
+			}
+		}
+	}
+	return result, nil
+}
+
+func listGitHubPages[T any](ctx context.Context, client *githubUserClient, path, arrayField string) ([]T, error) {
+	items := make([]T, 0)
+	totalCount := -1
+	for page := 1; page <= maxGitHubInventoryPages; page++ {
+		pagePath := fmt.Sprintf("%s?per_page=%d&page=%d", path, githubInventoryPageSize, page)
+		var envelope struct {
+			TotalCount    int             `json:"total_count"`
+			Installations json.RawMessage `json:"installations"`
+			Repositories  json.RawMessage `json:"repositories"`
+		}
+		if err := client.get(ctx, pagePath, &envelope); err != nil || envelope.TotalCount < 0 || envelope.TotalCount > maxGitHubInventoryItems {
+			return nil, ErrGitHubRepositoryDenied
+		}
+		if totalCount == -1 {
+			totalCount = envelope.TotalCount
+		} else if totalCount != envelope.TotalCount {
+			return nil, ErrGitHubRepositoryDenied
+		}
+		pageJSON := envelope.Installations
+		if arrayField == "repositories" {
+			pageJSON = envelope.Repositories
+		}
+		var pageItems []T
+		if len(pageJSON) == 0 || json.Unmarshal(pageJSON, &pageItems) != nil || pageItems == nil {
+			return nil, ErrGitHubRepositoryDenied
+		}
+		remaining := totalCount - len(items)
+		want := remaining
+		if want > githubInventoryPageSize {
+			want = githubInventoryPageSize
+		}
+		if want < 0 || len(pageItems) != want {
+			return nil, ErrGitHubRepositoryDenied
+		}
+		items = append(items, pageItems...)
+		if len(items) == totalCount {
+			return items, nil
 		}
 	}
 	return nil, ErrGitHubRepositoryDenied
@@ -259,10 +377,18 @@ func (c *githubUserClient) get(ctx context.Context, path string, target any) err
 		return errors.New("GitHub authorization check failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode != http.StatusOK {
 		return errors.New("GitHub authorization check was denied")
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, maxGitHubResponseBytes)).Decode(target); err != nil {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGitHubResponseBytes+1))
+	if err != nil || len(body) > maxGitHubResponseBytes {
+		return errors.New("GitHub authorization response was invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err = decoder.Decode(target); err != nil {
+		return errors.New("GitHub authorization response was invalid")
+	}
+	if err = decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return errors.New("GitHub authorization response was invalid")
 	}
 	return nil
