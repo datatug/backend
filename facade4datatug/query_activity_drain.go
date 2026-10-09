@@ -2,12 +2,15 @@ package facade4datatug
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const QueryActivityMaxDrainBatchSize = 100
@@ -29,7 +32,9 @@ type QueryActivityDrainResult struct {
 // delivers one bounded page. Failures remain pending and do not block later
 // records in this page; the returned cursor advances so a worker can finish a
 // full pass before resetting to the beginning and retrying earlier failures.
-// The cursor is only a scan position, never an identity or authorization fact.
+// Cancellation returns the partial result and the last completed scan position,
+// leaving the current and remaining rows eligible for continuation. The cursor
+// is only a scan position, never an identity or authorization fact.
 func (s *QueryActivityService) Drain(ctx context.Context, spaceID string, request QueryActivityDrainRequest) (QueryActivityDrainResult, error) {
 	var result QueryActivityDrainResult
 	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.corrections) || s.now == nil ||
@@ -44,9 +49,10 @@ func (s *QueryActivityService) Drain(ctx context.Context, spaceID string, reques
 		valid   bool
 	}
 	var page []item
+	result.NextAfterID = request.AfterID
 	err := s.db.RunReadonlyTransaction(ctx, func(txCtx context.Context, tx dal.ReadTransaction) error {
 		page = nil
-		result = QueryActivityDrainResult{}
+		result = QueryActivityDrainResult{NextAfterID: request.AfterID}
 		queryBuilder := dal.From(collection).NewQuery().OrderBy(dal.Ascending(dal.DocumentID())).Limit(request.Limit + 1)
 		if request.AfterID != "" {
 			queryBuilder.StartAfter(dal.Cursor(request.AfterID))
@@ -82,30 +88,53 @@ func (s *QueryActivityService) Drain(ctx context.Context, spaceID string, reques
 		return result, err
 	}
 	for _, candidate := range page {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		result.Scanned++
-		result.NextAfterID = candidate.id
 		pending := candidate.pending
 		if !candidate.valid || pending.Validate() != nil || pending.SpaceID != spaceID || pending.ReceiptID != candidate.id {
 			result.Failed++
+			result.NextAfterID = candidate.id
 			continue
 		}
 		if pending.DeliveryState == models4datatug.QueryActivityPendingStateDelivered {
+			result.NextAfterID = candidate.id
 			continue
 		}
 		if pending.DeliveryState != models4datatug.QueryActivityPendingStatePending {
 			result.Failed++
+			result.NextAfterID = candidate.id
 			continue
 		}
 		if err := s.Deliver(ctx, spaceID, candidate.id); err != nil {
+			if cancellation := activityDrainCancellation(ctx, err); cancellation != nil {
+				return result, cancellation
+			}
 			result.Failed++
+			result.NextAfterID = candidate.id
 			continue
 		}
 		result.Delivered++
+		result.NextAfterID = candidate.id
 	}
 	if !result.HasMore {
 		result.NextAfterID = ""
 	}
 	return result, nil
+}
+
+func activityDrainCancellation(ctx context.Context, deliveryErr error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(deliveryErr, context.Canceled) || errors.Is(deliveryErr, context.DeadlineExceeded) {
+		return deliveryErr
+	}
+	if code := status.Code(deliveryErr); code == codes.Canceled || code == codes.DeadlineExceeded {
+		return deliveryErr
+	}
+	return nil
 }
 
 func validQueryActivityDrainCursor(value string) bool {

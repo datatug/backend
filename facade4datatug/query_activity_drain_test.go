@@ -24,6 +24,20 @@ type queryActivityCrashAfterAdmissionLedger struct {
 	failed bool
 }
 
+type queryActivityCancelAtLedger struct {
+	contract4paymentus.UsageLedger
+	targetEventID string
+	cancel        context.CancelFunc
+}
+
+func (l queryActivityCancelAtLedger) Admit(ctx context.Context, activity contract4paymentus.UsageActivity) (contract4paymentus.UsageAdmission, error) {
+	if activity.EventID == l.targetEventID {
+		l.cancel()
+		return contract4paymentus.UsageAdmission{}, ctx.Err()
+	}
+	return l.UsageLedger.Admit(ctx, activity)
+}
+
 func (l *queryActivityCrashAfterAdmissionLedger) Admit(ctx context.Context, activity contract4paymentus.UsageActivity) (contract4paymentus.UsageAdmission, error) {
 	result, err := l.UsageLedger.Admit(ctx, activity)
 	if err == nil && !l.failed {
@@ -175,5 +189,40 @@ func TestQueryActivityDrainRecoversLostReturnAfterLedgerCommit(t *testing.T) {
 	}
 	if admission, err := f.ledger.Admit(f.ctx, pending.Activity); err != nil || !admission.Replay {
 		t.Fatalf("ledger did not retain one replayable event: %+v / %v", admission, err)
+	}
+}
+
+func TestQueryActivityDrainReturnsCancellationWithResumeCursor(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	type receiptEvent struct{ receiptID, eventID string }
+	var receipts []receiptEvent
+	for _, actorID := range []string{"cancel-a", "cancel-b"} {
+		activityContext := f.issue(actorID, "cancel-project")
+		accepted, err := f.service.Report(f.ctx, actorID, "business-space", QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "cancel-report", Kind: models4datatug.QueryActivityEdit})
+		if err != nil || !accepted.Accepted {
+			t.Fatalf("report for %s: %+v / %v", actorID, accepted, err)
+		}
+		receipts = append(receipts, receiptEvent{receiptID: accepted.ReceiptID, eventID: models4datatug.NewQueryActivityEventID(activityContext.ContextID, "cancel-report")})
+	}
+	sort.Slice(receipts, func(i, j int) bool { return receipts[i].receiptID < receipts[j].receiptID })
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	f.service.ledger = queryActivityCancelAtLedger{UsageLedger: f.ledger, targetEventID: receipts[1].eventID, cancel: cancel}
+	partial, err := f.service.Drain(ctx, "business-space", QueryActivityDrainRequest{Limit: 10})
+	if !errors.Is(err, context.Canceled) || partial.Scanned != 2 || partial.Delivered != 1 || partial.Failed != 0 || partial.NextAfterID != receipts[0].receiptID || partial.HasMore {
+		t.Fatalf("canceled drain lost its partial cursor: %+v / %v", partial, err)
+	}
+	// Resume exactly after the completed row; the canceled receipt was not
+	// advanced over and remains pending for a fresh worker context.
+	f.service.ledger = f.ledger
+	resumed, err := f.service.Drain(f.ctx, "business-space", QueryActivityDrainRequest{Limit: 10, AfterID: partial.NextAfterID})
+	if err != nil || resumed.Scanned != 1 || resumed.Delivered != 1 || resumed.Failed != 0 || resumed.NextAfterID != "" {
+		t.Fatalf("resume after cancellation: %+v / %v", resumed, err)
+	}
+	for _, receipt := range receipts {
+		pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord("business-space", receipt.receiptID)
+		if err := f.db.Get(f.ctx, pendingRecord); err != nil || pending.Validate() != nil || pending.DeliveryState != models4datatug.QueryActivityPendingStateDelivered {
+			t.Fatalf("receipt %s after resume: %+v / %v", receipt.receiptID, pending, err)
+		}
 	}
 }
