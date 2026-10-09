@@ -151,7 +151,7 @@ func TestGitHubAppClientRejectsInvalidOAuthResponsesAndRedirects(t *testing.T) {
 	}
 }
 
-func TestGitHubUserClientAuthenticatesAndValidatesIdentityAndRepositories(t *testing.T) {
+func TestGitHubUserClientListsOnlyDataTugInstallationRepositoriesAndIntersectsPermissions(t *testing.T) {
 	var requests []string
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests = append(requests, request.URL.Path+"?"+request.URL.RawQuery)
@@ -163,20 +163,12 @@ func TestGitHubUserClientAuthenticatesAndValidatesIdentityAndRepositories(t *tes
 			return jsonResponse(`{"id":101,"login":"alice"}`), nil
 		case "/repos/acme/private":
 			return jsonResponse(`{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":true}}`), nil
-		case "/user/repos":
-			if request.URL.Query().Get("page") == "1" {
-				var body strings.Builder
-				body.WriteByte('[')
-				for i := 0; i < 100; i++ {
-					if i != 0 {
-						body.WriteByte(',')
-					}
-					fmt.Fprintf(&body, `{"id":%d,"node_id":"R_%d","name":"private%d","full_name":"acme/private%d","default_branch":"main","permissions":{"pull":true,"push":true}}`, 44+i, i, i, i)
-				}
-				body.WriteByte(']')
-				return jsonResponse(body.String()), nil
-			}
-			return jsonResponse(`[]`), nil
+		case "/user/installations":
+			return jsonResponse(`{"total_count":4,"installations":[{"id":501,"app_id":5223634,"suspended_at":null,"permissions":{"contents":"write"}},{"id":502,"app_id":123,"suspended_at":null,"permissions":{"contents":"write"}},{"id":503,"app_id":5223634,"suspended_at":null,"permissions":{"contents":"read"}},{"id":504,"app_id":5223634,"suspended_at":"2026-10-01T00:00:00Z","permissions":{"contents":"write"}}]}`), nil
+		case "/user/installations/501/repositories":
+			return jsonResponse(`{"total_count":2,"repositories":[{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":true,"admin":false}},{"id":46,"node_id":"R_kgDOABF","name":"user-read-only","full_name":"acme/user-read-only","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":false,"admin":false}}]}`), nil
+		case "/user/installations/503/repositories":
+			return jsonResponse(`{"total_count":1,"repositories":[{"id":45,"node_id":"R_kgDOABD","name":"read-only","full_name":"acme/read-only","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":true,"admin":false}}]}`), nil
 		default:
 			t.Fatalf("unexpected GitHub API path %q", request.URL.Path)
 			return nil, errors.New("unexpected path")
@@ -200,11 +192,11 @@ func TestGitHubUserClientAuthenticatesAndValidatesIdentityAndRepositories(t *tes
 	if _, err = user.Repository(context.Background(), RepositoryRef{ID: 45, Owner: "acme", Name: "private"}); !errors.Is(err, ErrGitHubRepositoryDenied) {
 		t.Fatalf("Repository immutable ID mismatch error = %v", err)
 	}
-	repositories, err := user.Repositories(context.Background())
-	if err != nil || len(repositories) != 100 || repositories[0].ID != ref.ID || repositories[0].DefaultBranch != "main" {
-		t.Fatalf("Repositories() returned %d repositories, err=%v", len(repositories), err)
+	repositories, err := user.DataTugRepositories(context.Background())
+	if err != nil || len(repositories) != 3 || repositories[0].ID != ref.ID || repositories[0].EffectivePermission != RepositoryWrite || repositories[1].EffectivePermission != RepositoryRead || repositories[2].EffectivePermission != RepositoryRead {
+		t.Fatalf("DataTugRepositories() returned %+v, err=%v", repositories, err)
 	}
-	if len(requests) != 5 || !strings.Contains(requests[3], "page=1") || !strings.Contains(requests[4], "page=2") {
+	if len(requests) != 6 || requests[3] != "/user/installations?per_page=100&page=1" || requests[4] != "/user/installations/501/repositories?per_page=100&page=1" || requests[5] != "/user/installations/503/repositories?per_page=100&page=1" {
 		t.Fatalf("GitHub API requests = %v", requests)
 	}
 }
@@ -212,38 +204,49 @@ func TestGitHubUserClientAuthenticatesAndValidatesIdentityAndRepositories(t *tes
 func TestGitHubUserClientRejectsMalformedRepositoryListings(t *testing.T) {
 	for _, test := range []struct {
 		name      string
+		path      string
 		status    int
 		body      string
 		transport error
 	}{
-		{name: "API denial", status: http.StatusForbidden, body: `[]`},
-		{name: "invalid JSON", status: http.StatusOK, body: `[`},
-		{name: "missing immutable node ID", status: http.StatusOK, body: `[{"id":44,"name":"private","full_name":"acme/private","permissions":{"pull":true}}]`},
-		{name: "invalid repository name", status: http.StatusOK, body: `[{"id":44,"node_id":"R_kgDOABC","name":"bad/name","full_name":"acme/bad/name","permissions":{"pull":true}}]`},
-		{name: "invalid default branch", status: http.StatusOK, body: `[{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","default_branch":"bad branch","permissions":{"pull":true}}]`},
-		{name: "network failure", transport: errors.New("private transport failure")},
+		{name: "API denial", path: "/user/installations", status: http.StatusForbidden, body: `{}`},
+		{name: "invalid JSON", path: "/user/installations", status: http.StatusOK, body: `[`},
+		{name: "missing suspension state", path: "/user/installations", status: http.StatusOK, body: `{"total_count":1,"installations":[{"id":501,"app_id":5223634,"permissions":{"contents":"write"}}]}`},
+		{name: "trailing JSON", path: "/user/installations", status: http.StatusOK, body: `{"total_count":0,"installations":[]} {}`},
+		{name: "oversized response", path: "/user/installations", status: http.StatusOK, body: `{"total_count":0,"installations":[]}` + strings.Repeat(" ", maxGitHubResponseBytes+1)},
+		{name: "incomplete installation page", path: "/user/installations", status: http.StatusOK, body: `{"total_count":1,"installations":[]}`},
+		{name: "missing immutable node ID", path: "/user/installations/501/repositories", status: http.StatusOK, body: `{"total_count":1,"repositories":[{"id":44,"name":"private","full_name":"acme/private","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":true,"admin":false}}]}`},
+		{name: "invalid repository name", path: "/user/installations/501/repositories", status: http.StatusOK, body: `{"total_count":1,"repositories":[{"id":44,"node_id":"R_kgDOABC","name":"bad/name","full_name":"acme/bad/name","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":true,"admin":false}}]}`},
+		{name: "missing default branch metadata", path: "/user/installations/501/repositories", status: http.StatusOK, body: `{"total_count":1,"repositories":[{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","owner":{"login":"acme"},"permissions":{"pull":true,"push":true,"admin":false}}]}`},
+		{name: "invalid default branch", path: "/user/installations/501/repositories", status: http.StatusOK, body: `{"total_count":1,"repositories":[{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","default_branch":"bad branch","owner":{"login":"acme"},"permissions":{"pull":true,"push":true,"admin":false}}]}`},
+		{name: "missing user permissions", path: "/user/installations/501/repositories", status: http.StatusOK, body: `{"total_count":1,"repositories":[{"id":44,"node_id":"R_kgDOABC","name":"private","full_name":"acme/private","default_branch":"main","owner":{"login":"acme"},"permissions":{"pull":true,"push":true}}]}`},
+		{name: "network failure", path: "/user/installations", transport: errors.New("private transport failure")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client, err := NewGitHubAppClient(GitHubAppConfig{
 				AppID: DataTugGitHubAppID, ClientID: "client-id", ClientSecret: "client-secret",
 				CallbackURL: "https://datatug.app/github/callback",
 			}, &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-				if request.URL.Path != "/user/repos" {
+				if request.URL.Path != "/user/installations" && request.URL.Path != "/user/installations/501/repositories" {
 					t.Fatalf("repository listing requested unexpected path %q", request.URL.Path)
 				}
 				if test.transport != nil {
 					return nil, test.transport
 				}
-				response := jsonResponse(test.body)
+				body := test.body
+				if request.URL.Path != test.path {
+					body = `{"total_count":1,"installations":[{"id":501,"app_id":5223634,"suspended_at":null,"permissions":{"contents":"write"}}]}`
+				}
+				response := jsonResponse(body)
 				response.StatusCode = test.status
 				return response, nil
 			})})
 			if err != nil {
 				t.Fatal(err)
 			}
-			repositories, err := client.UserClient(testTokens(time.Now().Add(time.Hour), time.Now().Add(2*time.Hour))).Repositories(context.Background())
+			repositories, err := client.UserClient(testTokens(time.Now().Add(time.Hour), time.Now().Add(2*time.Hour))).DataTugRepositories(context.Background())
 			if !errors.Is(err, ErrGitHubRepositoryDenied) || repositories != nil {
-				t.Fatalf("Repositories() = (%+v, %v), want no partial authorization", repositories, err)
+				t.Fatalf("DataTugRepositories() = (%+v, %v), want no partial authorization", repositories, err)
 			}
 		})
 	}

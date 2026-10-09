@@ -140,10 +140,6 @@ func TestProviderDeniesRepositoryOutsideDedicatedAppInstallation(t *testing.T) {
 	if _, err = provider.AuthorizeRepository(ctx, "firebase-A", ref, RepositoryRead); !errors.Is(err, ErrGitHubRepositoryDenied) {
 		t.Fatalf("repository authorization = %v, want denial when the dedicated App installation proves a different repository", err)
 	}
-	listed, err := provider.ListRepositories(ctx, "firebase-A")
-	if err != nil || len(listed) != 0 {
-		t.Fatalf("repository listing = (%+v, %v), want no repositories outside the dedicated App installation", listed, err)
-	}
 }
 
 func TestCredentialStoreSerializesRotatingRefreshAndFailsClosedAfterCrash(t *testing.T) {
@@ -318,8 +314,25 @@ func (f fakeUserClient) Repository(_ context.Context, ref RepositoryRef) (GitHub
 	}
 	return GitHubRepository{}, ErrGitHubRepositoryDenied
 }
-func (f fakeUserClient) Repositories(context.Context) ([]GitHubRepository, error) {
-	return append([]GitHubRepository(nil), f.app.repositories...), nil
+func (f fakeUserClient) RepositoryByName(_ context.Context, owner, name string) (GitHubRepository, error) {
+	for _, repo := range f.app.repositories {
+		if strings.EqualFold(repo.Owner, owner) && strings.EqualFold(repo.Name, name) {
+			return repo, nil
+		}
+	}
+	return GitHubRepository{}, ErrGitHubRepositoryDenied
+}
+func (f fakeUserClient) DataTugRepositories(context.Context) ([]GitHubRepository, error) {
+	repositories := append([]GitHubRepository(nil), f.app.repositories...)
+	for i := range repositories {
+		if repositories[i].EffectivePermission == "" && repositories[i].Permissions.Pull {
+			repositories[i].EffectivePermission = RepositoryRead
+			if repositories[i].Permissions.Push || repositories[i].Permissions.Admin {
+				repositories[i].EffectivePermission = RepositoryWrite
+			}
+		}
+	}
+	return repositories, nil
 }
 
 func testTokens(accessExpiry, refreshExpiry time.Time) OAuthTokens {

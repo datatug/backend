@@ -31,11 +31,17 @@ func (f *failingUserClient) Repository(ctx context.Context, ref RepositoryRef) (
 	}
 	return f.base.Repository(ctx, ref)
 }
-func (f *failingUserClient) Repositories(ctx context.Context) ([]GitHubRepository, error) {
+func (f *failingUserClient) RepositoryByName(ctx context.Context, owner, name string) (GitHubRepository, error) {
+	if f.repoErr != nil {
+		return GitHubRepository{}, f.repoErr
+	}
+	return f.base.RepositoryByName(ctx, owner, name)
+}
+func (f *failingUserClient) DataTugRepositories(ctx context.Context) ([]GitHubRepository, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.base.Repositories(ctx)
+	return f.base.DataTugRepositories(ctx)
 }
 
 type failingOAuthApp struct {
@@ -143,21 +149,35 @@ func TestProviderDoesNotExposeRepositoriesAfterProviderReadFailure(t *testing.T)
 }
 
 func TestProviderRepositoryDiscoveryFiltersUntrustedAndUninstalledEntries(t *testing.T) {
-	provider, app, installation, _, ref := newFailingProviderFixture(t)
+	provider, app, _, _, ref := newFailingProviderFixture(t)
 	app.repositories = append(app.repositories,
 		GitHubRepository{ID: 0, Owner: "acme", Name: "unidentified", Permissions: GitHubRepositoryPermissions{Pull: true}},
-		GitHubRepository{ID: 78, Owner: "../other", Name: "unsafe", Permissions: GitHubRepositoryPermissions{Pull: true}},
-		GitHubRepository{ID: 79, Owner: "acme", Name: "revoked", Permissions: GitHubRepositoryPermissions{Pull: false}},
-		GitHubRepository{ID: 80, Owner: "acme", Name: "other", Permissions: GitHubRepositoryPermissions{Pull: true}},
+		GitHubRepository{ID: 78, NodeID: "R_kgDOABD", Owner: "../other", Name: "unsafe", Permissions: GitHubRepositoryPermissions{Pull: true}},
 	)
 	listed, err := provider.ListRepositories(context.Background(), "firebase-A")
-	if err != nil || len(listed) != 1 || listed[0].ID != ref.ID || listed[0].EffectivePermission != RepositoryWrite {
-		t.Fatalf("repository discovery leaked untrusted entries: %+v %v", listed, err)
+	if !errors.Is(err, ErrGitHubRepositoryDenied) || listed != nil {
+		t.Fatalf("malformed repository inventory returned partial data: %+v %v", listed, err)
 	}
-	installation.access.ContentsRead = false
+	app.repositories = []GitHubRepository{
+		{ID: ref.ID, NodeID: "R_kgDOABC", Owner: ref.Owner, Name: ref.Name, Permissions: GitHubRepositoryPermissions{Pull: true, Push: true}},
+		{ID: 79, NodeID: "R_kgDOABE", Owner: "acme", Name: "revoked", Permissions: GitHubRepositoryPermissions{Pull: false}},
+	}
 	listed, err = provider.ListRepositories(context.Background(), "firebase-A")
-	if err != nil || len(listed) != 0 {
-		t.Fatalf("revoked App read grant still listed repositories: %+v %v", listed, err)
+	if err != nil || len(listed) != 1 || listed[0].ID != ref.ID {
+		t.Fatalf("user without read permission was not filtered: %+v %v", listed, err)
+	}
+}
+
+func TestProviderResolvesOnlySelectedRepositoryWithCurrentActor(t *testing.T) {
+	provider, app, _, _, ref := newFailingProviderFixture(t)
+	app.client.listErr = errors.New("full inventory must not be called")
+	repo, err := provider.ResolveRepositoryByName(context.Background(), "firebase-A", ref.Owner, ref.Name)
+	if err != nil || repo.ID != ref.ID || repo.Owner != ref.Owner || repo.Name != ref.Name {
+		t.Fatalf("ResolveRepositoryByName() = (%+v, %v)", repo, err)
+	}
+	app.client.actor = GitHubActor{ID: 999, Login: "mallory"}
+	if _, err = provider.ResolveRepositoryByName(context.Background(), "firebase-A", ref.Owner, ref.Name); !errors.Is(err, ErrGitHubActorMismatch) {
+		t.Fatalf("changed actor resolution error = %v, want actor mismatch", err)
 	}
 }
 

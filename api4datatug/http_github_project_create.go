@@ -51,12 +51,16 @@ type githubProjectReadRepository interface {
 }
 type githubProjectProvider interface {
 	ListRepositories(context.Context, string) ([]githubauth4datatug.GitHubRepository, error)
+	ResolveRepositoryByName(context.Context, string, string, string) (githubauth4datatug.GitHubRepository, error)
 	AuthorizeReadRepository(context.Context, string, githubauth4datatug.RepositoryRef) (githubProjectReadRepository, error)
 }
 type githubProjectProviderAdapter struct{ provider *githubauth4datatug.Provider }
 
 func (a githubProjectProviderAdapter) ListRepositories(ctx context.Context, uid string) ([]githubauth4datatug.GitHubRepository, error) {
 	return a.provider.ListRepositories(ctx, uid)
+}
+func (a githubProjectProviderAdapter) ResolveRepositoryByName(ctx context.Context, uid, owner, name string) (githubauth4datatug.GitHubRepository, error) {
+	return a.provider.ResolveRepositoryByName(ctx, uid, owner, name)
 }
 func (a githubProjectProviderAdapter) AuthorizeReadRepository(ctx context.Context, uid string, ref githubauth4datatug.RepositoryRef) (githubProjectReadRepository, error) {
 	return a.provider.AuthorizeRepository(ctx, uid, ref, githubauth4datatug.RepositoryRead)

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/datatug/backend/facade4datatug"
 	"github.com/datatug/backend/githubauth4datatug"
@@ -79,21 +78,10 @@ func httpPostGitHubSaveQuery(options GitHubProjectRouteOptions) http.HandlerFunc
 			sharedProjectError(w, http.StatusBadRequest, "invalid_project")
 			return
 		}
-		accessible, err := options.provider().ListRepositories(ctx, actorID)
+		selected, err := options.provider().ResolveRepositoryByName(ctx, actorID, owner, repoName)
 		if err != nil {
 			status, code := githubAuthorizationStatus(err)
 			sharedProjectError(w, status, code)
-			return
-		}
-		var selected *githubauth4datatug.GitHubRepository
-		for i := range accessible {
-			if strings.EqualFold(accessible[i].Owner, owner) && strings.EqualFold(accessible[i].Name, repoName) {
-				selected = &accessible[i]
-				break
-			}
-		}
-		if selected == nil {
-			sharedProjectError(w, http.StatusForbidden, "repository_denied")
 			return
 		}
 		repository, err := options.queryRepository(ctx, actorID, selected.ID, owner, repoName)

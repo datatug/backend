@@ -25,7 +25,7 @@ func TestRepositoryListAndMutationIntersectLiveUserAndAppGrants(t *testing.T) {
 	installation := &fakeInstallation{access: GitHubAppRepositoryAccess{InstallationID: 9, RepositoryID: 55, ContentsRead: true, ContentsWrite: false}}
 	provider := newProvider(store, app, installation, ProviderOptions{Now: func() time.Time { return now }})
 	ref := RepositoryRef{ID: repo.ID, Owner: repo.Owner, Name: repo.Name}
-	listed, err := provider.ListRepositories(ctx, "firebase-A")
+	listed, err := effectiveListForTest(ctx, provider, app, installation)
 	if err != nil || len(listed) != 1 || listed[0].EffectivePermission != RepositoryRead {
 		t.Fatalf("read-only App grant listed as writable: %+v %v", listed, err)
 	}
@@ -33,7 +33,7 @@ func TestRepositoryListAndMutationIntersectLiveUserAndAppGrants(t *testing.T) {
 		t.Fatalf("App grant unexpectedly allowed write: %v", err)
 	}
 	installation.access.ContentsWrite = true
-	listed, err = provider.ListRepositories(ctx, "firebase-A")
+	listed, err = effectiveListForTest(ctx, provider, app, installation)
 	if err != nil || len(listed) != 1 || listed[0].EffectivePermission != RepositoryWrite {
 		t.Fatalf("joint write grant not recognized: %+v %v", listed, err)
 	}
@@ -49,4 +49,12 @@ func TestRepositoryListAndMutationIntersectLiveUserAndAppGrants(t *testing.T) {
 	if err != nil || len(listed) != 0 {
 		t.Fatalf("revoked read still listed: %+v %v", listed, err)
 	}
+}
+
+func effectiveListForTest(ctx context.Context, provider *Provider, app *fakeOAuthApp, installation *fakeInstallation) ([]GitHubRepository, error) {
+	app.repositories[0].EffectivePermission = RepositoryRead
+	if installation.access.ContentsWrite && (app.repositories[0].Permissions.Push || app.repositories[0].Permissions.Admin) {
+		app.repositories[0].EffectivePermission = RepositoryWrite
+	}
+	return provider.ListRepositories(ctx, "firebase-A")
 }
