@@ -612,6 +612,8 @@ func TestHostedGitHubCreateMapsProviderAndAdmissionFailures(t *testing.T) {
 	}{
 		{"lost GitHub write", githubauth4datatug.ErrGitHubPermissionDenied, nil, http.StatusForbidden},
 		{"paid admission lost", nil, facade4datatug.ErrSharedProjectUnauthorized, http.StatusForbidden},
+		{"paid proof unproved", nil, facade4datatug.ErrPlanEffectUnproved, http.StatusServiceUnavailable},
+		{"owner database unavailable", nil, errors.New("owner database unavailable"), http.StatusServiceUnavailable},
 		{"quota filled", nil, facade4datatug.ErrProtectedProjectQuota, http.StatusConflict},
 		{"commit uncertain", nil, facade4datatug.ErrGitHubOutcomeUncertain, http.StatusConflict},
 		{"invalid create command", nil, facade4datatug.ErrGitHubProjectInvalid, http.StatusBadRequest},

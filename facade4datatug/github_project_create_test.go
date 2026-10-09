@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/datatug/backend/template4datatug"
@@ -29,6 +30,19 @@ type fakeGitHubCreateRepo struct {
 	findError          error
 	headAfterFirstRead string
 	headReads          int
+}
+
+type paidCreateOwnerResult struct {
+	fence PlanOwnerFence
+	err   error
+}
+
+func (o paidCreateOwnerResult) VerifyPersonalOwner(ctx context.Context, tx dal.ReadTransaction, actor, payer string) error {
+	return (paidCreateAuthority{}).VerifyPersonalOwner(ctx, tx, actor, payer)
+}
+
+func (o paidCreateOwnerResult) ReadOwner(context.Context, dal.ReadTransaction, string, string, string) (PlanOwnerFence, error) {
+	return o.fence, o.err
 }
 
 func (f *fakeGitHubCreateRepo) Scope() GitHubCreateRepositoryScope { return f.scope }
@@ -204,6 +218,71 @@ func TestGitHubCreateRejectsUnwritableRepoBeforeQuota(t *testing.T) {
 	opRecord, _ := models4datatug.NewGitHubProjectCreateOperationRecord("actor", "op")
 	if err := db.Get(context.Background(), record.NewRecordWithData(opRecord.Key(), new(models4datatug.GitHubProjectCreateOperation))); !record.IsNotFound(err) {
 		t.Fatalf("unpaid operation leaked: %v", err)
+	}
+}
+
+func TestGitHubCreateClassifiesAbsentOwnerAsUnauthorizedBeforeReservation(t *testing.T) {
+	ownerStoreErr := errors.New("owner store unavailable")
+	for _, tc := range []struct {
+		name          string
+		owner         paidCreateOwnerResult
+		overrideOwner bool
+		prepare       func(t *testing.T, db dal.DB)
+		want          error
+	}{
+		{name: "absent LIVE owner fence", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "personal-1"}}, overrideOwner: true, want: ErrSharedProjectUnauthorized},
+		{name: "partial contradictory owner fence", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "personal-1", OwnerGeneration: 1, SubscriptionRevision: 1}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "mismatched owner mode", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "test", Family: "datatug", AccountID: "personal-1"}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "mismatched owner family", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "other", AccountID: "personal-1"}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "mismatched owner account", owner: paidCreateOwnerResult{fence: PlanOwnerFence{Mode: "live", Family: "datatug", AccountID: "other-account"}}, overrideOwner: true, want: ErrPlanEffectUnproved},
+		{name: "owner store failure", owner: paidCreateOwnerResult{err: ownerStoreErr}, overrideOwner: true, want: ownerStoreErr},
+		{name: "missing plan application", prepare: func(t *testing.T, db dal.DB) {
+			t.Helper()
+			key := models4datatug.NewPlanApplicationKey("live", "datatug", "personal-1")
+			if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error { return tx.Delete(ctx, key) }); err != nil {
+				t.Fatal(err)
+			}
+		}, want: ErrPlanEffectUnproved},
+		{name: "mismatched paid limits", prepare: func(t *testing.T, db dal.DB) {
+			t.Helper()
+			if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+				var plan models4datatug.PlanRecord
+				r := record.NewRecordWithData(models4datatug.NewCurrentPlanKey("personal-1"), &plan)
+				if err := tx.Get(ctx, r); err != nil {
+					return err
+				}
+				wrongLimit := int64(6)
+				plan.Limits.ProtectedProjects = &wrongLimit
+				return tx.Set(ctx, r)
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}, want: ErrPlanEffectUnproved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, options := paidCreateFixture(t)
+			if tc.prepare != nil {
+				tc.prepare(t, db)
+			}
+			if tc.overrideOwner {
+				options.Owner = tc.owner
+			}
+			service, err := NewPaidSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := githubRepo()
+			if _, err := service.CreateGitHubProject(context.Background(), githubCommand(), repo); !errors.Is(err, tc.want) {
+				t.Fatalf("create error %v, want %v", err, tc.want)
+			}
+			if repo.commitCount != 0 || paidQuota(t, db).Allocated != 0 {
+				t.Fatalf("preflight failure committed=%d allocated=%d", repo.commitCount, paidQuota(t, db).Allocated)
+			}
+			opRecord, _ := models4datatug.NewGitHubProjectCreateOperationRecord("actor", "op")
+			if err := db.Get(context.Background(), opRecord); !record.IsNotFound(err) {
+				t.Fatalf("preflight failure left an operation reservation: %v", err)
+			}
+		})
 	}
 }
 
