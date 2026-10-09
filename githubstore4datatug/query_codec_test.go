@@ -67,7 +67,7 @@ func TestPreviewQueryMutationCreatesCompletePairAndDeletesOldBody(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(created.Changes) != 2 || created.Response.Revision == "" || created.Response.Query.FolderPath != "~" {
+	if len(created.Changes) != 2 || created.Response.Revision == "" || created.Response.Query.FolderPath != "~" || !created.BodyChanged {
 		t.Fatalf("created %+v", created)
 	}
 	snapshot := make(map[string][]byte)
@@ -91,12 +91,53 @@ func TestPreviewQueryMutationCreatesCompletePairAndDeletesOldBody(t *testing.T) 
 		deletedOld = deletedOld || change.Path == "queries/customers.query.dtql" && change.Delete
 		addedNew = addedNew || change.Path == "queries/customers.query.sql" && !change.Delete && string(change.Content) == "SELECT 1"
 	}
-	if !deletedOld || !addedNew || updated.Response.Revision == created.Response.Revision {
+	if !deletedOld || !addedNew || updated.Response.Revision == created.Response.Revision || !updated.BodyChanged {
 		t.Fatalf("type-change pair %+v", updated)
 	}
 	request.IfMatch = "stale-revision"
 	if _, err := PreviewQueryMutation(context.Background(), request, snapshot); err == nil {
 		t.Fatal("stale query revision accepted")
+	}
+}
+
+func TestPreviewQueryMutationClassifiesBodyRatherThanMetadataOrType(t *testing.T) {
+	request := queryRequest()
+	request.Query.ID, request.Query.Title = "customers", "Customers"
+	created, err := PreviewQueryMutation(context.Background(), request, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := make(map[string][]byte)
+	for _, change := range created.Changes {
+		snapshot[change.Path] = change.Content
+	}
+	request.IfNoneMatch = false
+	request.IfMatch = created.Response.Revision
+	if noOp, err := PreviewQueryMutation(context.Background(), request, snapshot); err == nil {
+		t.Fatalf("no-op save produced a change candidate: %+v", noOp)
+	}
+	request.Query.Title = "Renamed customers"
+	metadata, err := PreviewQueryMutation(context.Background(), request, snapshot)
+	if err != nil || len(metadata.Changes) == 0 || metadata.BodyChanged {
+		t.Fatalf("metadata-only save classified as body edit: %+v %v", metadata, err)
+	}
+	request.Query.Title = "Customers"
+	request.Query.Type = datatug.QueryTypeSQL
+	typeOnly, err := PreviewQueryMutation(context.Background(), request, snapshot)
+	if err != nil || len(typeOnly.Changes) == 0 || typeOnly.BodyChanged {
+		t.Fatalf("type-only save classified as body edit: %+v %v", typeOnly, err)
+	}
+	request.Query.Text = "SELECT 1"
+	changed, err := PreviewQueryMutation(context.Background(), request, snapshot)
+	if err != nil || !changed.BodyChanged {
+		t.Fatalf("actual body edit omitted: %+v %v", changed, err)
+	}
+	request.IfNoneMatch = true
+	request.IfMatch = ""
+	request.Query.Text = ""
+	emptyCreate, err := PreviewQueryMutation(context.Background(), request, nil)
+	if err != nil || emptyCreate.BodyChanged {
+		t.Fatalf("empty-body create classified as body edit: %+v %v", emptyCreate, err)
 	}
 }
 

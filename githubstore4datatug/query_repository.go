@@ -102,7 +102,7 @@ func (r *queryRepository) PrepareQuerySave(ctx context.Context, folder, projectI
 	if err != nil {
 		return nil, err
 	}
-	plan := &facade4datatug.GitHubQuerySavePlan{Changes: make([]facade4datatug.GitHubQueryFileChange, 0, len(preview.Changes)), ExpectedTree: make(map[string]facade4datatug.GitHubQueryExpectedFile, len(snapshot.allFiles)), Response: preview.Response}
+	plan := &facade4datatug.GitHubQuerySavePlan{Changes: make([]facade4datatug.GitHubQueryFileChange, 0, len(preview.Changes)), ExpectedTree: make(map[string]facade4datatug.GitHubQueryExpectedFile, len(snapshot.allFiles)), Response: preview.Response, BodyChanged: preview.BodyChanged}
 	for name, entry := range snapshot.allFiles {
 		plan.ExpectedTree[name] = facade4datatug.GitHubQueryExpectedFile{OID: entry.OID, Mode: entry.Mode, Size: entry.Size}
 	}
