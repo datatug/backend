@@ -4,6 +4,9 @@ package models4datatug
 import (
 	"testing"
 	"time"
+
+	"github.com/sneat-co/sneat-core-modules/linkage/contract4linkage"
+	"github.com/sneat-co/sneat-go-core/coretypes"
 )
 
 func TestProjectQuotaLimitRequiresExplicitUnlimited(t *testing.T) {
@@ -44,6 +47,31 @@ func TestPaidAdmissionRecordsRefuseUnknownOrUnattributedState(t *testing.T) {
 	admission.ProjectID = "../other"
 	if err := admission.Validate(); err == nil {
 		t.Fatal("admission with ambiguous project ID accepted")
+	}
+}
+
+func TestBusinessAdmissionSupportsExplicitTestModeButNoUnknownMode(t *testing.T) {
+	at := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	owner := ProjectOwnerContactProof{
+		Version: 1, Role: "owner", CatalogVersion: "roles-v1",
+		Contact: contract4linkage.RelationshipEntityRef{
+			SpaceID: coretypes.SpaceID("business-space"),
+			ItemRef: coretypes.ItemRef{ExtID: "contactus", Collection: "contacts", ItemID: "owner-contact"},
+		},
+	}
+	admission := ProjectAdmission{
+		OwnerContact: owner, Version: 2, Mode: "test", Product: "datatug-business-usage", PayerID: "business-space",
+		ActorID: "actor", SpaceID: "business-space", ProjectID: "project", CommandID: "command", RequestDigest: "digest",
+		LimitsVersion: "business-test-v1", SubscriptionID: "subscription", ProfileVersion: "business-test-v1",
+		OwnerGeneration: 1, CreatedAt: at, ServiceID: "datatug", PlanID: "datatug-business-usage-monthly",
+		PaidServiceProofID: "test-proof", OwnerRevision: 1, UnlimitedProjects: true, UnlimitedContacts: true,
+	}
+	if err := admission.Validate(); err != nil {
+		t.Fatalf("fixed TEST Business admission rejected structurally: %v", err)
+	}
+	admission.Mode = "sandbox"
+	if err := admission.Validate(); err == nil {
+		t.Fatal("unknown-mode Business admission accepted")
 	}
 }
 func TestProjectQuotaKeysIsolateModeProductPayerAndSpace(t *testing.T) {

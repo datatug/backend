@@ -82,11 +82,12 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 		return zero, ErrQueryActivityUnauthorized
 	}
 	projectRef := businessActivityProjectRef(spaceID, projectID)
-	admission, err := readLinkedProjectAdmission(ctx, sharedProjectReadTransaction{tx}, projectRef, project)
+	mode := r.access.Mode()
+	admission, err := readLinkedProjectAdmissionForMode(ctx, sharedProjectReadTransaction{tx}, projectRef, project, string(mode))
 	if err != nil {
 		return zero, err
 	}
-	if admission.Version != 2 || admission.Mode != "live" || admission.Product != BusinessProjectProductID ||
+	if admission.Version != 2 || admission.Mode != string(mode) || admission.Product != BusinessProjectProductID ||
 		admission.SpaceID != spaceID || admission.ProjectID != projectID || admission.PayerID != spaceID ||
 		admission.ServiceID != BusinessProjectServiceID {
 		return zero, ErrQueryActivityUnauthorized
@@ -100,7 +101,7 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 	if err != nil {
 		return zero, err
 	}
-	if access.Mode != string(contract4paymentus.ModeLive) || access.ServiceID != BusinessProjectServiceID ||
+	if access.Mode != string(mode) || access.ServiceID != BusinessProjectServiceID ||
 		access.PayerSpaceID != spaceID || access.OwnerFamily != BusinessProjectOwnerFamily ||
 		access.AccountKind != BusinessProjectAccountKind || access.ProductID != BusinessProjectProductID ||
 		(access.PlanID != BusinessMonthlyPlanID && access.PlanID != BusinessAnnualPlanID) ||
@@ -109,7 +110,7 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 	}
 
 	scope := contract4paymentus.ServicePurchaseScope{
-		Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ServiceID: BusinessProjectServiceID,
+		Mode: mode, SpaceID: spaceID, ServiceID: BusinessProjectServiceID,
 	}
 	initial, err := r.initialStarts.ReadInitialServiceStart(ctx, sharedProjectReadTransaction{tx}, scope)
 	if err != nil {
@@ -127,18 +128,18 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 	if err != nil {
 		return zero, err
 	}
-	// A period's pricing is frozen by the native UsageLedger at Open. Reuse
-	// that exact snapshot after a config revision; fall back to current pricing
-	// only before the native period exists. Unknown or malformed native state
-	// must never be treated as absence.
+	// Pricing and the immutable payer are frozen by the native UsageLedger at
+	// Open. Acceptance requires that exact native state; an absent period is not
+	// permission to calculate a replacement snapshot.
 	state, periodErr := r.periods.ReadPeriod(ctx, sharedProjectReadTransaction{tx}, period.Ref)
 	if periodErr == nil {
 		if !validBusinessUsageSnapshot(state.Snapshot) || !sameBusinessUsageWindow(period, state.Snapshot) ||
-			!usagePeriodMatchesOriginalStart(state.Snapshot, initial) || state.Closed {
+			!usagePeriodMatchesOriginalStart(state.Snapshot, initial) || state.Closed ||
+			!validBusinessPayerDigest(state.PayerBinding.Digest) || !businessCurrentPayerMatchesBinding(access, state.PayerBinding) {
 			return zero, ErrBusinessServiceUnproved
 		}
 		period = state.Snapshot
-	} else if !errors.Is(periodErr, contract4paymentus.ErrUsagePeriodMissing) {
+	} else {
 		return zero, ErrBusinessServiceUnproved
 	}
 	if access.PaidServiceProofID == "" || queryProof == "" {
@@ -147,7 +148,7 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 	return BusinessActivityBinding{
 		Period: period.Ref, PeriodStartUTC: period.StartUTC, PeriodEndUTC: period.EndUTC,
 		PaidUntilUTC: access.PaidUntilUTC, PaidBindingProofID: access.PaidServiceProofID,
-		QueryUseProofID: queryProof, QueryUseAllowed: true,
+		PayerBindingDigest: state.PayerBinding.Digest, QueryUseProofID: queryProof, QueryUseAllowed: true,
 	}, nil
 }
 
@@ -267,4 +268,20 @@ func validBusinessInitialServiceStart(start contract4paymentus.ServiceInitialSer
 		validBusinessServiceTime(start.AnchorUTC) && validBusinessServiceTime(start.InitialPeriodEndUTC) &&
 		validBusinessServiceTime(start.ObservedAtUTC) && start.AnchorUTC.Before(start.InitialPeriodEndUTC) &&
 		!start.ObservedAtUTC.Before(start.AnchorUTC)
+}
+
+func businessCurrentPayerMatchesBinding(access SpaceServiceAccess, binding contract4paymentus.UsagePeriodPayerBinding) bool {
+	return access.Mode == string(binding.Scope.Mode) && access.ServiceID == binding.Scope.ServiceID &&
+		access.PayerSpaceID == binding.PayerSpaceID && access.AccountKind == binding.AccountKind &&
+		access.OwnerFamily == binding.OwnerFamily && access.ProductID == binding.ProductID &&
+		access.ProviderAccountID == binding.ProviderAccountID && access.CustomerID == binding.CustomerID &&
+		access.LineageID == binding.LineageID
+}
+
+func validBusinessPayerDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }

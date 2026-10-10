@@ -214,9 +214,9 @@ func TestBusinessUsageSnapshotRejectsUnanchoredOrUnapprovedFrozenState(t *testin
 	anchor := time.Date(2026, 10, 1, 7, 0, 0, 0, time.UTC)
 	valid := validBusinessUsageTestSnapshot(t, contract4paymentus.DataTugBusinessUsagePricing(), anchor, anchor)
 	for name, mutate := range map[string]func(*contract4paymentus.UsagePeriodSnapshot){
-		"non-live scope": func(p *contract4paymentus.UsagePeriodSnapshot) { p.Ref.Scope.Mode = contract4paymentus.ModeTest },
-		"foreign payer":  func(p *contract4paymentus.UsagePeriodSnapshot) { p.Ref.Scope.PayerID = "other-space" },
-		"missing anchor": func(p *contract4paymentus.UsagePeriodSnapshot) { p.AnchorUTC = time.Time{} },
+		"unsupported scope mode": func(p *contract4paymentus.UsagePeriodSnapshot) { p.Ref.Scope.Mode = contract4paymentus.Mode("sandbox") },
+		"foreign payer":          func(p *contract4paymentus.UsagePeriodSnapshot) { p.Ref.Scope.PayerID = "other-space" },
+		"missing anchor":         func(p *contract4paymentus.UsagePeriodSnapshot) { p.AnchorUTC = time.Time{} },
 		"foreign timezone": func(p *contract4paymentus.UsagePeriodSnapshot) {
 			p.StartUTC = p.StartUTC.In(time.FixedZone("offset", 3600))
 		},
@@ -270,18 +270,18 @@ func TestBusinessUsageCloseTermsRequireEmptyPaidCapacityBasis(t *testing.T) {
 	basis := contract4paymentus.CapacityBasis{Owner: contract4paymentus.CapacityOwner{
 		Mode: contract4paymentus.ModeLive, SpaceID: "space-a", ProductID: BusinessProjectProductID, PayerID: "space-a",
 	}}
-	terms, err := businessUsageCloseTermsForBasis(period, basis)
+	terms, err := businessUsageCloseTermsForBasis(contract4paymentus.ModeLive, period, basis)
 	if err != nil || terms.Capacity.EffectivePrepaidUnits != 0 || terms.Capacity.Digest == "" || terms.BaseEvent != contract4paymentus.UsageBaseNone ||
 		!terms.BillMonthlyOverage || terms.DiscountPercent != 0 {
 		t.Fatalf("empty-basis usage pricing terms: %+v / %v", terms, err)
 	}
 	basis.Lots = []contract4paymentus.PaidCapacityLot{{Owner: basis.Owner, LotID: "lot-a"}}
-	if _, err := businessUsageCloseTermsForBasis(period, basis); err == nil {
+	if _, err := businessUsageCloseTermsForBasis(contract4paymentus.ModeLive, period, basis); err == nil {
 		t.Fatal("non-empty paid-lot basis bypassed unresolved partial-window coverage policy")
 	}
 	basis.Lots = nil
 	basis.Revision = 1
-	if _, err := businessUsageCloseTermsForBasis(period, basis); err == nil {
+	if _, err := businessUsageCloseTermsForBasis(contract4paymentus.ModeLive, period, basis); err == nil {
 		t.Fatal("inconsistent empty owner revision accepted")
 	}
 }
@@ -312,7 +312,7 @@ func TestNativeBusinessCloseTermsRejectBrokenAnchorAndPeriodReads(t *testing.T) 
 		}
 		return initial, readErr
 	})
-	reader, err := NewNativeBusinessUsageCloseTermsReader(db, initialReader, periods)
+	reader, err := NewNativeBusinessUsageCloseTermsReader(contract4paymentus.ModeLive, db, initialReader, periods)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,14 +412,14 @@ func TestBusinessUsagePeriodOpenRecoversAfterLedgerCommitAndCloseUsesHistoricalP
 	})
 	access := newBusinessVerifier(t, currentAccess, func() time.Time { return openAt })
 	periods := &businessUsagePeriodStateReader{states: make(map[contract4paymentus.UsagePeriodRef]contract4paymentus.UsagePeriodState)}
-	terms, err := NewNativeBusinessUsageCloseTermsReader(db, initialReader, periods)
+	terms, err := NewNativeBusinessUsageCloseTermsReader(contract4paymentus.ModeLive, db, initialReader, periods)
 	if err != nil {
 		t.Fatalf("construct native close terms reader: %v", err)
 	}
 	serverNow := openAt
 	currentPricing := contract4paymentus.DataTugBusinessUsagePricing()
 	authorityOptions := BusinessUsagePeriodAuthorityOptions{
-		Access: access, InitialStarts: initialReader, Periods: periods, CloseTerms: terms,
+		Mode: contract4paymentus.ModeLive, Access: access, InitialStarts: initialReader, Periods: periods, CloseTerms: terms,
 		Pricing: func() contract4paymentus.UsagePricingConfig { return currentPricing }, Now: func() time.Time { return serverNow },
 	}
 	authority, err := NewNativeBusinessUsagePeriodAuthority(authorityOptions)
@@ -457,7 +457,7 @@ func TestBusinessUsagePeriodOpenRecoversAfterLedgerCommitAndCloseUsesHistoricalP
 		"period reader":  {db: db, initial: initialReader},
 	} {
 		t.Run("close terms constructor requires "+name, func(t *testing.T) {
-			if got, err := NewNativeBusinessUsageCloseTermsReader(args.db, args.initial, args.periods); got != nil || !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
+			if got, err := NewNativeBusinessUsageCloseTermsReader(contract4paymentus.ModeLive, args.db, args.initial, args.periods); got != nil || !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
 				t.Fatalf("close terms reader = %v, error = %v; want unavailable", got, err)
 			}
 		})
@@ -981,7 +981,7 @@ func TestBusinessUsagePeriodOpenRecoversAfterLedgerCommitAndCloseUsesHistoricalP
 	if err := db.Get(ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointClosing {
 		t.Fatalf("lost Close response did not retain the retry fence: %+v / %v", checkpoint, err)
 	}
-	activityService := &QueryActivityService{db: db, now: func() time.Time { return serverNow }}
+	activityService := &QueryActivityService{mode: contract4paymentus.ModeLive, db: db, now: func() time.Time { return serverNow }}
 	worker, err := NewBusinessUsageLifecycleWorker(db, db, service, activityService, func() time.Time { return serverNow })
 	if err != nil {
 		t.Fatalf("construct Business usage lifecycle worker: %v", err)

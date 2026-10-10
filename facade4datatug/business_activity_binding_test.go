@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func newBusinessActivityFixture(t *testing.T, actorID string) (dal.DB, contract4
 		Owner: projectContactFixturePort{}, Contacts: projectContactFixturePort{},
 	}
 	service, err := NewBusinessSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, BusinessSharedProjectOptions{
-		AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"},
+		AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1", Mode: contract4paymentus.ModeLive},
 		ServiceReader: currentReader,
 		ContactLinks:  contactLinks,
 	})
@@ -90,8 +91,21 @@ func newBusinessActivityFixture(t *testing.T, actorID string) (dal.DB, contract4
 		InitialPeriodEndUTC: time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC),
 		ObservedAtUTC:       time.Date(2026, 10, 1, 9, 31, 0, 0, time.UTC),
 	}
-	access := newBusinessVerifier(t, currentReader, func() time.Time { return sharedTestTime })
+	usageScope := contract4paymentus.UsageScope{
+		Mode: scope.Mode, SpaceID: created.SpaceID, ProductID: BusinessProjectProductID,
+		PayerID: created.SpaceID, ServiceID: BusinessProjectServiceID,
+	}
 	periods := &businessUsagePeriodStateReader{states: make(map[contract4paymentus.UsagePeriodRef]contract4paymentus.UsagePeriodState)}
+	period, err := contract4paymentus.UsagePeriodForAnchor(usageScope, contract4paymentus.DataTugBusinessUsagePricing(), anchor.AnchorUTC, sharedTestTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	periods.states[period.Ref] = contract4paymentus.UsagePeriodState{Snapshot: period, PayerBinding: contract4paymentus.UsagePeriodPayerBinding{
+		Digest: strings.Repeat("a", 64), Scope: period.Ref.Scope, PayerSpaceID: created.SpaceID,
+		AccountKind: BusinessProjectAccountKind, OwnerFamily: BusinessProjectOwnerFamily, ProductID: BusinessProjectProductID,
+		ProviderAccountID: "provider-account", CustomerID: "original-customer", LineageID: "initial-lineage",
+	}}
+	access := newBusinessVerifier(t, currentReader, func() time.Time { return sharedTestTime })
 	reader, err := NewNativeBusinessActivityBindingReader(BusinessActivityBindingReaderOptions{
 		Access:  access,
 		Periods: periods,
@@ -210,7 +224,15 @@ func TestBusinessActivityBindingKeepsNativeFrozenPeriodAcrossPricingRevision(t *
 	}
 	periods := reader.periods.(*businessUsagePeriodStateReader)
 	periods.mu.Lock()
-	periods.states[frozenPeriod.Ref] = contract4paymentus.UsagePeriodState{Snapshot: frozenPeriod, DistinctMAU: 1}
+	periods.states[frozenPeriod.Ref] = contract4paymentus.UsagePeriodState{
+		Snapshot: frozenPeriod, DistinctMAU: 1,
+		PayerBinding: contract4paymentus.UsagePeriodPayerBinding{
+			Digest: strings.Repeat("a", 64), Scope: frozenPeriod.Ref.Scope, PayerSpaceID: string(projectRef.SpaceID),
+			AccountKind: BusinessProjectAccountKind, OwnerFamily: BusinessProjectOwnerFamily,
+			ProductID: BusinessProjectProductID, ProviderAccountID: "provider-account", CustomerID: "original-customer",
+			LineageID: "initial-lineage",
+		},
+	}
 	periods.mu.Unlock()
 	var got BusinessActivityBinding
 	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {

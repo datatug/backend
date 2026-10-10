@@ -18,17 +18,21 @@ import (
 
 type businessCurrentServiceReader struct {
 	access contract4paymentus.CurrentSpaceServiceAccess
+	mode   contract4paymentus.Mode
 	err    error
 	calls  int
 }
 
-func (*businessCurrentServiceReader) Mode() contract4paymentus.Mode {
+func (r *businessCurrentServiceReader) Mode() contract4paymentus.Mode {
+	if r.mode != "" {
+		return r.mode
+	}
 	return contract4paymentus.ModeLive
 }
 
 func (r *businessCurrentServiceReader) ReadCurrentSpaceServiceAccess(_ context.Context, tx dal.ReadTransaction, scope contract4paymentus.ServicePurchaseScope) (contract4paymentus.CurrentSpaceServiceAccess, error) {
 	r.calls++
-	if tx == nil || scope.Mode != contract4paymentus.ModeLive || scope.ServiceID != BusinessProjectServiceID || scope.SpaceID == "" || scope != r.access.Scope || scope.SpaceID != r.access.PayerSpaceID {
+	if tx == nil || scope.Mode != r.Mode() || scope.ServiceID != BusinessProjectServiceID || scope.SpaceID == "" || scope != r.access.Scope || scope.SpaceID != r.access.PayerSpaceID {
 		return contract4paymentus.CurrentSpaceServiceAccess{}, ErrBusinessServiceUnproved
 	}
 	if _, writable := tx.(dal.ReadwriteTransaction); writable {
@@ -49,7 +53,7 @@ func newBusinessProjectFixture(t *testing.T) (dal.DB, *SharedProjectService, *bu
 	access.PayerSpaceID = "space"
 	reader := &businessCurrentServiceReader{access: access}
 	service, err := NewBusinessSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, BusinessSharedProjectOptions{
-		AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"},
+		AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1", Mode: contract4paymentus.ModeLive},
 		ServiceReader: reader,
 		ContactLinks:  paidFixtureOwnerLinks(),
 	})
@@ -111,6 +115,65 @@ func TestBusinessCreateSharedProjectUsesLiveSpaceAuthorityWithoutProQuota(t *tes
 	}
 	if _, err := service.ReadSharedProjectAIEligibility(context.Background(), "actor", ref.SpaceID, ref.ProjectID); !errors.Is(err, ErrProjectAIEligibilityUnavailable) {
 		t.Fatalf("unresolved Business AI entitlement was enabled: %v", err)
+	}
+}
+
+func TestBusinessCreateUsesConfiguredTestModeWithoutLiveFallback(t *testing.T) {
+	db := sneatcoretesting.NewMemoryDB()
+	seedPaidOwnerContact(t, db, "space")
+	access := validPaymentusBusinessAccess(sharedTestTime)
+	access.Scope.Mode = contract4paymentus.ModeTest
+	access.PayerSpaceID = "space"
+	access.Scope.SpaceID = "space"
+	reader := &businessCurrentServiceReader{access: access, mode: contract4paymentus.ModeTest}
+	service, err := NewBusinessSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, BusinessSharedProjectOptions{
+		AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-test-v1", Mode: contract4paymentus.ModeTest},
+		ServiceReader: reader, ContactLinks: paidFixtureOwnerLinks(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := service.resolveSharedProjectCreateBinding(context.Background(), "actor", "space", "command", "Project", BillingIntentSpaceBusiness)
+	if err != nil || binding.Mode != string(contract4paymentus.ModeTest) {
+		t.Fatalf("Business request did not inherit fixed TEST mode: %+v %v", binding, err)
+	}
+	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		access, err := service.business.ReadCurrent(ctx, tx, "space")
+		if err != nil || access.Mode != string(contract4paymentus.ModeTest) {
+			t.Fatalf("fixed TEST reader did not prove its configured Space: %+v %v", access, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := service.Create(context.Background(), sharedCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectRecord, project := models4datatug.NewSharedLinkedProjectRecord(ref.SpaceID, ref.ProjectID)
+	if err := db.Get(context.Background(), projectRecord); err != nil {
+		t.Fatal(err)
+	}
+	projectRef := contract4linkage.RelationshipEntityRef{SpaceID: coretypes.SpaceID(ref.SpaceID), ItemRef: coretypes.ItemRef{ExtID: "datatug", Collection: "projects", ItemID: ref.ProjectID}}
+	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		if _, err := readLinkedProjectAdmission(ctx, tx, projectRef, project); !errors.Is(err, ErrSharedProjectConflict) {
+			t.Fatalf("LIVE-only reader accepted TEST Business admission: %v", err)
+		}
+		admission, err := readLinkedProjectAdmissionForMode(ctx, tx, projectRef, project, string(contract4paymentus.ModeTest))
+		if err != nil || admission.Mode != string(contract4paymentus.ModeTest) {
+			t.Fatalf("fixed TEST reader rejected its matching admission: %+v %v", admission, err)
+		}
+		liveOnly := &SharedProjectService{business: &BusinessProjectAccessVerifier{
+			reader: &businessCurrentServiceReader{access: validPaymentusBusinessAccess(sharedTestTime)},
+			policy: BusinessProjectAccessPolicy{GrantVersion: "business-project-live-v1", Mode: contract4paymentus.ModeLive},
+			mode:   contract4paymentus.ModeLive, now: func() time.Time { return sharedTestTime },
+		}}
+		if err := liveOnly.verifyCurrentProjectService(ctx, tx, admission, sharedTestTime); !errors.Is(err, ErrBusinessServiceUnproved) {
+			t.Fatalf("LIVE service accepted TEST admission with a coincident Space: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -220,7 +283,7 @@ func TestBusinessFirstCreateActivatesFreshSpaceOnlyWithAcceptedCommand(t *testin
 			plan := &activationProbe{}
 			activator := &transactionalActivatorProbe{plan: plan}
 			service, err := NewActivatingBusinessSharedProjectService(db, &sharedCounterIDs{}, advancingBusinessClock(), BusinessSharedProjectOptions{
-				AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"},
+				AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1", Mode: contract4paymentus.ModeLive},
 				ServiceReader: reader, ContactLinks: paidFixtureOwnerLinks(),
 			}, SharedProjectActivationOptions{Activator: activator, RequiredRoles: []string{"content-admin", "content-editor"}})
 			if err != nil {
@@ -308,7 +371,7 @@ func TestUnifiedProBusinessServiceSelectsOnlyRequestedVerifiedPlan(t *testing.T)
 			reader := &businessCurrentServiceReader{access: access}
 			activator := &transactionalActivatorProbe{plan: &activationProbe{}}
 			service, err := NewActivatingProBusinessSharedProjectService(db, &sharedCounterIDs{}, func() time.Time { return sharedTestTime }, ProBusinessSharedProjectOptions{
-				Pro: pro, Business: BusinessSharedProjectOptions{AccessPolicy: BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"}, ServiceReader: reader},
+				Pro: pro, Business: BusinessSharedProjectOptions{AccessPolicy: BusinessProjectAccessPolicy{GrantVersion: "business-project-v1", Mode: contract4paymentus.ModeLive}, ServiceReader: reader},
 			}, SharedProjectActivationOptions{Activator: activator, RequiredRoles: []string{"content-admin", "content-editor"}, InventoryQuery: db})
 			if err != nil {
 				t.Fatal(err)

@@ -135,12 +135,16 @@ func (p *PaidProjectLinkagePolicy) authorizeProject(ctx context.Context, tx dal.
 	if err != nil {
 		return err
 	}
-	admission, err := readLinkedProjectAdmission(ctx, tx, e.Ref, project)
+	businessMode := "live"
+	if p.business != nil {
+		businessMode = string(p.business.Mode())
+	}
+	admission, err := readLinkedProjectAdmissionForBusinessMode(ctx, tx, e.Ref, project, businessMode)
 	if err != nil {
 		return err
 	}
 	if admission.Version == 2 {
-		if p.business == nil {
+		if p.business == nil || admission.Mode != string(p.business.Mode()) {
 			return ErrBusinessServiceUnproved
 		}
 		access, err := p.business.ReadCurrent(ctx, tx, admission.SpaceID)
@@ -154,7 +158,7 @@ func (p *PaidProjectLinkagePolicy) authorizeProject(ctx context.Context, tx dal.
 			return ErrProjectContactLimit
 		}
 	} else {
-		if p.paid.validate() != nil {
+		if p.paid.validate() != nil || admission.Mode != p.paid.Mode {
 			return ErrSharedProjectUnauthorized
 		}
 		access, err := readCurrentPaidProjectAccess(ctx, tx, p.paid, admission.ActorID, admission.PayerID, now)

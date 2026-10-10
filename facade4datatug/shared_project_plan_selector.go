@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 )
 
 // resolveSharedProjectCreateBinding uses an explicit plan intent when a
@@ -40,7 +41,7 @@ func (s *SharedProjectService) resolveSharedProjectCreateBinding(ctx context.Con
 		if s == nil || s.business == nil {
 			return SharedProjectCreateBinding{}, ErrSharedProjectUnauthorized
 		}
-		binding.PayerID, binding.Mode, binding.Product = spaceID, "live", BusinessProjectProductID
+		binding.PayerID, binding.Mode, binding.Product = spaceID, string(s.business.Mode()), BusinessProjectProductID
 	default:
 		return SharedProjectCreateBinding{}, ErrSharedProjectInvalid
 	}
@@ -49,5 +50,6 @@ func (s *SharedProjectService) resolveSharedProjectCreateBinding(ctx context.Con
 }
 
 func isBusinessProjectBinding(binding SharedProjectCreateBinding) bool {
-	return binding.Mode == "live" && binding.Product == BusinessProjectProductID && binding.PayerID == binding.SpaceID
+	return (binding.Mode == string(contract4paymentus.ModeTest) || binding.Mode == string(contract4paymentus.ModeLive)) &&
+		binding.Product == BusinessProjectProductID && binding.PayerID == binding.SpaceID
 }

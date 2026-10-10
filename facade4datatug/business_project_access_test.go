@@ -36,6 +36,7 @@ func validPaymentusBusinessAccess(at time.Time) contract4paymentus.CurrentSpaceS
 		Scope:        contract4paymentus.ServicePurchaseScope{Mode: contract4paymentus.ModeLive, SpaceID: "business-space", ServiceID: BusinessProjectServiceID},
 		PayerSpaceID: "business-space", OwnerFamily: BusinessProjectOwnerFamily, AccountKind: BusinessProjectAccountKind,
 		ProductID: BusinessProjectProductID, PlanID: BusinessMonthlyPlanID,
+		ProviderAccountID: "provider-account", CustomerID: "original-customer", LineageID: "initial-lineage",
 		OwnerSubscriptionID: "subscription", PaidServiceProofID: "reconciled-service", OwnerGeneration: 2, OwnerRevision: 3,
 		State: contract4paymentus.ServiceCurrentFinancialPaid, PaidFromUTC: at.Add(-time.Hour), PaidThroughUTC: at.Add(time.Hour),
 		EffectiveEndUTC: at.Add(time.Hour), ObservedAtUTC: at.Add(-time.Minute), EvidenceValidUntilUTC: at.Add(30 * time.Minute),
@@ -44,7 +45,7 @@ func validPaymentusBusinessAccess(at time.Time) contract4paymentus.CurrentSpaceS
 
 func newBusinessVerifier(t *testing.T, reader contract4paymentus.CurrentSpaceServiceReader, now func() time.Time) *BusinessProjectAccessVerifier {
 	t.Helper()
-	v, err := NewBusinessProjectAccessVerifier(reader, BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"}, now)
+	v, err := NewBusinessProjectAccessVerifier(reader, BusinessProjectAccessPolicy{GrantVersion: "business-project-v1", Mode: contract4paymentus.ModeLive}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestBusinessAccessUsesCallerTransactionAndVerifiedSpace(t *testing.T) {
 }
 
 func TestBusinessAccessVerifierRejectsTestModeReader(t *testing.T) {
-	if _, err := NewBusinessProjectAccessVerifier(businessTestModeServiceReader{}, BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"}, func() time.Time { return sharedTestTime }); !errors.Is(err, ErrBusinessServiceUnproved) {
+	if _, err := NewBusinessProjectAccessVerifier(businessTestModeServiceReader{}, BusinessProjectAccessPolicy{GrantVersion: "business-project-v1", Mode: contract4paymentus.ModeLive}, func() time.Time { return sharedTestTime }); !errors.Is(err, ErrBusinessServiceUnproved) {
 		t.Fatalf("TEST current-service reader error = %v, want LIVE-only refusal", err)
 	}
 }
@@ -215,7 +216,7 @@ func TestBusinessAccessRechecksServerTimeAfterSourceRead(t *testing.T) {
 }
 
 func TestBusinessAccessRequiresReaderPolicyAndTransaction(t *testing.T) {
-	if _, err := NewBusinessProjectAccessVerifier(nil, BusinessProjectAccessPolicy{GrantVersion: "v1"}, time.Now); !errors.Is(err, ErrBusinessServiceUnproved) {
+	if _, err := NewBusinessProjectAccessVerifier(nil, BusinessProjectAccessPolicy{GrantVersion: "v1", Mode: contract4paymentus.ModeLive}, time.Now); !errors.Is(err, ErrBusinessServiceUnproved) {
 		t.Fatal(err)
 	}
 	if _, err := NewBusinessProjectAccessVerifier(businessServiceAccessReader(func(context.Context, dal.ReadTransaction, contract4paymentus.ServicePurchaseScope) (contract4paymentus.CurrentSpaceServiceAccess, error) {

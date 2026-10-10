@@ -43,25 +43,26 @@ type BusinessUsageCloseTermsReader interface {
 // unapproved lot-window rule.
 type NativeBusinessUsageCloseTermsReader struct {
 	db            dal.DB
+	mode          contract4paymentus.Mode
 	initialStarts contract4paymentus.InitialServiceStartReader
 	periods       contract4paymentus.UsagePeriodReader
 }
 
-func NewNativeBusinessUsageCloseTermsReader(db dal.DB, initialStarts contract4paymentus.InitialServiceStartReader, periods contract4paymentus.UsagePeriodReader) (*NativeBusinessUsageCloseTermsReader, error) {
-	if sharedProjectPortAbsent(db) || sharedProjectPortAbsent(initialStarts) || sharedProjectPortAbsent(periods) {
+func NewNativeBusinessUsageCloseTermsReader(mode contract4paymentus.Mode, db dal.DB, initialStarts contract4paymentus.InitialServiceStartReader, periods contract4paymentus.UsagePeriodReader) (*NativeBusinessUsageCloseTermsReader, error) {
+	if !validBusinessUsageMode(mode) || sharedProjectPortAbsent(db) || sharedProjectPortAbsent(initialStarts) || sharedProjectPortAbsent(periods) {
 		return nil, ErrBusinessUsagePeriodUnavailable
 	}
-	return &NativeBusinessUsageCloseTermsReader{db: db, initialStarts: initialStarts, periods: periods}, nil
+	return &NativeBusinessUsageCloseTermsReader{db: db, mode: mode, initialStarts: initialStarts, periods: periods}, nil
 }
 
 func (r *NativeBusinessUsageCloseTermsReader) ReadBusinessUsageCloseTerms(ctx context.Context, tx dal.ReadTransaction, period contract4paymentus.UsagePeriodSnapshot) (BusinessUsageCloseTerms, error) {
 	var zero BusinessUsageCloseTerms
 	if r == nil || sharedProjectPortAbsent(r.db) || sharedProjectPortAbsent(r.initialStarts) || sharedProjectPortAbsent(r.periods) ||
-		ctx == nil || sharedProjectPortAbsent(tx) || !validBusinessUsageSnapshot(period) {
+		ctx == nil || sharedProjectPortAbsent(tx) || !validBusinessUsageSnapshot(period) || period.Ref.Scope.Mode != r.mode {
 		return zero, ErrBusinessUsagePeriodUnavailable
 	}
 	scope := contract4paymentus.ServicePurchaseScope{
-		Mode: contract4paymentus.ModeLive, SpaceID: period.Ref.Scope.SpaceID, ServiceID: BusinessProjectServiceID,
+		Mode: r.mode, SpaceID: period.Ref.Scope.SpaceID, ServiceID: BusinessProjectServiceID,
 	}
 	initial, err := r.initialStarts.ReadInitialServiceStart(ctx, tx, scope)
 	if err != nil || !validBusinessInitialServiceStart(initial, scope) || !usagePeriodMatchesOriginalStart(period, initial) {
@@ -72,11 +73,11 @@ func (r *NativeBusinessUsageCloseTermsReader) ReadBusinessUsageCloseTerms(ctx co
 		return zero, ErrBusinessUsagePeriodUnavailable
 	}
 	owner := contract4paymentus.CapacityOwner{
-		Mode: contract4paymentus.ModeLive, SpaceID: period.Ref.Scope.SpaceID,
+		Mode: r.mode, SpaceID: period.Ref.Scope.SpaceID,
 		ProductID: BusinessProjectProductID, PayerID: period.Ref.Scope.SpaceID,
 	}
 	ledger, err := contract4paymentus.NewDalgoPaidCapacityLedger(r.db, businessUsageCapacityReadAuthority{
-		initialStarts: r.initialStarts, periods: r.periods, period: period,
+		mode: r.mode, initialStarts: r.initialStarts, periods: r.periods, period: period,
 	})
 	if err != nil {
 		return zero, ErrBusinessUsagePeriodUnavailable
@@ -85,16 +86,16 @@ func (r *NativeBusinessUsageCloseTermsReader) ReadBusinessUsageCloseTerms(ctx co
 	if err != nil {
 		return zero, ErrBusinessUsagePeriodUnavailable
 	}
-	return businessUsageCloseTermsForBasis(period, basis)
+	return businessUsageCloseTermsForBasis(r.mode, period, basis)
 }
 
-func businessUsageCloseTermsForBasis(period contract4paymentus.UsagePeriodSnapshot, basis contract4paymentus.CapacityBasis) (BusinessUsageCloseTerms, error) {
+func businessUsageCloseTermsForBasis(mode contract4paymentus.Mode, period contract4paymentus.UsagePeriodSnapshot, basis contract4paymentus.CapacityBasis) (BusinessUsageCloseTerms, error) {
 	var zero BusinessUsageCloseTerms
 	wantOwner := contract4paymentus.CapacityOwner{
-		Mode: contract4paymentus.ModeLive, SpaceID: period.Ref.Scope.SpaceID,
+		Mode: mode, SpaceID: period.Ref.Scope.SpaceID,
 		ProductID: BusinessProjectProductID, PayerID: period.Ref.Scope.SpaceID,
 	}
-	if !validBusinessUsageSnapshot(period) || basis.Owner != wantOwner || basis.Revision != 0 || basis.Digest != "" || len(basis.Lots) != 0 {
+	if !validBusinessUsageSnapshot(period) || period.Ref.Scope.Mode != mode || basis.Owner != wantOwner || basis.Revision != 0 || basis.Digest != "" || len(basis.Lots) != 0 {
 		return zero, ErrBusinessUsagePeriodUnavailable
 	}
 	capacityDigest, err := emptyBusinessCapacityDigest(period, basis)
@@ -113,6 +114,7 @@ func businessUsageCloseTermsForBasis(period contract4paymentus.UsagePeriodSnapsh
 }
 
 type businessUsageCapacityReadAuthority struct {
+	mode          contract4paymentus.Mode
 	initialStarts contract4paymentus.InitialServiceStartReader
 	periods       contract4paymentus.UsagePeriodReader
 	period        contract4paymentus.UsagePeriodSnapshot
@@ -120,14 +122,14 @@ type businessUsageCapacityReadAuthority struct {
 
 func (a businessUsageCapacityReadAuthority) VerifyCapacityAction(ctx context.Context, tx dal.ReadTransaction, operation contract4paymentus.CapacityOperation) error {
 	if operation.Action != contract4paymentus.CapacityRead || ctx == nil || sharedProjectPortAbsent(tx) ||
-		sharedProjectPortAbsent(a.initialStarts) || sharedProjectPortAbsent(a.periods) || !validBusinessUsageSnapshot(a.period) || operation.Owner != (contract4paymentus.CapacityOwner{
-		Mode: contract4paymentus.ModeLive, SpaceID: a.period.Ref.Scope.SpaceID,
+		sharedProjectPortAbsent(a.initialStarts) || sharedProjectPortAbsent(a.periods) || !validBusinessUsageSnapshot(a.period) || a.period.Ref.Scope.Mode != a.mode || operation.Owner != (contract4paymentus.CapacityOwner{
+		Mode: a.mode, SpaceID: a.period.Ref.Scope.SpaceID,
 		ProductID: BusinessProjectProductID, PayerID: a.period.Ref.Scope.SpaceID,
 	}) {
 		return contract4paymentus.ErrCapacityAuthority
 	}
 	scope := contract4paymentus.ServicePurchaseScope{
-		Mode: contract4paymentus.ModeLive, SpaceID: a.period.Ref.Scope.SpaceID, ServiceID: BusinessProjectServiceID,
+		Mode: a.mode, SpaceID: a.period.Ref.Scope.SpaceID, ServiceID: BusinessProjectServiceID,
 	}
 	initial, err := a.initialStarts.ReadInitialServiceStart(ctx, tx, scope)
 	if err != nil || !validBusinessInitialServiceStart(initial, scope) || !usagePeriodMatchesOriginalStart(a.period, initial) {
@@ -158,6 +160,7 @@ func emptyBusinessCapacityDigest(period contract4paymentus.UsagePeriodSnapshot, 
 }
 
 type BusinessUsagePeriodAuthorityOptions struct {
+	Mode          contract4paymentus.Mode
 	Access        *BusinessProjectAccessVerifier
 	InitialStarts contract4paymentus.InitialServiceStartReader
 	Periods       contract4paymentus.UsagePeriodReader
@@ -173,6 +176,7 @@ type BusinessUsagePeriodAuthorityOptions struct {
 // the immutable original start for both Open and historical Close, and the
 // accepted-receipt completeness checkpoint. It never grants new query access.
 type NativeBusinessUsagePeriodAuthority struct {
+	mode          contract4paymentus.Mode
 	access        *BusinessProjectAccessVerifier
 	initialStarts contract4paymentus.InitialServiceStartReader
 	periods       contract4paymentus.UsagePeriodReader
@@ -182,7 +186,7 @@ type NativeBusinessUsagePeriodAuthority struct {
 }
 
 func NewNativeBusinessUsagePeriodAuthority(options BusinessUsagePeriodAuthorityOptions) (*NativeBusinessUsagePeriodAuthority, error) {
-	if sharedProjectPortAbsent(options.Access) || sharedProjectPortAbsent(options.InitialStarts) ||
+	if !validBusinessUsageMode(options.Mode) || sharedProjectPortAbsent(options.Access) || options.Access.Mode() != options.Mode || sharedProjectPortAbsent(options.InitialStarts) ||
 		sharedProjectPortAbsent(options.Periods) || sharedProjectPortAbsent(options.CloseTerms) || options.Now == nil {
 		return nil, ErrBusinessUsagePeriodUnavailable
 	}
@@ -190,7 +194,7 @@ func NewNativeBusinessUsagePeriodAuthority(options BusinessUsagePeriodAuthorityO
 		options.Pricing = contract4paymentus.DataTugBusinessUsagePricing
 	}
 	return &NativeBusinessUsagePeriodAuthority{
-		access: options.Access, initialStarts: options.InitialStarts, periods: options.Periods,
+		mode: options.Mode, access: options.Access, initialStarts: options.InitialStarts, periods: options.Periods,
 		closeTerms: options.CloseTerms, pricing: options.Pricing, now: options.Now,
 	}, nil
 }
@@ -198,7 +202,7 @@ func NewNativeBusinessUsagePeriodAuthority(options BusinessUsagePeriodAuthorityO
 func (a *NativeBusinessUsagePeriodAuthority) VerifyUsage(ctx context.Context, tx dal.ReadTransaction, operation contract4paymentus.UsageOperation) error {
 	if a == nil || sharedProjectPortAbsent(a.access) || sharedProjectPortAbsent(a.initialStarts) ||
 		sharedProjectPortAbsent(a.closeTerms) || ctx == nil || sharedProjectPortAbsent(tx) ||
-		!validBusinessUsageSnapshot(operation.Period) || operation.Period.Ref.Scope.Mode != contract4paymentus.ModeLive ||
+		!validBusinessUsageSnapshot(operation.Period) || operation.Period.Ref.Scope.Mode != a.mode ||
 		operation.Period.Ref.Scope.ProductID != BusinessProjectProductID || operation.Period.Ref.Scope.ServiceID != BusinessProjectServiceID {
 		return contract4paymentus.ErrUsageAuthority
 	}
@@ -297,7 +301,7 @@ func (a *NativeBusinessUsagePeriodAuthority) readCurrentOpenFacts(ctx context.Co
 		return zeroAccess, zeroInitial, zeroPeriod, ErrBusinessUsagePeriodUnavailable
 	}
 	access, err := a.access.ReadCurrent(ctx, tx, spaceID)
-	if err != nil || access.Mode != string(contract4paymentus.ModeLive) || access.ProductID != BusinessProjectProductID ||
+	if err != nil || access.Mode != string(a.mode) || access.ProductID != BusinessProjectProductID ||
 		access.ServiceID != BusinessProjectServiceID || access.PayerSpaceID != spaceID || access.State != "active" ||
 		!access.PaidUntilUTC.After(observedAt) {
 		return zeroAccess, zeroInitial, zeroPeriod, ErrBusinessUsagePeriodUnavailable
@@ -306,7 +310,7 @@ func (a *NativeBusinessUsagePeriodAuthority) readCurrentOpenFacts(ctx context.Co
 	if err != nil {
 		return zeroAccess, zeroInitial, zeroPeriod, err
 	}
-	scope := contract4paymentus.UsageScope{Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ProductID: BusinessProjectProductID, PayerID: spaceID, ServiceID: BusinessProjectServiceID}
+	scope := contract4paymentus.UsageScope{Mode: a.mode, SpaceID: spaceID, ProductID: BusinessProjectProductID, PayerID: spaceID, ServiceID: BusinessProjectServiceID}
 	period, err := contract4paymentus.UsagePeriodForAnchor(scope, a.pricing(), initial.AnchorUTC, observedAt)
 	if err != nil {
 		return zeroAccess, zeroInitial, zeroPeriod, err
@@ -319,7 +323,7 @@ func (a *NativeBusinessUsagePeriodAuthority) readCurrentOpenFacts(ctx context.Co
 }
 
 func (a *NativeBusinessUsagePeriodAuthority) readInitialStart(ctx context.Context, tx dal.ReadTransaction, spaceID string) (contract4paymentus.ServiceInitialServiceStart, error) {
-	scope := contract4paymentus.ServicePurchaseScope{Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ServiceID: BusinessProjectServiceID}
+	scope := contract4paymentus.ServicePurchaseScope{Mode: a.mode, SpaceID: spaceID, ServiceID: BusinessProjectServiceID}
 	initial, err := a.initialStarts.ReadInitialServiceStart(ctx, tx, scope)
 	if err != nil || !validBusinessInitialServiceStart(initial, scope) {
 		return contract4paymentus.ServiceInitialServiceStart{}, ErrBusinessUsagePeriodUnavailable
@@ -328,9 +332,9 @@ func (a *NativeBusinessUsagePeriodAuthority) readInitialStart(ctx context.Contex
 }
 
 func usagePeriodMatchesOriginalStart(period contract4paymentus.UsagePeriodSnapshot, initial contract4paymentus.ServiceInitialServiceStart) bool {
-	if initial.Scope.Mode != contract4paymentus.ModeLive || initial.Scope.ServiceID != BusinessProjectServiceID ||
+	if !validBusinessUsageMode(initial.Scope.Mode) || initial.Scope.ServiceID != BusinessProjectServiceID ||
 		initial.PayerID != initial.Scope.SpaceID || !validBusinessInitialServiceStart(initial, initial.Scope) || period.Ref.Scope != (contract4paymentus.UsageScope{
-		Mode: contract4paymentus.ModeLive, SpaceID: initial.Scope.SpaceID, ProductID: BusinessProjectProductID,
+		Mode: initial.Scope.Mode, SpaceID: initial.Scope.SpaceID, ProductID: BusinessProjectProductID,
 		PayerID: initial.Scope.SpaceID, ServiceID: BusinessProjectServiceID,
 	}) {
 		return false
@@ -342,7 +346,7 @@ func usagePeriodMatchesOriginalStart(period contract4paymentus.UsagePeriodSnapsh
 }
 
 func validBusinessUsageSnapshot(period contract4paymentus.UsagePeriodSnapshot) bool {
-	if period.Ref.Scope.Mode != contract4paymentus.ModeLive || period.Ref.Scope.ProductID != BusinessProjectProductID ||
+	if !validBusinessUsageMode(period.Ref.Scope.Mode) || period.Ref.Scope.ProductID != BusinessProjectProductID ||
 		period.Ref.Scope.ServiceID != BusinessProjectServiceID || period.Ref.Scope.PayerID != period.Ref.Scope.SpaceID ||
 		period.StartUTC.IsZero() || period.EndUTC.IsZero() || period.AnchorUTC.IsZero() ||
 		period.StartUTC.Location() != time.UTC || period.EndUTC.Location() != time.UTC || period.AnchorUTC.Location() != time.UTC ||
@@ -409,7 +413,7 @@ func (s *BusinessUsagePeriodService) OpenCurrent(ctx context.Context, spaceID st
 // anchored period is still current and independently authorized.
 func (s *BusinessUsagePeriodService) ResumeOpening(ctx context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsagePeriodSnapshot, error) {
 	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.authority) || s.now == nil ||
-		!validBusinessUsageRef(ref) {
+		!validBusinessUsageRef(ref) || ref.Scope.Mode != s.authority.mode {
 		return contract4paymentus.UsagePeriodSnapshot{}, ErrBusinessUsagePeriodUnavailable
 	}
 	recovered, missingNative, err := s.recoverOpening(ctx, ref)
@@ -472,7 +476,7 @@ func (s *BusinessUsagePeriodService) openCurrent(ctx context.Context, spaceID st
 	var snapshot contract4paymentus.UsagePeriodSnapshot
 	wasReady := false
 	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.authority) || sharedProjectPortAbsent(s.ledger) || s.now == nil ||
-		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
+		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil || requiredRef != nil && requiredRef.Scope.Mode != s.authority.mode {
 		return snapshot, ErrBusinessUsagePeriodUnavailable
 	}
 	err := s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
@@ -564,6 +568,9 @@ func (s *BusinessUsagePeriodService) Close(ctx context.Context, request contract
 	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.authority) || sharedProjectPortAbsent(s.authority.periods) {
 		return contract4paymentus.UsagePeriodClose{}, ErrBusinessUsagePeriodUnavailable
 	}
+	if !validBusinessUsageRef(request.Ref) || request.Ref.Scope.Mode != s.authority.mode {
+		return contract4paymentus.UsagePeriodClose{}, ErrBusinessUsagePeriodUnavailable
+	}
 	if err := s.prepareClose(ctx, request); err != nil {
 		return contract4paymentus.UsagePeriodClose{}, err
 	}
@@ -606,7 +613,7 @@ func (s *BusinessUsagePeriodService) Close(ctx context.Context, request contract
 // A previously staged or completed close reuses its immutable request.
 func (s *BusinessUsagePeriodService) CloseDue(ctx context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsagePeriodClose, error) {
 	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.authority) ||
-		sharedProjectPortAbsent(s.authority.periods) || sharedProjectPortAbsent(s.authority.closeTerms) || !validBusinessUsageRef(ref) {
+		sharedProjectPortAbsent(s.authority.periods) || sharedProjectPortAbsent(s.authority.closeTerms) || !validBusinessUsageRef(ref) || ref.Scope.Mode != s.authority.mode {
 		return contract4paymentus.UsagePeriodClose{}, ErrBusinessUsagePeriodUnavailable
 	}
 	var request contract4paymentus.UsageCloseRequest
@@ -672,7 +679,7 @@ func businessUsageCloseID(checkpoint *models4datatug.QueryActivityPeriodCheckpoi
 }
 
 func (s *BusinessUsagePeriodService) prepareClose(ctx context.Context, request contract4paymentus.UsageCloseRequest) error {
-	if !validBusinessUsageRef(request.Ref) {
+	if s == nil || sharedProjectPortAbsent(s.authority) || !validBusinessUsageRef(request.Ref) || request.Ref.Scope.Mode != s.authority.mode {
 		return ErrBusinessUsagePeriodUnavailable
 	}
 	return s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
@@ -732,7 +739,11 @@ func (s *BusinessUsagePeriodService) prepareClose(ctx context.Context, request c
 }
 
 func validBusinessUsageRef(ref contract4paymentus.UsagePeriodRef) bool {
-	return ref.Scope.Mode == contract4paymentus.ModeLive && ref.Scope.ProductID == BusinessProjectProductID &&
+	return validBusinessUsageMode(ref.Scope.Mode) && ref.Scope.ProductID == BusinessProjectProductID &&
 		ref.Scope.ServiceID == BusinessProjectServiceID && ref.Scope.PayerID == ref.Scope.SpaceID &&
 		models4datatug.ValidateSharedProjectIdentifier(ref.Scope.SpaceID) == nil && validQueryActivityID(ref.PeriodID)
+}
+
+func validBusinessUsageMode(mode contract4paymentus.Mode) bool {
+	return mode == contract4paymentus.ModeTest || mode == contract4paymentus.ModeLive
 }

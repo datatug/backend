@@ -9,7 +9,9 @@ import (
 	"github.com/dal-go/record"
 	"github.com/dal-go/record/update"
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 	"github.com/sneat-co/sneat-core-modules/linkage/contract4linkage"
+	"github.com/sneat-co/sneat-go-core/sneatcoretesting"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -81,6 +83,68 @@ func newLinkagePolicyFixture(t *testing.T) *linkagePolicyFixture {
 	}
 	return &linkagePolicyFixture{t: t, db: db, service: s, policy: p, authority: a, project: projectFixtureRef(ref.SpaceID, ref.ProjectID)}
 }
+
+func newBusinessTestLinkagePolicyFixture(t *testing.T) *linkagePolicyFixture {
+	t.Helper()
+	db := sneatcoretesting.NewMemoryDB()
+	seedPaidOwnerContact(t, db, "space")
+	access := validPaymentusBusinessAccess(sharedTestTime)
+	access.Scope.Mode = contract4paymentus.ModeTest
+	access.Scope.SpaceID, access.PayerSpaceID = "space", "space"
+	reader := &businessCurrentServiceReader{access: access, mode: contract4paymentus.ModeTest}
+	service, err := NewBusinessSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, BusinessSharedProjectOptions{
+		AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-test-v1", Mode: contract4paymentus.ModeTest},
+		ServiceReader: reader, ContactLinks: paidFixtureOwnerLinks(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := service.Create(context.Background(), sharedCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+	business, err := NewBusinessProjectAccessVerifier(reader, BusinessProjectAccessPolicy{GrantVersion: "business-project-test-v1", Mode: contract4paymentus.ModeTest}, func() time.Time { return sharedTestTime })
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := &projectRoleFixtureAuthority{t: t}
+	policy, err := NewPaidProjectLinkagePolicy(PaidProjectLinkageOptions{
+		Business: business, Roles: paidFixtureOwnerLinks().Roles, Contacts: projectContactFixturePort{},
+		Manager: authority, Targets: authority, Now: func() time.Time { return sharedTestTime },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &linkagePolicyFixture{t: t, db: db, service: service, policy: policy, authority: authority, project: projectFixtureRef(ref.SpaceID, ref.ProjectID)}
+}
+
+func TestBusinessTestLinkageMutationUsesFixedTestModeAndRejectsLiveRead(t *testing.T) {
+	f := newBusinessTestLinkagePolicyFixture(t)
+	f.addContact("test-team", "teammate", true)
+	if err := f.change("test-team", []string{"role-b"}, nil, false, true, nil); err != nil {
+		t.Fatalf("configured TEST Business contact mutation refused: %v", err)
+	}
+	if f.authority.managerCalls != 1 || f.authority.targetCalls != 1 {
+		t.Fatalf("TEST mutation did not reach the authorized role ports: manager=%d target=%d", f.authority.managerCalls, f.authority.targetCalls)
+	}
+
+	liveAccess := validPaymentusBusinessAccess(sharedTestTime)
+	liveAccess.Scope.SpaceID, liveAccess.PayerSpaceID = "space", "space"
+	liveReader := &businessCurrentServiceReader{access: liveAccess}
+	liveBusiness, err := NewBusinessProjectAccessVerifier(liveReader, BusinessProjectAccessPolicy{GrantVersion: "business-project-live-v1", Mode: contract4paymentus.ModeLive}, func() time.Time { return sharedTestTime })
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.addContact("live-cross-mode", "teammate-2", true)
+	f.policy.business = liveBusiness
+	if err := f.change("live-cross-mode", []string{"role-b"}, nil, false, true, nil); !errors.Is(err, ErrSharedProjectConflict) {
+		t.Fatalf("LIVE linkage policy accepted TEST project admission: %v", err)
+	}
+	if liveReader.calls != 0 || f.authority.managerCalls != 1 || f.authority.targetCalls != 1 {
+		t.Fatalf("cross-mode refusal reached mutable authorities: reader=%d manager=%d target=%d", liveReader.calls, f.authority.managerCalls, f.authority.targetCalls)
+	}
+}
+
 func cloneFixtureGraph(t *testing.T, g contract4linkage.WithRelatedAndIDs) contract4linkage.WithRelatedAndIDs {
 	t.Helper()
 	c, err := cloneProjectLinkage(g)

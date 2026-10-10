@@ -95,7 +95,7 @@ func (a ProjectAdmission) Validate() error {
 			return fmt.Errorf("invalid finite project admission")
 		}
 	case 2:
-		if a.Mode != "live" || a.Product != "datatug-business-usage" || a.PayerID != a.SpaceID || a.ServiceID != "datatug" || a.LimitsVersion == "" ||
+		if a.Product != "datatug-business-usage" || a.PayerID != a.SpaceID || a.ServiceID != "datatug" || a.LimitsVersion == "" ||
 			(a.PlanID != "datatug-business-usage-monthly" && a.PlanID != "datatug-business-usage-annual") ||
 			a.PaidServiceProofID == "" || a.OwnerRevision < 1 || !a.UnlimitedProjects || !a.UnlimitedContacts ||
 			a.QuotaBasisDigest != "" || a.QuotaRevision != 0 || a.ProtectedProjectsLimit != 0 || a.ProtectedUsersLimit != 0 || !a.OwnerContact.Present() ||

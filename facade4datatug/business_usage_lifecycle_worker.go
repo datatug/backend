@@ -10,6 +10,7 @@ import (
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 )
 
 const BusinessUsageLifecycleMaxPageSize = 100
@@ -23,6 +24,7 @@ type BusinessUsageLifecycleResult struct {
 	CheckpointsScanned int
 	PeriodsOpened      int
 	PeriodsClosed      int
+	InvoicesProcessed  int
 	ActivitySpaces     int
 	ActivityScanned    int
 	ActivityDelivered  int
@@ -37,19 +39,39 @@ type BusinessUsageLifecycleResult struct {
 // collection-group queries only to discover bounded pages of Space-owned
 // records; all financial authority and writes remain in the native services.
 type BusinessUsageLifecycleWorker struct {
+	mode     contract4paymentus.Mode
 	db       dal.DB
 	query    dal.QueryExecutor
 	periods  *BusinessUsagePeriodService
 	activity *QueryActivityService
+	invoices contract4paymentus.UsageInvoiceService
 	now      func() time.Time
 }
 
 func NewBusinessUsageLifecycleWorker(db dal.DB, query dal.QueryExecutor, periods *BusinessUsagePeriodService, activity *QueryActivityService, now func() time.Time) (*BusinessUsageLifecycleWorker, error) {
-	if sharedProjectPortAbsent(db) || sharedProjectPortAbsent(query) || sharedProjectPortAbsent(periods) ||
-		sharedProjectPortAbsent(activity) || now == nil {
+	return newBusinessUsageLifecycleWorker(activityMode(activity), db, query, periods, activity, nil, now)
+}
+
+func NewBusinessUsageLifecycleWorkerWithInvoices(mode contract4paymentus.Mode, db dal.DB, query dal.QueryExecutor, periods *BusinessUsagePeriodService, activity *QueryActivityService, invoices contract4paymentus.UsageInvoiceService, now func() time.Time) (*BusinessUsageLifecycleWorker, error) {
+	if sharedProjectPortAbsent(invoices) {
 		return nil, ErrBusinessUsageLifecycleUnavailable
 	}
-	return &BusinessUsageLifecycleWorker{db: db, query: query, periods: periods, activity: activity, now: now}, nil
+	return newBusinessUsageLifecycleWorker(mode, db, query, periods, activity, invoices, now)
+}
+
+func newBusinessUsageLifecycleWorker(mode contract4paymentus.Mode, db dal.DB, query dal.QueryExecutor, periods *BusinessUsagePeriodService, activity *QueryActivityService, invoices contract4paymentus.UsageInvoiceService, now func() time.Time) (*BusinessUsageLifecycleWorker, error) {
+	if !validBusinessUsageMode(mode) || sharedProjectPortAbsent(db) || sharedProjectPortAbsent(query) || sharedProjectPortAbsent(periods) ||
+		sharedProjectPortAbsent(activity) || activity.mode != mode || now == nil {
+		return nil, ErrBusinessUsageLifecycleUnavailable
+	}
+	return &BusinessUsageLifecycleWorker{mode: mode, db: db, query: query, periods: periods, activity: activity, invoices: invoices, now: now}, nil
+}
+
+func activityMode(activity *QueryActivityService) contract4paymentus.Mode {
+	if activity == nil {
+		return ""
+	}
+	return activity.mode
 }
 
 // Run performs at most one page from each collection group. Failed candidates
@@ -58,7 +80,7 @@ func NewBusinessUsageLifecycleWorker(db dal.DB, query dal.QueryExecutor, periods
 // idempotent and safe to retry after interruption.
 func (w *BusinessUsageLifecycleWorker) Run(ctx context.Context, pageSize int) (BusinessUsageLifecycleResult, error) {
 	var result BusinessUsageLifecycleResult
-	if w == nil || sharedProjectPortAbsent(w.db) || sharedProjectPortAbsent(w.query) || sharedProjectPortAbsent(w.periods) ||
+	if w == nil || !validBusinessUsageMode(w.mode) || sharedProjectPortAbsent(w.db) || sharedProjectPortAbsent(w.query) || sharedProjectPortAbsent(w.periods) ||
 		sharedProjectPortAbsent(w.activity) || ctx == nil || pageSize < 1 || pageSize > BusinessUsageLifecycleMaxPageSize {
 		return result, ErrBusinessUsageLifecycleUnavailable
 	}
@@ -81,6 +103,9 @@ func (w *BusinessUsageLifecycleWorker) Run(ctx context.Context, pageSize int) (B
 		spaceID, checkpoint, valid := businessUsageCheckpointCandidate(candidate)
 		if !valid {
 			result.Failures++
+		} else if checkpoint.Period.Scope.Mode != w.mode {
+			// Collection-group scans are shared by TEST and LIVE. Ignore foreign
+			// mode records without touching them, then advance only this mode cursor.
 		} else {
 			if err := w.processCheckpoint(ctx, spaceID, checkpoint, pageSize, &result, spaceDrained); err != nil {
 				result.Failures++
@@ -115,9 +140,12 @@ func (w *BusinessUsageLifecycleWorker) Run(ctx context.Context, pageSize int) (B
 	spaces := make([]string, 0, len(pending))
 	seenSpaces := make(map[string]struct{}, len(pending))
 	for _, candidate := range pending {
-		spaceID, ok := businessUsagePendingSpace(candidate)
+		spaceID, mode, ok := businessUsagePendingSpace(candidate)
 		if !ok {
 			result.Failures++
+			continue
+		}
+		if mode != w.mode {
 			continue
 		}
 		if _, exists := seenSpaces[spaceID]; !exists {
@@ -154,7 +182,7 @@ func (w *BusinessUsageLifecycleWorker) Run(ctx context.Context, pageSize int) (B
 }
 
 func (w *BusinessUsageLifecycleWorker) processCheckpoint(ctx context.Context, spaceID string, checkpoint models4datatug.QueryActivityPeriodCheckpoint, pageSize int, result *BusinessUsageLifecycleResult, spaceDrained map[string]bool) error {
-	if checkpoint.Validate() != nil || checkpoint.Period.Scope.SpaceID != spaceID {
+	if checkpoint.Validate() != nil || checkpoint.Period.Scope.Mode != w.mode || checkpoint.Period.Scope.SpaceID != spaceID {
 		return ErrBusinessUsageLifecycleUnavailable
 	}
 	switch checkpoint.State {
@@ -190,30 +218,47 @@ func (w *BusinessUsageLifecycleWorker) processCheckpoint(ctx context.Context, sp
 			return ErrBusinessUsageLifecycleUnavailable
 		}
 		result.PeriodsClosed++
-		return nil
+		return w.processClosedInvoice(ctx, checkpoint.Period, result)
 	case models4datatug.QueryActivityCheckpointClosed:
-		return nil
+		return w.processClosedInvoice(ctx, checkpoint.Period, result)
 	default:
 		return ErrBusinessUsageLifecycleUnavailable
 	}
 }
 
+func (w *BusinessUsageLifecycleWorker) processClosedInvoice(ctx context.Context, ref contract4paymentus.UsagePeriodRef, result *BusinessUsageLifecycleResult) error {
+	if w.invoices == nil {
+		return nil // Legacy non-invoice worker composition; runtime uses the strict WithInvoices constructor.
+	}
+	if ref.Scope.Mode != w.mode {
+		return ErrBusinessUsageLifecycleUnavailable
+	}
+	if _, err := w.invoices.Prepare(ctx, ref); err != nil {
+		return err
+	}
+	if _, err := w.invoices.Process(ctx, ref); err != nil {
+		return err
+	}
+	result.InvoicesProcessed++
+	return nil
+}
+
 func (w *BusinessUsageLifecycleWorker) drainSpace(ctx context.Context, spaceID string, pageSize int, result *BusinessUsageLifecycleResult) error {
-	cursorRecord, cursor := models4datatug.NewQueryActivityDrainCursorRecord(spaceID)
+	cursorRecord, cursor := models4datatug.NewQueryActivityDrainCursorRecord(w.mode, spaceID)
 	err := w.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		getErr := tx.Get(txCtx, cursorRecord)
 		if getErr != nil && !record.IsNotFound(getErr) {
 			return getErr
 		}
 		if getErr == nil && cursorRecord.Exists() {
-			if cursor.Validate() != nil || cursor.SpaceID != spaceID {
+			if cursor.Validate() != nil || cursor.Mode != w.mode || cursor.SpaceID != spaceID {
 				return ErrBusinessUsageLifecycleUnavailable
 			}
 			return nil
 		}
 		// DAL adapters may signal absence as either ErrNotFound or
 		// (nil, Exists=false); both are safe for this non-authoritative cursor.
-		*cursor = models4datatug.QueryActivityDrainCursor{Version: 1, SpaceID: spaceID, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
+		*cursor = models4datatug.QueryActivityDrainCursor{Version: 1, Mode: w.mode, SpaceID: spaceID, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
 		return tx.Insert(txCtx, cursorRecord)
 	})
 	if err != nil {
@@ -244,7 +289,7 @@ func (w *BusinessUsageLifecycleWorker) drainSpace(ctx context.Context, spaceID s
 }
 
 func (w *BusinessUsageLifecycleWorker) saveSpaceDrainCursor(ctx context.Context, spaceID, afterID string) error {
-	recordValue, cursor := models4datatug.NewQueryActivityDrainCursorRecord(spaceID)
+	recordValue, cursor := models4datatug.NewQueryActivityDrainCursorRecord(w.mode, spaceID)
 	return w.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		err := tx.Get(txCtx, recordValue)
 		if err != nil && !record.IsNotFound(err) {
@@ -255,9 +300,9 @@ func (w *BusinessUsageLifecycleWorker) saveSpaceDrainCursor(ctx context.Context,
 		}
 		absent := record.IsNotFound(err) || err == nil && !recordValue.Exists()
 		if absent {
-			*cursor = models4datatug.QueryActivityDrainCursor{Version: 1, SpaceID: spaceID,
+			*cursor = models4datatug.QueryActivityDrainCursor{Version: 1, Mode: w.mode, SpaceID: spaceID,
 				AfterID: afterID, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
-		} else if cursor.Validate() != nil || cursor.SpaceID != spaceID {
+		} else if cursor.Validate() != nil || cursor.Mode != w.mode || cursor.SpaceID != spaceID {
 			return ErrBusinessUsageLifecycleUnavailable
 		}
 		cursor.AfterID = afterID
@@ -274,11 +319,11 @@ func (w *BusinessUsageLifecycleWorker) saveSpaceDrainCursor(ctx context.Context,
 
 func (w *BusinessUsageLifecycleWorker) readWorkerState(ctx context.Context) (models4datatug.BusinessUsageWorkerState, error) {
 	var state models4datatug.BusinessUsageWorkerState
-	recordValue, statePointer := models4datatug.NewBusinessUsageWorkerStateRecord()
+	recordValue, statePointer := models4datatug.NewBusinessUsageWorkerStateRecord(w.mode)
 	err := w.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		err := tx.Get(txCtx, recordValue)
 		if err == nil && recordValue.Exists() {
-			if statePointer.Validate() != nil {
+			if statePointer.Validate() != nil || statePointer.Mode != w.mode {
 				return ErrBusinessUsageLifecycleUnavailable
 			}
 			state = *statePointer
@@ -287,7 +332,7 @@ func (w *BusinessUsageLifecycleWorker) readWorkerState(ctx context.Context) (mod
 		if err != nil && !record.IsNotFound(err) {
 			return err
 		}
-		*statePointer = models4datatug.BusinessUsageWorkerState{Version: 1, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
+		*statePointer = models4datatug.BusinessUsageWorkerState{Version: 1, Mode: w.mode, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
 		if statePointer.Validate() != nil {
 			return ErrBusinessUsageLifecycleUnavailable
 		}
@@ -301,7 +346,7 @@ func (w *BusinessUsageLifecycleWorker) readWorkerState(ctx context.Context) (mod
 }
 
 func (w *BusinessUsageLifecycleWorker) saveWorkerCursor(ctx context.Context, checkpoints bool, cursor string) error {
-	recordValue, state := models4datatug.NewBusinessUsageWorkerStateRecord()
+	recordValue, state := models4datatug.NewBusinessUsageWorkerStateRecord(w.mode)
 	return w.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		err := tx.Get(txCtx, recordValue)
 		if err != nil && !record.IsNotFound(err) {
@@ -309,9 +354,9 @@ func (w *BusinessUsageLifecycleWorker) saveWorkerCursor(ctx context.Context, che
 		}
 		absent := record.IsNotFound(err) || err == nil && !recordValue.Exists()
 		if absent {
-			*state = models4datatug.BusinessUsageWorkerState{Version: 1, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
+			*state = models4datatug.BusinessUsageWorkerState{Version: 1, Mode: w.mode, UpdatedAtUTC: models4datatug.CanonicalQueryActivityTime(w.now())}
 		}
-		if state.Validate() != nil {
+		if state.Validate() != nil || state.Mode != w.mode {
 			return ErrBusinessUsageLifecycleUnavailable
 		}
 		if checkpoints {
@@ -384,16 +429,16 @@ func businessUsageCheckpointCandidate(row record.Record) (string, models4datatug
 	return spaceID, *checkpoint, true
 }
 
-func businessUsagePendingSpace(row record.Record) (string, bool) {
+func businessUsagePendingSpace(row record.Record) (string, contract4paymentus.Mode, bool) {
 	spaceID, ok := businessCollectionGroupSpace(row, models4datatug.QueryActivityPendingCollection)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	pending, ok := row.Data().(*models4datatug.QueryActivityPending)
 	if !ok || pending == nil || pending.Validate() != nil || pending.SpaceID != spaceID {
-		return spaceID, false
+		return spaceID, "", false
 	}
-	return spaceID, true
+	return spaceID, pending.Period.Scope.Mode, true
 }
 
 func businessCollectionGroupSpace(row record.Record, collection string) (string, bool) {

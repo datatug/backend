@@ -13,7 +13,7 @@ import (
 const businessProjectAdmissionProfileVersion = "business-shared-project-v1"
 
 func readNewBusinessProjectAllocation(ctx context.Context, tx dal.ReadwriteTransaction, binding SharedProjectCreateBinding, projectID string) error {
-	if binding.Mode != "live" || binding.Product != BusinessProjectProductID || binding.PayerID != binding.SpaceID {
+	if !isBusinessProjectBinding(binding) {
 		return ErrSharedProjectUnauthorized
 	}
 	r, _ := models4datatug.NewProjectAdmissionRecord(binding.SpaceID, projectID)
@@ -28,7 +28,7 @@ func readNewBusinessProjectAllocation(ctx context.Context, tx dal.ReadwriteTrans
 }
 
 func writeBusinessProjectAdmission(ctx context.Context, tx dal.ReadwriteTransaction, binding SharedProjectCreateBinding, projectID string, at time.Time, owner models4datatug.ProjectOwnerContactProof, access SpaceServiceAccess) error {
-	if binding.Mode != "live" || binding.Product != BusinessProjectProductID || binding.PayerID != binding.SpaceID || access.Mode != "live" || access.ServiceID != BusinessProjectServiceID || access.PayerSpaceID != binding.SpaceID || access.ProductID != binding.Product || access.State != "active" || access.GrantVersion == "" || !access.UnlimitedProjects || !access.UnlimitedContacts || !at.Before(access.PaidUntilUTC) {
+	if !isBusinessProjectBinding(binding) || access.Mode != binding.Mode || access.ServiceID != BusinessProjectServiceID || access.PayerSpaceID != binding.SpaceID || access.ProductID != binding.Product || access.State != "active" || access.GrantVersion == "" || !access.UnlimitedProjects || !access.UnlimitedContacts || !at.Before(access.PaidUntilUTC) {
 		return ErrSharedProjectUnauthorized
 	}
 	r, admission := models4datatug.NewProjectAdmissionRecord(binding.SpaceID, projectID)

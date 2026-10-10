@@ -101,7 +101,7 @@ func TestQueryActivityDrainRecoversLostResponseAndAdvancesPastRetryableFailure(t
 	}
 	// A fresh service instance has no receipt ID or in-memory queue. Starting a
 	// new scan discovers and retries the earlier failed item from durable state.
-	restarted, err := NewQueryActivityService(f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
+	restarted, err := NewQueryActivityService(contract4paymentus.ModeLive, f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestQueryActivityDrainRecoversLostReturnAfterLedgerCommit(t *testing.T) {
 	}
 	// A new worker has only durable Space storage, not the lost receipt ID. It
 	// finds the same pending row and the real ledger returns an idempotent replay.
-	restarted, err := NewQueryActivityService(f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
+	restarted, err := NewQueryActivityService(contract4paymentus.ModeLive, f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestQueryActivityDrainContinuesThroughRealFirestoreAdapterAfterDeliveredPre
 	}
 
 	ledger := &queryActivityDrainRecordingLedger{}
-	service, err := NewQueryActivityService(dalgo2firestore.NewDatabase("(default)", client), queryActivityTestBindingReader{}, ledger, f.service.corrections, func() time.Time { return f.now })
+	service, err := NewQueryActivityService(contract4paymentus.ModeLive, dalgo2firestore.NewDatabase("(default)", client), queryActivityTestBindingReader{}, ledger, f.service.corrections, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
 	}

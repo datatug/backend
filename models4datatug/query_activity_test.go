@@ -22,9 +22,9 @@ func validQueryActivityReceipt() QueryActivityReceipt {
 		Version: 1, ContextID: "context-a", OperationID: "operation-a", Kind: QueryActivityEdit,
 		ActorID: "actor-a", SpaceID: "space-a", ProjectID: "project-a", Period: period,
 		PeriodStartUTC: at.Add(-time.Hour), PeriodEndUTC: at.Add(time.Hour), PaidUntilUTC: at.Add(time.Hour),
-		PaidBindingProofID: "paid-proof-a", QueryUseProofID: "query-proof-a", AcceptedAtUTC: at,
+		PaidBindingProofID: "paid-proof-a", PayerBindingDigest: strings.Repeat("a", 64), QueryUseProofID: "query-proof-a", AcceptedAtUTC: at,
 	}
-	r.BindingDigest = QueryActivityBindingDigest(r.ActorID, r.SpaceID, r.ProjectID, r.Period, r.PeriodStartUTC, r.PeriodEndUTC, r.PaidUntilUTC, r.PaidBindingProofID, r.QueryUseProofID)
+	r.BindingDigest = QueryActivityBindingDigest(r.ActorID, r.SpaceID, r.ProjectID, r.Period, r.PeriodStartUTC, r.PeriodEndUTC, r.PaidUntilUTC, r.PayerBindingDigest, r.PaidBindingProofID, r.QueryUseProofID)
 	r.ReceiptID = NewQueryActivityReceiptID(r.ActorID, period)
 	r.Activity = contract4paymentus.UsageActivity{
 		Ref: period, SourceID: QueryActivitySourceID, EventID: NewQueryActivityEventID(r.ContextID, r.OperationID),
@@ -82,8 +82,8 @@ func TestQueryActivityDurableTimesUseMicrosecondPrecision(t *testing.T) {
 		t.Fatalf("canonical durable time = %s, want %s", got, canonical)
 	}
 	period := validQueryActivityReceipt().Period
-	first := QueryActivityBindingDigest("actor-a", "space-a", "project-a", period, nanosecond, nanosecond.Add(time.Hour), nanosecond.Add(2*time.Hour), "paid-proof-a", "query-proof-a")
-	second := QueryActivityBindingDigest("actor-a", "space-a", "project-a", period, canonical, canonical.Add(time.Hour), canonical.Add(2*time.Hour), "paid-proof-a", "query-proof-a")
+	first := QueryActivityBindingDigest("actor-a", "space-a", "project-a", period, nanosecond, nanosecond.Add(time.Hour), nanosecond.Add(2*time.Hour), strings.Repeat("a", 64), "paid-proof-a", "query-proof-a")
+	second := QueryActivityBindingDigest("actor-a", "space-a", "project-a", period, canonical, canonical.Add(time.Hour), canonical.Add(2*time.Hour), strings.Repeat("a", 64), "paid-proof-a", "query-proof-a")
 	if first != second {
 		t.Fatalf("binding digest varies below durable precision: %s != %s", first, second)
 	}
@@ -101,7 +101,7 @@ func TestQueryActivityContextAndQuotaBounds(t *testing.T) {
 	ctx := QueryActivityContext{
 		Version: 1, ContextID: "context-a", ActorID: "actor-a", SpaceID: "space-a", ProjectID: "project-a",
 		Period: period, PeriodStartUTC: at.Add(-time.Hour), PeriodEndUTC: at.Add(time.Hour), PaidUntilUTC: at.Add(time.Hour),
-		BindingDigest: strings.Repeat("b", 64), PaidBindingProofID: "paid-a", QueryUseProofID: "use-a",
+		BindingDigest: strings.Repeat("b", 64), PayerBindingDigest: strings.Repeat("a", 64), PaidBindingProofID: "paid-a", QueryUseProofID: "use-a",
 		IssuedAtUTC: at, ExpiresAtUTC: at.Add(time.Minute),
 	}
 	if err := ctx.Validate(); err != nil {

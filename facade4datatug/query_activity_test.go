@@ -122,7 +122,7 @@ func newQueryActivityFixtureWindow(t *testing.T, _ time.Duration) *queryActivity
 		t.Fatalf("seed activity checkpoint: %v", err)
 	}
 	f := &queryActivityFixture{t: t, db: db, ctx: ctx, now: now, period: period, ledger: ledger}
-	service, err := NewQueryActivityService(db, queryActivityTestBindingReader{}, ledger, inbox, func() time.Time { return f.now })
+	service, err := NewQueryActivityService(contract4paymentus.ModeLive, db, queryActivityTestBindingReader{}, ledger, inbox, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func activityTestBinding() BusinessActivityBinding {
 		PeriodStartUTC:     time.Now().UTC().Truncate(time.Second).Add(-time.Hour),
 		PeriodEndUTC:       time.Now().UTC().Truncate(time.Second).Add(30 * 24 * time.Hour),
 		PaidUntilUTC:       time.Now().UTC().Truncate(time.Second).Add(30 * 24 * time.Hour),
-		PaidBindingProofID: "paid-proof-1", QueryUseProofID: "query-use-proof-1", QueryUseAllowed: true,
+		PaidBindingProofID: "paid-proof-1", PayerBindingDigest: strings.Repeat("a", 64), QueryUseProofID: "query-use-proof-1", QueryUseAllowed: true,
 	}
 }
 
@@ -167,6 +167,18 @@ func (f *queryActivityFixture) setGrant(actorID, projectID string, active, query
 	key := queryActivityGrantKey(actorID, "business-space", projectID)
 	grant := queryActivityGrantRecord{ActorID: actorID, SpaceID: "business-space", ProjectID: projectID, Active: active, QueryUseAllowed: queryUse, Binding: f.binding()}
 	grant.Binding.PaidBindingProofID = paidProof
+	if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Set(ctx, record.NewRecordWithData(key, &grant))
+	}); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *queryActivityFixture) setGrantPayerDigest(actorID, projectID, digest string) {
+	f.t.Helper()
+	key := queryActivityGrantKey(actorID, "business-space", projectID)
+	grant := queryActivityGrantRecord{ActorID: actorID, SpaceID: "business-space", ProjectID: projectID, Active: true, QueryUseAllowed: true, Binding: f.binding()}
+	grant.Binding.PayerBindingDigest = digest
 	if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
 		return tx.Set(ctx, record.NewRecordWithData(key, &grant))
 	}); err != nil {
@@ -305,7 +317,7 @@ func TestQueryActivityRejectsActorTamperAndReaderClockCrossing(t *testing.T) {
 	clock := f2.now
 	reader := queryActivityTestBindingReader{advanceClock: func() { f2.now = f2.period.EndUTC }}
 	inbox, _ := subscriptions.NewDalgoUsageCorrectionInbox(f2.db, queryActivityTestPeriodAuthority{})
-	f2.service, _ = NewQueryActivityService(f2.db, reader, f2.ledger, inbox, func() time.Time { return f2.now })
+	f2.service, _ = NewQueryActivityService(contract4paymentus.ModeLive, f2.db, reader, f2.ledger, inbox, func() time.Time { return f2.now })
 	if _, err := f2.service.IssueContext(f2.ctx, "actor-one", "business-space", "project-one"); !errors.Is(err, ErrQueryActivityUnauthorized) {
 		t.Fatalf("context accepted across paid-window end: %v", err)
 	}
