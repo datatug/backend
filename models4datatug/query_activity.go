@@ -137,14 +137,17 @@ func (r QueryActivityReceipt) Validate() error {
 // remains until the ledger admits the activity or its closed-period inbox
 // records it, so a crash after ledger commit is safely replayable.
 type QueryActivityPending struct {
-	Version       int                               `firestore:"v"`
-	ReceiptID     string                            `firestore:"receiptID"`
-	SpaceID       string                            `firestore:"spaceID"`
-	Period        contract4paymentus.UsagePeriodRef `firestore:"period"`
-	Activity      contract4paymentus.UsageActivity  `firestore:"activity"`
-	DeliveryState string                            `firestore:"deliveryState"`
-	Attempts      int64                             `firestore:"attempts"`
-	UpdatedAtUTC  time.Time                         `firestore:"updatedAtUTC"`
+	Version             int                               `firestore:"v"`
+	ReceiptID           string                            `firestore:"receiptID"`
+	SpaceID             string                            `firestore:"spaceID"`
+	Period              contract4paymentus.UsagePeriodRef `firestore:"period"`
+	Activity            contract4paymentus.UsageActivity  `firestore:"activity"`
+	Sequence            int64                             `firestore:"sequence,omitempty"`
+	DeliveryProofDigest string                            `firestore:"deliveryProofDigest,omitempty"`
+	DeliveredAtUTC      time.Time                         `firestore:"deliveredAtUTC,omitempty"`
+	DeliveryState       string                            `firestore:"deliveryState"`
+	Attempts            int64                             `firestore:"attempts"`
+	UpdatedAtUTC        time.Time                         `firestore:"updatedAtUTC"`
 }
 
 const (
@@ -157,9 +160,17 @@ func (p QueryActivityPending) Validate() error {
 		ValidateSharedProjectIdentifier(p.SpaceID) != nil || !validActivityPeriod(p.Period, p.SpaceID) ||
 		p.Activity.Ref != p.Period || p.Activity.SourceID != QueryActivitySourceID || !validActivityID(p.Activity.EventID) ||
 		!validActivityID(p.Activity.UserID) || !validActivityDigest(p.Activity.EvidenceDigest) || !validActivityUTC(p.Activity.OccurredAtUTC) ||
-		(p.DeliveryState != QueryActivityPendingStatePending && p.DeliveryState != QueryActivityPendingStateDelivered) ||
+		(p.DeliveryState != QueryActivityPendingStatePending && p.DeliveryState != QueryActivityPendingStateDelivered) || p.Sequence < 0 ||
 		p.Attempts < 0 || !validActivityUTC(p.UpdatedAtUTC) {
 		return ErrInvalidQueryActivity
+	}
+	if p.Sequence > 0 {
+		if p.DeliveryState == QueryActivityPendingStatePending && (p.DeliveryProofDigest != "" || !p.DeliveredAtUTC.IsZero()) {
+			return ErrInvalidQueryActivity
+		}
+		if p.DeliveryState == QueryActivityPendingStateDelivered && (!validActivityDigest(p.DeliveryProofDigest) || !validActivityUTC(p.DeliveredAtUTC)) {
+			return ErrInvalidQueryActivity
+		}
 	}
 	return nil
 }

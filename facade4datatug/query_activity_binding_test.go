@@ -124,6 +124,40 @@ func TestQueryActivityReportRejectsMissingExpiredAndStaleContexts(t *testing.T) 
 	}
 }
 
+func TestQueryActivityReportRequiresReadyCheckpointInAcceptanceTransaction(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	activityContext := f.issue("actor", "project")
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.State = models4datatug.QueryActivityCheckpointOpening
+	if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Set(ctx, checkpointRecord)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "checkpoint-opening", Kind: models4datatug.QueryActivityEdit}
+	if _, err := f.service.Report(f.ctx, "actor", "business-space", request); !errors.Is(err, ErrQueryActivityUnavailable) {
+		t.Fatalf("report accepted before native period open completed: %v", err)
+	}
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.AcceptedCount != 0 {
+		t.Fatalf("rejected report changed checkpoint: %+v / %v", checkpoint, err)
+	}
+	checkpoint.State = models4datatug.QueryActivityCheckpointReady
+	if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Set(ctx, checkpointRecord)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := f.service.Report(f.ctx, "actor", "business-space", request); err != nil || !result.Accepted {
+		t.Fatalf("ready period did not accept report: %+v / %v", result, err)
+	}
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.AcceptedCount != 1 {
+		t.Fatalf("receipt and sequence were not fenced by checkpoint write: %+v / %v", checkpoint, err)
+	}
+}
+
 func TestQueryActivityReportRejectsStoredOperationRebind(t *testing.T) {
 	f := newQueryActivityFixture(t)
 	activityContext := f.issue("actor", "project")

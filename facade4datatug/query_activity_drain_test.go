@@ -357,7 +357,7 @@ func (l *queryActivityDrainRecordingLedger) Admit(_ context.Context, activity co
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.accepted = append(l.accepted, activity)
-	return contract4paymentus.UsageAdmission{NewActiveUser: true}, nil
+	return contract4paymentus.UsageAdmission{Activity: activity, AcceptedAtUTC: time.Now().UTC(), NewActiveUser: true}, nil
 }
 
 func newQueryActivityDrainFirestoreClient(t *testing.T, fake *queryActivityFirestoreDrainServer) *firestore.Client {
@@ -388,8 +388,9 @@ func newQueryActivityDrainFirestoreClient(t *testing.T, fake *queryActivityFires
 func TestQueryActivityDrainContinuesThroughRealFirestoreAdapterAfterDeliveredPrefix(t *testing.T) {
 	f := newQueryActivityFixture(t)
 	type seededPending struct {
-		pending models4datatug.QueryActivityPending
-		receipt models4datatug.QueryActivityReceipt
+		pending  models4datatug.QueryActivityPending
+		receipt  models4datatug.QueryActivityReceipt
+		sequence models4datatug.QueryActivityPeriodSequence
 	}
 	seeded := make([]seededPending, 0, 4)
 	for i := 0; i < 4; i++ {
@@ -408,13 +409,40 @@ func TestQueryActivityDrainContinuesThroughRealFirestoreAdapterAfterDeliveredPre
 		if err := f.db.Get(f.ctx, receiptRecord); err != nil || receipt.Validate() != nil {
 			t.Fatalf("read fixture receipt %s: %+v / %v", actorID, receipt, err)
 		}
-		seeded = append(seeded, seededPending{pending: *pending, receipt: *receipt})
+		sequenceRecord, sequence := models4datatug.NewQueryActivityPeriodSequenceRecord(f.period.Ref, pending.Sequence)
+		if err := f.db.Get(f.ctx, sequenceRecord); err != nil || sequence.Validate() != nil {
+			t.Fatalf("read fixture sequence %s: %+v / %v", actorID, sequence, err)
+		}
+		seeded = append(seeded, seededPending{pending: *pending, receipt: *receipt, sequence: *sequence})
 	}
 	sort.Slice(seeded, func(i, j int) bool { return seeded[i].pending.ReceiptID < seeded[j].pending.ReceiptID })
 	for i := range seeded {
 		if i < 3 {
 			seeded[i].pending.DeliveryState = models4datatug.QueryActivityPendingStateDelivered
+			seeded[i].pending.DeliveryProofDigest = strings.Repeat("a", 64)
+			seeded[i].pending.DeliveredAtUTC = f.now
+			seeded[i].sequence.DeliveryState = models4datatug.QueryActivitySequenceDelivered
+			seeded[i].sequence.DeliveryProofDigest = strings.Repeat("a", 64)
+			seeded[i].sequence.DeliveredAtUTC = f.now
 		}
+	}
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.AcceptedCount != 4 {
+		t.Fatalf("read fixture checkpoint: %+v / %v", checkpoint, err)
+	}
+	for checkpoint.DeliveredThrough < checkpoint.AcceptedCount {
+		nextSequence := checkpoint.DeliveredThrough + 1
+		foundDelivered := false
+		for _, item := range seeded {
+			if item.sequence.Sequence == nextSequence && item.sequence.DeliveryState == models4datatug.QueryActivitySequenceDelivered {
+				foundDelivered = true
+				break
+			}
+		}
+		if !foundDelivered {
+			break
+		}
+		checkpoint.DeliveredThrough = nextSequence
 	}
 
 	parentKey := record.NewKeyWithParentAndID(record.NewKeyWithID("spaces", "business-space"), "ext", "datatug")
@@ -432,7 +460,15 @@ func TestQueryActivityDrainContinuesThroughRealFirestoreAdapterAfterDeliveredPre
 				t.Fatalf("seed pending receipt %s through Firestore SDK: %v", item.receipt.ReceiptID, err)
 			}
 		}
+		sequencePath := strings.Join([]string{"spaces", "business-space", "ext", "datatug", models4datatug.QueryActivityPeriodCheckpointsCollection, models4datatug.NewQueryActivityPeriodID(f.period.Ref), models4datatug.QueryActivityPeriodSequencesCollection, fmt.Sprintf("%020d", item.sequence.Sequence)}, "/")
+		if _, err := client.Doc(sequencePath).Set(f.ctx, item.sequence); err != nil {
+			t.Fatalf("seed period sequence %d through Firestore SDK: %v", item.sequence.Sequence, err)
+		}
 		fake.orderedIDs = append(fake.orderedIDs, item.pending.ReceiptID)
+	}
+	checkpointPath := strings.Join([]string{"spaces", "business-space", "ext", "datatug", models4datatug.QueryActivityPeriodCheckpointsCollection, models4datatug.NewQueryActivityPeriodID(f.period.Ref)}, "/")
+	if _, err := client.Doc(checkpointPath).Set(f.ctx, *checkpoint); err != nil {
+		t.Fatalf("seed period checkpoint through Firestore SDK: %v", err)
 	}
 
 	ledger := &queryActivityDrainRecordingLedger{}

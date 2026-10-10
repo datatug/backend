@@ -91,8 +91,10 @@ func newBusinessActivityFixture(t *testing.T, actorID string) (dal.DB, contract4
 		ObservedAtUTC:       time.Date(2026, 10, 1, 9, 31, 0, 0, time.UTC),
 	}
 	access := newBusinessVerifier(t, currentReader, func() time.Time { return sharedTestTime })
+	periods := &businessUsagePeriodStateReader{states: make(map[contract4paymentus.UsagePeriodRef]contract4paymentus.UsagePeriodState)}
 	reader, err := NewNativeBusinessActivityBindingReader(BusinessActivityBindingReaderOptions{
-		Access: access,
+		Access:  access,
+		Periods: periods,
 		InitialStarts: initialServiceStartReaderFunc(func(_ context.Context, tx dal.ReadTransaction, got contract4paymentus.ServicePurchaseScope) (contract4paymentus.ServiceInitialServiceStart, error) {
 			if _, writable := tx.(dal.ReadwriteTransaction); writable {
 				t.Fatal("initial-service reader received a write transaction")
@@ -183,10 +185,70 @@ func TestBusinessActivityBindingUsesExternalProjectContactAndOriginalStart(t *te
 	}
 }
 
+func TestBusinessActivityBindingKeepsNativeFrozenPeriodAcrossPricingRevision(t *testing.T) {
+	db, projectRef, _, reader, _, anchor := newBusinessActivityFixture(t, "external-uid")
+	at := sharedTestTime.Add(10 * time.Minute)
+	usageScope := contract4paymentus.UsageScope{
+		Mode: contract4paymentus.ModeLive, SpaceID: string(projectRef.SpaceID), ProductID: BusinessProjectProductID,
+		PayerID: string(projectRef.SpaceID), ServiceID: BusinessProjectServiceID,
+	}
+	current := contract4paymentus.DataTugBusinessUsagePricing()
+	currentPeriod, err := contract4paymentus.UsagePeriodForAnchor(usageScope, current, anchor.AnchorUTC, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frozen := current
+	frozen.Version = "2026-11-10"
+	frozen.ConfigID = "datatug-business-usage-next"
+	frozen.MonthlyOverageUnitMinor += 100
+	frozenPeriod, err := contract4paymentus.UsagePeriodForAnchor(usageScope, frozen, anchor.AnchorUTC, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameBusinessUsageWindow(currentPeriod, frozenPeriod) {
+		t.Fatal("test snapshots changed the monthly identity instead of only pricing")
+	}
+	periods := reader.periods.(*businessUsagePeriodStateReader)
+	periods.mu.Lock()
+	periods.states[frozenPeriod.Ref] = contract4paymentus.UsagePeriodState{Snapshot: frozenPeriod, DistinctMAU: 1}
+	periods.mu.Unlock()
+	var got BusinessActivityBinding
+	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		var err error
+		got, err = reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, at)
+		return err
+	}); err != nil {
+		t.Fatalf("binding rejected the native period's frozen config after revision: %v", err)
+	}
+	if got.Period != frozenPeriod.Ref || got.PeriodStartUTC != frozenPeriod.StartUTC || got.PeriodEndUTC != frozenPeriod.EndUTC {
+		t.Fatalf("binding diverged from the native frozen period: %+v / %+v", got, frozenPeriod)
+	}
+	periods.mu.Lock()
+	state := periods.states[frozenPeriod.Ref]
+	state.Closed = true
+	periods.states[frozenPeriod.Ref] = state
+	periods.mu.Unlock()
+	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, at)
+		return err
+	}); err == nil {
+		t.Fatal("binding admitted new activity to a natively closed period")
+	}
+	periods.mu.Lock()
+	periods.err = errors.New("native period read failed")
+	periods.mu.Unlock()
+	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+		_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, at)
+		return err
+	}); err == nil {
+		t.Fatal("binding treated an unreadable native period as an unopened period")
+	}
+}
+
 func TestBusinessActivityBindingReaderRequiresEveryAuthority(t *testing.T) {
 	_, _, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
 	base := BusinessActivityBindingReaderOptions{
-		Access: reader.access, InitialStarts: reader.initialStarts, Contacts: reader.contacts, Actors: reader.actors,
+		Access: reader.access, InitialStarts: reader.initialStarts, Periods: reader.periods, Contacts: reader.contacts, Actors: reader.actors,
 	}
 	for _, tc := range []struct {
 		name   string
@@ -194,6 +256,7 @@ func TestBusinessActivityBindingReaderRequiresEveryAuthority(t *testing.T) {
 	}{
 		{"current service reader", func(o *BusinessActivityBindingReaderOptions) { o.Access = nil }},
 		{"initial service start reader", func(o *BusinessActivityBindingReaderOptions) { o.InitialStarts = nil }},
+		{"native usage period reader", func(o *BusinessActivityBindingReaderOptions) { o.Periods = nil }},
 		{"current contact reader", func(o *BusinessActivityBindingReaderOptions) { o.Contacts = nil }},
 		{"authenticated actor verifier", func(o *BusinessActivityBindingReaderOptions) { o.Actors = nil }},
 	} {

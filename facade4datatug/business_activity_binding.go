@@ -29,6 +29,7 @@ type BusinessActivityActorVerifier interface {
 type BusinessActivityBindingReaderOptions struct {
 	Access        *BusinessProjectAccessVerifier
 	InitialStarts contract4paymentus.InitialServiceStartReader
+	Periods       contract4paymentus.UsagePeriodReader
 	Contacts      CurrentProjectContactPort
 	Actors        BusinessActivityActorVerifier
 }
@@ -39,17 +40,18 @@ type BusinessActivityBindingReaderOptions struct {
 type NativeBusinessActivityBindingReader struct {
 	access        *BusinessProjectAccessVerifier
 	initialStarts contract4paymentus.InitialServiceStartReader
+	periods       contract4paymentus.UsagePeriodReader
 	contacts      CurrentProjectContactPort
 	actors        BusinessActivityActorVerifier
 }
 
 func NewNativeBusinessActivityBindingReader(options BusinessActivityBindingReaderOptions) (*NativeBusinessActivityBindingReader, error) {
-	if sharedProjectPortAbsent(options.Access) || sharedProjectPortAbsent(options.InitialStarts) ||
+	if sharedProjectPortAbsent(options.Access) || sharedProjectPortAbsent(options.InitialStarts) || sharedProjectPortAbsent(options.Periods) ||
 		sharedProjectPortAbsent(options.Contacts) || sharedProjectPortAbsent(options.Actors) {
 		return nil, ErrBusinessActivityBindingUnavailable
 	}
 	return &NativeBusinessActivityBindingReader{
-		access: options.Access, initialStarts: options.InitialStarts, contacts: options.Contacts, actors: options.Actors,
+		access: options.Access, initialStarts: options.InitialStarts, periods: options.Periods, contacts: options.Contacts, actors: options.Actors,
 	}, nil
 }
 
@@ -60,7 +62,7 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 	at time.Time,
 ) (BusinessActivityBinding, error) {
 	var zero BusinessActivityBinding
-	if r == nil || sharedProjectPortAbsent(r.access) || sharedProjectPortAbsent(r.initialStarts) ||
+	if r == nil || sharedProjectPortAbsent(r.access) || sharedProjectPortAbsent(r.initialStarts) || sharedProjectPortAbsent(r.periods) ||
 		sharedProjectPortAbsent(r.contacts) || sharedProjectPortAbsent(r.actors) || ctx == nil ||
 		sharedProjectPortAbsent(tx) || !validQueryActivityActor(actorID) ||
 		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil ||
@@ -124,6 +126,20 @@ func (r *NativeBusinessActivityBindingReader) ReadCurrentBusinessActivityBinding
 	period, err := contract4paymentus.UsagePeriodForAnchor(usageScope, config, initial.AnchorUTC, at)
 	if err != nil {
 		return zero, err
+	}
+	// A period's pricing is frozen by the native UsageLedger at Open. Reuse
+	// that exact snapshot after a config revision; fall back to current pricing
+	// only before the native period exists. Unknown or malformed native state
+	// must never be treated as absence.
+	state, periodErr := r.periods.ReadPeriod(ctx, sharedProjectReadTransaction{tx}, period.Ref)
+	if periodErr == nil {
+		if !validBusinessUsageSnapshot(state.Snapshot) || !sameBusinessUsageWindow(period, state.Snapshot) ||
+			!usagePeriodMatchesOriginalStart(state.Snapshot, initial) || state.Closed {
+			return zero, ErrBusinessServiceUnproved
+		}
+		period = state.Snapshot
+	} else if !errors.Is(periodErr, contract4paymentus.ErrUsagePeriodMissing) {
+		return zero, ErrBusinessServiceUnproved
 	}
 	if access.PaidServiceProofID == "" || queryProof == "" {
 		return zero, ErrBusinessServiceUnproved

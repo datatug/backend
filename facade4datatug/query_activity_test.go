@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crediterra/money"
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
@@ -81,22 +80,20 @@ func newQueryActivityFixture(t *testing.T) *queryActivityFixture {
 	return newQueryActivityFixtureWindow(t, 30*24*time.Hour)
 }
 
-func newQueryActivityFixtureWindow(t *testing.T, window time.Duration) *queryActivityFixture {
+func newQueryActivityFixtureWindow(t *testing.T, _ time.Duration) *queryActivityFixture {
 	t.Helper()
-	now := time.Now().UTC().Truncate(time.Second)
-	start, end := now.Add(-time.Hour), now.Add(window)
-	period := contract4paymentus.UsagePeriodSnapshot{
-		Ref: contract4paymentus.UsagePeriodRef{Scope: contract4paymentus.UsageScope{
-			Mode: contract4paymentus.ModeLive, SpaceID: "business-space", ProductID: "datatug-business-usage",
-			PayerID: "business-space", ServiceID: "datatug",
-		}, PeriodID: "period-2026-10"},
-		StartUTC: start, EndUTC: end,
-		Config: contract4paymentus.UsagePricingConfig{
-			ProductID: "datatug-business-usage", ConfigID: "business-usage", Version: "1", Currency: money.CurrencyUSD,
-			MonthlyBaseMinor: 9900, AnnualBaseMinor: 99000, IncludedMonthlyUnits: 7, MonthlyOverageUnitMinor: 2000,
-			AnnualPrepaidUnitMinor: 19200, DiscountBase: true,
-		},
+	// Usage periods are calendar-anchored; tests use a completed period to avoid wall-clock waits.
+	base := time.Now().UTC().Truncate(time.Second)
+	anchor := base.AddDate(0, -3, 0)
+	periodAt := base.AddDate(0, -2, 0)
+	period, err := contract4paymentus.UsagePeriodForAnchor(contract4paymentus.UsageScope{
+		Mode: contract4paymentus.ModeLive, SpaceID: "business-space", ProductID: "datatug-business-usage",
+		PayerID: "business-space", ServiceID: "datatug",
+	}, contract4paymentus.DataTugBusinessUsagePricing(), anchor, periodAt)
+	if err != nil {
+		t.Fatalf("derive anchored test usage period: %v", err)
 	}
+	now := period.StartUTC.Add(time.Hour)
 	db := sneatcoretesting.NewMemoryDB()
 	ctx := context.WithValue(context.Background(), queryActivityAuthorityContextKey{}, true)
 	ledger, err := subscriptions.NewDalgoUsageLedger(db, queryActivityTestPeriodAuthority{})
@@ -109,6 +106,20 @@ func newQueryActivityFixtureWindow(t *testing.T, window time.Duration) *queryAct
 	}
 	if err := ledger.Open(ctx, period); err != nil {
 		t.Fatalf("open real usage ledger: %v", err)
+	}
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(period.Ref)
+	*checkpoint = models4datatug.QueryActivityPeriodCheckpoint{
+		Version: 1, Period: period.Ref, Snapshot: period, AnchorUTC: anchor,
+		AnchorProofDigest: strings.Repeat("a", 64), State: models4datatug.QueryActivityCheckpointReady,
+		UpdatedAtUTC: now,
+	}
+	if err := checkpoint.Validate(); err != nil {
+		t.Fatalf("test checkpoint invalid: %v", err)
+	}
+	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Insert(txCtx, checkpointRecord)
+	}); err != nil {
+		t.Fatalf("seed activity checkpoint: %v", err)
 	}
 	f := &queryActivityFixture{t: t, db: db, ctx: ctx, now: now, period: period, ledger: ledger}
 	service, err := NewQueryActivityService(db, queryActivityTestBindingReader{}, ledger, inbox, func() time.Time { return f.now })
@@ -146,6 +157,7 @@ func (f *queryActivityFixture) seedGrant(actorID, projectID string, active, quer
 
 func (f *queryActivityFixture) binding() BusinessActivityBinding {
 	b := activityTestBinding()
+	b.Period = f.period.Ref
 	b.PeriodStartUTC, b.PeriodEndUTC, b.PaidUntilUTC = f.period.StartUTC, f.period.EndUTC, f.period.EndUTC
 	return b
 }
@@ -216,6 +228,46 @@ func TestQueryActivityCoalescesAcrossProjectsAndIsolatesActors(t *testing.T) {
 		result, err := f.service.Report(f.ctx, actorID, "business-space", QueryActivityReport{ContextID: ctx.ContextID, OperationID: "same-operation", Kind: models4datatug.QueryActivityEdit})
 		if err != nil || !result.Accepted {
 			t.Fatalf("distinct user %s = %+v, %v", actorID, result, err)
+		}
+	}
+}
+
+func TestQueryActivityDeliveryWatermarkCatchesUpAfterOutOfOrderGap(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	var accepted []QueryActivityReportResult
+	for i := 0; i < 3; i++ {
+		actor := fmt.Sprintf("watermark-actor-%d", i)
+		activityContext := f.issue(actor, "watermark-project")
+		result, err := f.service.Report(f.ctx, actor, "business-space", QueryActivityReport{
+			ContextID: activityContext.ContextID, OperationID: fmt.Sprintf("watermark-operation-%d", i), Kind: models4datatug.QueryActivityEdit,
+		})
+		if err != nil || !result.Accepted {
+			t.Fatalf("report %d: %+v / %v", i, result, err)
+		}
+		accepted = append(accepted, result)
+	}
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.AcceptedCount != 3 || checkpoint.DeliveredThrough != 0 {
+		t.Fatalf("accepted checkpoint: %+v / %v", checkpoint, err)
+	}
+	for _, index := range []int{1, 2} {
+		if err := f.service.Deliver(f.ctx, "business-space", accepted[index].ReceiptID); err != nil {
+			t.Fatalf("deliver out-of-order receipt %d: %v", index, err)
+		}
+		if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.DeliveredThrough != 0 {
+			t.Fatalf("watermark crossed unresolved sequence gap: %+v / %v", checkpoint, err)
+		}
+	}
+	if err := f.service.Deliver(f.ctx, "business-space", accepted[0].ReceiptID); err != nil {
+		t.Fatalf("deliver gap receipt: %v", err)
+	}
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.DeliveredThrough != 3 || checkpoint.AcceptedCount != 3 {
+		t.Fatalf("watermark did not catch up through prior deliveries: %+v / %v", checkpoint, err)
+	}
+	for index, receipt := range accepted {
+		sequenceRecord, sequence := models4datatug.NewQueryActivityPeriodSequenceRecord(f.period.Ref, int64(index+1))
+		if err := f.db.Get(f.ctx, sequenceRecord); err != nil || sequence.Validate() != nil || sequence.DeliveryState != models4datatug.QueryActivitySequenceDelivered || sequence.ReceiptID != receipt.ReceiptID {
+			t.Fatalf("sequence %d not durably delivered: %+v / %v", index+1, sequence, err)
 		}
 	}
 }
