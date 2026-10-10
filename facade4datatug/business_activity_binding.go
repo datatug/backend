@@ -17,7 +17,7 @@ import (
 	"github.com/sneat-co/sneat-go-core/coretypes"
 )
 
-var ErrBusinessActivityBindingUnavailable = errors.New("Business activity binding is unavailable")
+var ErrBusinessActivityBindingUnavailable = errors.New("business activity binding is unavailable")
 
 // BusinessActivityActorVerifier must bind actorID to the authenticated server
 // identity for this request. Implementations must use only the supplied

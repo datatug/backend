@@ -120,10 +120,10 @@ func linkActivityContact(t *testing.T, db dal.DB, projectRef, contactRef contrac
 		contactCommand := contract4linkage.RelationshipItemRolesCommand{
 			ItemRef: projectRef.ItemRef, Add: &contract4linkage.RolesCommand{RolesToItem: []string{role}},
 		}
-		if _, err := project.WithRelatedAndIDs.ApplyDirectedRelationshipAndID(sharedTestTime, "linker", projectRef.SpaceID, projectCommand); err != nil {
+		if _, err := project.ApplyDirectedRelationshipAndID(sharedTestTime, "linker", projectRef.SpaceID, projectCommand); err != nil {
 			return err
 		}
-		if _, err := contactValue.WithRelatedAndIDs.ApplyDirectedRelationshipAndID(sharedTestTime, "linker", contactRef.SpaceID, contactCommand); err != nil {
+		if _, err := contactValue.ApplyDirectedRelationshipAndID(sharedTestTime, "linker", contactRef.SpaceID, contactCommand); err != nil {
 			return err
 		}
 		if err := tx.Set(ctx, projectRecord); err != nil {
