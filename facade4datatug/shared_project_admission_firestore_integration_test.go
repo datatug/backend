@@ -354,7 +354,7 @@ func TestBusinessUsageLifecycleFirestoreCollectionGroupCursorUsesFullPath(t *tes
 		t.Fatalf("first real collection-group page: len=%d hasMore=%t err=%v", len(first), hasMore, err)
 	}
 	firstPath := first[0].Key().String()
-	if !validWorkerCursorPath(firstPath, models4datatug.QueryActivityPeriodCheckpointsCollection) {
+	if (models4datatug.BusinessUsageWorkerState{Version: 1, CheckpointAfterPath: firstPath, UpdatedAtUTC: anchor}).Validate() != nil {
 		t.Fatalf("Firestore cursor is not a validated full Space-owned document path: %q", firstPath)
 	}
 	second, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPeriodCheckpointsCollection, firstPath, 1, false)
