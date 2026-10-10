@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/firestore v1.26.0
 	github.com/crediterra/money v0.4.2
 	github.com/dal-go/dalgo v0.92.0
-	github.com/dal-go/dalgo2firestore v0.10.35
+	github.com/dal-go/dalgo2firestore v0.10.36
 	github.com/dal-go/record v0.1.4
 	github.com/datatug/datatug-core v0.46.0
 	github.com/sneat-co/paymentus/backend v0.41.0

@@ -114,7 +114,7 @@ jobs:
           PRIVATE_MODULE_READ_TOKEN: ${{ steps.private-module-token.outputs.token }}
         run: |
           go mod download github.com/sneat-co/sneat-core-modules@v0.92.0
-          go mod download github.com/sneat-co/paymentus/backend@v0.34.0
+          go mod download github.com/sneat-co/paymentus/backend@v0.41.0
       - name: Remove module credentials before running repository tests
         shell: bash
         run: |
@@ -127,7 +127,7 @@ jobs:
         run: |
           firebase emulators:exec --only firestore --project demo-datatug-paid-create \
             --config facade4datatug/testdata/firestore-emulator.json \
-            "go test -tags=integration -race -count=1 -run '^TestPaidSharedProjectFirestoreRoundtrip$' ./facade4datatug"
+            "go test -tags=integration -race -count=1 -run '^(TestPaidSharedProjectFirestoreRoundtrip|TestBusinessUsageLifecycleFirestoreCollectionGroupCursorUsesFullPath|TestBusinessUsageLifecycleFirestorePendingGroupFiltersAndResumesDuplicateLeafIDs)$' ./facade4datatug"
 
       - name: Remove ephemeral module credential configuration
         if: always()
