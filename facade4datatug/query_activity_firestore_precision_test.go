@@ -133,7 +133,9 @@ func TestQueryActivityReceiptFirestorePrecisionSurvivesRealAdmissionReplayAndLat
 	// The real SDK codec round trips and ledger transaction must finish inside
 	// the still-open period before the test closes it and exercises late replay.
 	f := newQueryActivityFixtureWindow(t, 10*time.Second)
-	rawAcceptedAt := time.Date(f.now.Year(), f.now.Month(), f.now.Day(), f.now.Hour(), f.now.Minute(), f.now.Second(), 123456789, time.UTC)
+	// Keep the precise event strictly in the past relative to the independent
+	// real clock used by Paymentus' ledger, while remaining inside this period.
+	rawAcceptedAt := f.now.Add(-time.Second).Add(123456789 * time.Nanosecond)
 	f.now = rawAcceptedAt
 	activityContext := f.issue("precision-actor", "precision-project")
 	contextRecord, storedContext := models4datatug.NewQueryActivityContextRecord("business-space", activityContext.ContextID)
