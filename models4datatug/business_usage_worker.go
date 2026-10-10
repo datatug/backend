@@ -38,10 +38,15 @@ func validWorkerCollectionCursor(value, collection string) bool {
 		return true
 	}
 	parts := strings.Split(value, "/")
-	if len(parts) != 6 || parts[0] != "spaces" || parts[2] != "ext" || parts[3] != "datatug" || parts[4] != collection || parts[5] == "" {
+	if len(parts) < 2 || len(parts)%2 != 0 || parts[len(parts)-2] != collection {
 		return false
 	}
-	return ValidateSharedProjectIdentifier(parts[1]) == nil && ValidateSharedProjectIdentifier(parts[5]) == nil
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func NewBusinessUsageWorkerStateRecord() (record.Record, *BusinessUsageWorkerState) {

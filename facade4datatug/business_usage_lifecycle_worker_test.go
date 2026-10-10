@@ -63,8 +63,9 @@ func TestBusinessUsageLifecycleGroupPagesResumeByFullSpaceDocumentPath(t *testin
 		t.Fatalf("first checkpoint page: len=%d hasMore=%t err=%v", len(first), hasMore, err)
 	}
 	firstPath := first[0].Key().String()
+	cursorState := models4datatug.BusinessUsageWorkerState{Version: 1, CheckpointAfterPath: firstPath, UpdatedAtUTC: anchor}
 	if !strings.HasPrefix(firstPath, "spaces/space-") || !strings.Contains(firstPath, "/ext/datatug/"+models4datatug.QueryActivityPeriodCheckpointsCollection+"/") ||
-		!validWorkerCursorPath(firstPath, models4datatug.QueryActivityPeriodCheckpointsCollection) {
+		cursorState.Validate() != nil {
 		t.Fatalf("checkpoint cursor omitted full Space path: %q", firstPath)
 	}
 	all, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPeriodCheckpointsCollection, "", 10, false)
@@ -402,10 +403,61 @@ func TestBusinessUsageLifecycleWorkerCountsForeignCheckpointAndUnscopedPendingRo
 	}
 }
 
+func TestBusinessUsageLifecycleWorkerCursorAdvancesPastForeignGroupRows(t *testing.T) {
+	f := newBusinessOpeningRecoveryFixture(t, true, false)
+	foreignOrg := record.NewKeyWithID("orgs", "org-a")
+	foreignSpace := record.NewKeyWithParentAndID(foreignOrg, "spaces", "space-a")
+	foreignExtension := record.NewKeyWithParentAndID(foreignSpace, "ext", "datatug")
+	foreignCollection := record.NewKeyWithParentAndID(foreignExtension, models4datatug.QueryActivityPeriodCheckpointsCollection, f.period.Ref.PeriodID)
+	foreignCheckpoint := models4datatug.QueryActivityPeriodCheckpoint{
+		Version: 1, Period: f.period.Ref, Snapshot: f.period, AnchorUTC: f.period.AnchorUTC,
+		AnchorProofDigest: strings.Repeat("f", 64), State: models4datatug.QueryActivityCheckpointOpening,
+		UpdatedAtUTC: f.period.AnchorUTC,
+	}
+	validRecord, _ := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(context.Background(), validRecord); err != nil {
+		t.Fatalf("read valid Space checkpoint for next page: %v", err)
+	}
+	dummyKey := record.NewKeyWithParentAndID(foreignExtension, models4datatug.QueryActivityPeriodCheckpointsCollection, "later-foreign")
+	f.worker.query = &lifecycleSequencedQueryExecutor{pages: [][]record.Record{
+		{record.NewRecordWithData(foreignCollection, foreignCheckpoint), record.NewRecordWithData(dummyKey, foreignCheckpoint)},
+		{},
+		{validRecord},
+		{},
+	}}
+
+	first, err := f.worker.Run(context.Background(), 1)
+	if err != nil || first.CheckpointsScanned != 1 || first.Failures != 1 || !first.CheckpointHasMore || first.CheckpointAfter != foreignCollection.String() {
+		t.Fatalf("first pass did not record and advance past the foreign row: %+v / %v", first, err)
+	}
+	second, err := f.worker.Run(context.Background(), 1)
+	if err != nil || second.CheckpointsScanned != 1 || second.PeriodsOpened != 1 || second.Failures != 0 {
+		t.Fatalf("next pass was starved behind the foreign row: %+v / %v", second, err)
+	}
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(context.Background(), checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointReady {
+		t.Fatalf("valid Space checkpoint was not processed after foreign row: %+v / %v", checkpoint, err)
+	}
+}
+
 type lifecycleScriptedQueryExecutor struct {
 	dal.QueryExecutor
 	reader dal.RecordsReader
 	err    error
+}
+
+type lifecycleSequencedQueryExecutor struct {
+	dal.QueryExecutor
+	pages [][]record.Record
+}
+
+func (q *lifecycleSequencedQueryExecutor) ExecuteQueryToRecordsReader(context.Context, dal.Query) (dal.RecordsReader, error) {
+	if len(q.pages) == 0 {
+		return nil, errors.New("unexpected collection-group query")
+	}
+	page := q.pages[0]
+	q.pages = q.pages[1:]
+	return &lifecycleScriptedRecordsReader{rows: append([]record.Record(nil), page...)}, nil
 }
 
 func (q lifecycleScriptedQueryExecutor) ExecuteQueryToRecordsReader(context.Context, dal.Query) (dal.RecordsReader, error) {

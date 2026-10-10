@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"reflect"
-	"strings"
 	"time"
 
 	"github.com/dal-go/dalgo/dal"
@@ -316,14 +315,8 @@ func (w *BusinessUsageLifecycleWorker) saveWorkerCursor(ctx context.Context, che
 			return ErrBusinessUsageLifecycleUnavailable
 		}
 		if checkpoints {
-			if !validWorkerCursorPath(cursor, models4datatug.QueryActivityPeriodCheckpointsCollection) {
-				return ErrBusinessUsageLifecycleUnavailable
-			}
 			state.CheckpointAfterPath = cursor
 		} else {
-			if !validWorkerCursorPath(cursor, models4datatug.QueryActivityPendingCollection) {
-				return ErrBusinessUsageLifecycleUnavailable
-			}
 			state.PendingAfterPath = cursor
 		}
 		state.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(w.now())
@@ -417,14 +410,4 @@ func businessCollectionGroupSpace(row record.Record, collection string) (string,
 	}
 	spaceID, ok := space.ID.(string)
 	return spaceID, ok && models4datatug.ValidateSharedProjectIdentifier(spaceID) == nil
-}
-
-func validWorkerCursorPath(value, collection string) bool {
-	if value == "" {
-		return true
-	}
-	parts := strings.Split(value, "/")
-	return len(parts) == 6 && parts[0] == "spaces" && parts[2] == "ext" && parts[3] == "datatug" &&
-		parts[4] == collection && models4datatug.ValidateSharedProjectIdentifier(parts[1]) == nil &&
-		models4datatug.ValidateSharedProjectIdentifier(parts[5]) == nil
 }

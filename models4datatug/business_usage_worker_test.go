@@ -29,6 +29,10 @@ func TestBusinessUsageWorkerCursorModelsFailClosed(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid full-path scan cursors rejected: %v", err)
 	}
+	valid.CheckpointAfterPath = "orgs/org-a/spaces/space-a/ext/datatug/" + QueryActivityPeriodCheckpointsCollection + "/checkpoint"
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("safe foreign collection-group scan cursor rejected: %v", err)
+	}
 	for name, mutate := range map[string]func(*BusinessUsageWorkerState){
 		"wrong collection": func(state *BusinessUsageWorkerState) {
 			state.PendingAfterPath = "spaces/space-b/ext/datatug/other/receipt"
