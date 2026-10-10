@@ -365,7 +365,7 @@ func TestBusinessUsageLifecycleFirestoreCollectionGroupCursorUsesFullPath(t *tes
 }
 
 func TestBusinessUsageLifecycleFirestorePendingGroupFiltersAndResumesDuplicateLeafIDs(t *testing.T) {
-	db, _, ctx, _ := paidFirestore(t)
+	db, client, ctx, _ := paidFirestore(t)
 	anchor := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	for _, item := range []struct {
 		spaceID       string
@@ -376,7 +376,7 @@ func TestBusinessUsageLifecycleFirestorePendingGroupFiltersAndResumesDuplicateLe
 		{spaceID: "pending-space-c", deliveryState: models4datatug.QueryActivityPendingStateDelivered},
 	} {
 		period := lifecycleTestPeriod(t, item.spaceID, anchor)
-		const leafID = "same-leaf-id"
+		const leafID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		activity := contract4paymentus.UsageActivity{
 			Ref: period.Ref, SourceID: models4datatug.QueryActivitySourceID, EventID: "event-" + item.spaceID,
 			UserID: "actor-" + item.spaceID, EvidenceDigest: strings.Repeat("a", 64), OccurredAtUTC: anchor,
@@ -390,8 +390,13 @@ func TestBusinessUsageLifecycleFirestorePendingGroupFiltersAndResumesDuplicateLe
 			pending.DeliveryProofDigest = strings.Repeat("b", 64)
 			pending.DeliveredAtUTC = anchor.Add(time.Minute)
 		}
-		if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
-			return tx.Insert(txCtx, recordValue)
+		// This is a query-contract fixture, not an accepted business record: the
+		// server-issued receipt digest normally includes the Space in its scope,
+		// so create raw matching IDs to exercise Firestore's duplicate-leaf cursor
+		// behavior without invoking model validation on synthetic documents.
+		if _, err := client.Doc(recordValue.Key().String()).Set(ctx, map[string]any{
+			"deliveryState": item.deliveryState,
+			"receiptID":     leafID,
 		}); err != nil {
 			t.Fatalf("insert %s pending fixture: %v", item.spaceID, err)
 		}
