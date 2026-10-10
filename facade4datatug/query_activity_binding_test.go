@@ -11,6 +11,8 @@ import (
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/sneat-co/paymentus/backend/contract4paymentus"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type queryActivityBindingReaderFunc func(context.Context, dal.ReadTransaction, string, string, string, time.Time) (BusinessActivityBinding, error)
@@ -202,4 +204,192 @@ func TestQueryActivityRequiresAValidServerClockBeforeDurableWrites(t *testing.T)
 	if err := f.db.Get(f.ctx, pendingRecord); err != nil || pending.Validate() != nil || pending.Attempts != 0 || pending.DeliveryState != models4datatug.QueryActivityPendingStatePending {
 		t.Fatalf("invalid clock changed durable outbox or admitted usage: pending=%+v err=%v", pending, err)
 	}
+}
+
+func TestQueryActivityOperationalBindingFailuresArePreserved(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	upstreamErr := errors.New("temporary authority store failure")
+	f.service.binding = queryActivityBindingReaderFunc(func(context.Context, dal.ReadTransaction, string, string, string, time.Time) (BusinessActivityBinding, error) {
+		return BusinessActivityBinding{}, upstreamErr
+	})
+	if _, err := f.service.IssueContext(f.ctx, "actor", "business-space", "project"); !errors.Is(err, upstreamErr) {
+		t.Fatalf("context issue hid binding reader failure: %v", err)
+	}
+	contextID := models4datatug.NewQueryActivityContextID("actor", "project", f.period.Ref)
+	contextRecord, _ := models4datatug.NewQueryActivityContextRecord("business-space", contextID)
+	if err := f.db.Get(f.ctx, contextRecord); !record.IsNotFound(err) {
+		t.Fatalf("failed authority read left a context: %v", err)
+	}
+
+	f.service.binding = queryActivityTestBindingReader{}
+	activityContext := f.issue("actor", "project")
+	f.service.binding = queryActivityBindingReaderFunc(func(context.Context, dal.ReadTransaction, string, string, string, time.Time) (BusinessActivityBinding, error) {
+		return BusinessActivityBinding{}, upstreamErr
+	})
+	request := QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "authority-outage", Kind: models4datatug.QueryActivityEdit}
+	if _, err := f.service.Report(f.ctx, "actor", "business-space", request); !errors.Is(err, upstreamErr) {
+		t.Fatalf("report hid binding reader failure: %v", err)
+	}
+	receiptRecord, _ := f.receipt("actor")
+	if err := f.db.Get(f.ctx, receiptRecord); !record.IsNotFound(err) {
+		t.Fatalf("failed authority read left a receipt: %v", err)
+	}
+}
+
+func TestQueryActivityFailsClosedOnCorruptStoredAuthorityAndOutbox(t *testing.T) {
+	t.Run("context identity", func(t *testing.T) {
+		f := newQueryActivityFixture(t)
+		activityContext := f.issue("actor", "project")
+		contextRecord, stored := models4datatug.NewQueryActivityContextRecord("business-space", activityContext.ContextID)
+		if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			if err := tx.Get(ctx, contextRecord); err != nil {
+				return err
+			}
+			stored.ProjectID = "other-project"
+			return tx.Set(ctx, contextRecord)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.service.IssueContext(f.ctx, "actor", "business-space", "project"); !errors.Is(err, ErrQueryActivityConflict) {
+			t.Fatalf("context key rebound to another project: %v", err)
+		}
+	})
+
+	t.Run("quota identity", func(t *testing.T) {
+		f := newQueryActivityFixture(t)
+		f.seedGrant("actor", "project", true, true)
+		quotaRecord, quota := models4datatug.NewQueryActivityContextQuotaRecord("actor", f.period.Ref)
+		*quota = models4datatug.QueryActivityContextQuota{
+			Version: 1, ActorID: "another-actor", Period: f.period.Ref,
+			ContextWindowStartUTC: f.now, ContextsInWindow: 1,
+		}
+		if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			return tx.Insert(ctx, quotaRecord)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := quota.Validate(); err != nil {
+			t.Fatalf("corrupt-identity test fixture is malformed: %v", err)
+		}
+		if _, err := f.service.IssueContext(f.ctx, "actor", "business-space", "project"); !errors.Is(err, ErrQueryActivityConflict) {
+			t.Fatalf("quota key rebound to another actor: %v", err)
+		}
+	})
+
+	t.Run("pending corruption", func(t *testing.T) {
+		f := newQueryActivityFixture(t)
+		activityContext := f.issue("actor", "project")
+		accepted, err := f.service.Report(f.ctx, "actor", "business-space", QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "corrupt-pending", Kind: models4datatug.QueryActivityEdit})
+		if err != nil || !accepted.Accepted {
+			t.Fatalf("initial receipt: %+v / %v", accepted, err)
+		}
+		pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord("business-space", accepted.ReceiptID)
+		if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			if err := tx.Get(ctx, pendingRecord); err != nil {
+				return err
+			}
+			pending.Activity.EventID = "different-valid-event"
+			return tx.Set(ctx, pendingRecord)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := pending.Validate(); err != nil {
+			t.Fatalf("mismatched receipt test fixture is not a valid pending row: %v", err)
+		}
+		if err := f.service.Deliver(f.ctx, "business-space", accepted.ReceiptID); !errors.Is(err, ErrQueryActivityConflict) {
+			t.Fatalf("pending row no longer matching its accepted receipt was delivered: %v", err)
+		}
+	})
+}
+
+func TestQueryActivityInputValidationFailsBeforeStorage(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	if _, err := f.service.IssueContext(f.ctx, "", "business-space", "project"); !errors.Is(err, ErrQueryActivityInvalid) {
+		t.Fatalf("invalid actor was not rejected: %v", err)
+	}
+	if _, err := f.service.Report(f.ctx, "actor", "business-space", QueryActivityReport{ContextID: "", OperationID: "operation", Kind: models4datatug.QueryActivityEdit}); !errors.Is(err, ErrQueryActivityInvalid) {
+		t.Fatalf("invalid report identity was not rejected: %v", err)
+	}
+	if err := f.service.Deliver(f.ctx, "business-space", "not-a-receipt-id"); !errors.Is(err, ErrQueryActivityInvalid) {
+		t.Fatalf("invalid delivery identity was not rejected: %v", err)
+	}
+}
+
+func TestQueryActivityContextUsesEarlierExclusivePeriodFence(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	f.service.binding = queryActivityBindingReaderFunc(func(_ context.Context, _ dal.ReadTransaction, _, _, _ string, _ time.Time) (BusinessActivityBinding, error) {
+		binding := f.binding()
+		binding.PeriodEndUTC = f.now.Add(2 * time.Hour)
+		binding.PaidUntilUTC = f.now.Add(4 * time.Hour)
+		return binding, nil
+	})
+	issued, err := f.service.IssueContext(f.ctx, "actor", "business-space", "project")
+	if err != nil {
+		t.Fatalf("issue context with shorter metering period: %v", err)
+	}
+	if !issued.ExpiresAtUTC.Equal(f.now.Add(2 * time.Hour)) {
+		t.Fatalf("context expiry = %s, want earlier period fence %s", issued.ExpiresAtUTC, f.now.Add(2*time.Hour))
+	}
+}
+
+func TestQueryActivityDrainCursorAndCancellationSignals(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	for _, cursor := range []string{
+		"short",
+		strings.Repeat("A", 64),
+		strings.Repeat("g", 64),
+	} {
+		if _, err := f.service.Drain(f.ctx, "business-space", QueryActivityDrainRequest{Limit: 1, AfterID: cursor}); !errors.Is(err, ErrQueryActivityInvalid) {
+			t.Errorf("invalid continuation cursor %q accepted: %v", cursor, err)
+		}
+	}
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{"context canceled", context.Canceled},
+		{"deadline exceeded", context.DeadlineExceeded},
+		{"gRPC canceled", status.Error(codes.Canceled, "transaction canceled")},
+		{"gRPC deadline", status.Error(codes.DeadlineExceeded, "transaction deadline")},
+		{"ordinary delivery error", errors.New("temporary unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := activityDrainCancellation(context.Background(), test.err)
+			if test.name == "ordinary delivery error" {
+				if got != nil {
+					t.Fatalf("ordinary failure treated as cancellation: %v", got)
+				}
+			} else if !errors.Is(got, test.err) {
+				t.Fatalf("cancellation signal lost: %v", got)
+			}
+		})
+	}
+}
+
+func TestQueryActivityDeliveryRejectsUnbackedPendingRows(t *testing.T) {
+	t.Run("missing accepted receipt", func(t *testing.T) {
+		f := newQueryActivityFixture(t)
+		activityContext := f.issue("orphaned-actor", "orphaned-project")
+		accepted, err := f.service.Report(f.ctx, "orphaned-actor", "business-space", QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "orphaned-operation", Kind: models4datatug.QueryActivityEdit})
+		if err != nil || !accepted.Accepted {
+			t.Fatalf("create accepted receipt: %+v / %v", accepted, err)
+		}
+		receiptRecord, _ := f.receipt("orphaned-actor")
+		if err := f.db.RunReadwriteTransaction(f.ctx, func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			return tx.Delete(ctx, receiptRecord.Key())
+		}); err != nil {
+			t.Fatal(err)
+		}
+		pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord("business-space", accepted.ReceiptID)
+		if err := f.db.Get(f.ctx, pendingRecord); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.service.Deliver(f.ctx, "business-space", accepted.ReceiptID); !record.IsNotFound(err) {
+			t.Fatalf("pending row without its accepted receipt was delivered: %v", err)
+		}
+		if err := f.db.Get(f.ctx, pendingRecord); err != nil || pending.DeliveryState != models4datatug.QueryActivityPendingStatePending || pending.Attempts != 0 {
+			t.Fatalf("unbacked pending row changed: %+v / %v", pending, err)
+		}
+	})
+
 }

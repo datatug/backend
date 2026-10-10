@@ -197,6 +197,64 @@ func TestQueryActivityReportHTTPMapsRateLimitAndAuthenticationFailure(t *testing
 	if w.Code != http.StatusUnauthorized || service.reports != before || strings.Contains(w.Body.String(), "sensitive") {
 		t.Fatalf("auth response=%d body=%q service=%+v", w.Code, w.Body.String(), service)
 	}
+	setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		return facade.NewContextWithUser(context.Background(), nil), nil
+	})
+	r = httptest.NewRequest(http.MethodPost, target, strings.NewReader(`{"contextID":"ctx","operationID":"op","kind":"query_edit"}`))
+	r.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	handler(w, r)
+	if w.Code != http.StatusUnauthorized || service.reports != before || strings.Contains(w.Body.String(), "ctx") {
+		t.Fatalf("missing verified actor response=%d body=%q service=%+v", w.Code, w.Body.String(), service)
+	}
+}
+
+func TestQueryActivityReportRejectsMalformedJSONContainers(t *testing.T) {
+	for _, test := range []struct{ name, body string }{
+		{"empty", ""},
+		{"array root", `[]`},
+		{"missing object close", `{"contextID":"ctx","operationID":"op","kind":"query_edit"`},
+		{"malformed array", `{"contextID":"ctx","operationID":"op","kind":[}`},
+		{"malformed nested object", `{"contextID":"ctx","operationID":"op","kind":{"nested":`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := &queryActivityRouteServiceFake{}
+			handler := httpPostQueryActivityReport(QueryActivityRouteOptions{Service: service})
+			setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+				return facade.NewContextWithUser(context.Background(), facade.NewUserContext("actor")), nil
+			})
+			r := httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/query_activity_report?storage=firestore&spaceID=space", strings.NewReader(test.body))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler(w, r)
+			if w.Code != http.StatusBadRequest || service.reports != 0 || test.body != "" && strings.Contains(w.Body.String(), test.body) {
+				t.Fatalf("malformed body response=%d body=%q reports=%d", w.Code, w.Body.String(), service.reports)
+			}
+		})
+	}
+}
+
+type queryActivityReadFailureBody struct{}
+
+func (queryActivityReadFailureBody) Read([]byte) (int, error) {
+	return 0, errors.New("body read failed")
+}
+func (queryActivityReadFailureBody) Close() error { return nil }
+
+func TestQueryActivityReportMapsBodyReadFailureWithoutDetails(t *testing.T) {
+	service := &queryActivityRouteServiceFake{}
+	handler := httpPostQueryActivityReport(QueryActivityRouteOptions{Service: service})
+	setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		return facade.NewContextWithUser(context.Background(), facade.NewUserContext("actor")), nil
+	})
+	r := httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/query_activity_report?storage=firestore&spaceID=space", nil)
+	r.Body = queryActivityReadFailureBody{}
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, r)
+	if w.Code != http.StatusBadRequest || service.reports != 0 || strings.Contains(w.Body.String(), "body read failed") {
+		t.Fatalf("body read failure response=%d body=%q reports=%d", w.Code, w.Body.String(), service.reports)
+	}
 }
 
 func TestQueryActivityReportHTTPMapsDomainErrorsWithoutDetails(t *testing.T) {

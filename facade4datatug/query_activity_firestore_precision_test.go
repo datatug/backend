@@ -130,7 +130,9 @@ func roundTripQueryActivityFirestoreValue(t *testing.T, client *firestore.Client
 
 func TestQueryActivityReceiptFirestorePrecisionSurvivesRealAdmissionReplayAndLateDelivery(t *testing.T) {
 	client := newQueryActivityFirestoreCodecClient(t)
-	f := newQueryActivityFixtureWindow(t, 2*time.Second)
+	// The real SDK codec round trips and ledger transaction must finish inside
+	// the still-open period before the test closes it and exercises late replay.
+	f := newQueryActivityFixtureWindow(t, 10*time.Second)
 	rawAcceptedAt := time.Date(f.now.Year(), f.now.Month(), f.now.Day(), f.now.Hour(), f.now.Minute(), f.now.Second(), 123456789, time.UTC)
 	f.now = rawAcceptedAt
 	activityContext := f.issue("precision-actor", "precision-project")
