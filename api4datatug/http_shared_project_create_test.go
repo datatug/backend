@@ -81,7 +81,7 @@ func TestSharedProjectHTTPVerifiedActorReplayAndErrors(t *testing.T) {
 	if denied := postShared(h, body); denied.Code != http.StatusForbidden || strings.Contains(denied.Body.String(), "secret") {
 		t.Fatalf("denied %d %s", denied.Code, denied.Body.String())
 	}
-	for _, unsafe := range []string{`{"spaceID":"../foreign","commandID":"command","title":"T"}`, `{"spaceID":"space","commandID":"","title":"T"}`, `{"spaceID":"space","commandID":"command","title":" "}`, `not-json`} {
+	for _, unsafe := range []string{`{"spaceID":"../foreign","commandID":"command","title":"T"}`, `{"spaceID":"space","commandID":"","title":"T"}`, `{"spaceID":"space","commandID":"command","title":" "}`, `{"spaceID":"space","commandID":"invalid-intent","title":"T","billingIntent":"unlimited"}`, `not-json`} {
 		if rejected := postShared(h, unsafe); rejected.Code != http.StatusBadRequest {
 			t.Fatalf("invalid %q: %d", unsafe, rejected.Code)
 		}
@@ -172,9 +172,12 @@ func TestSharedProjectRouteOptionsAreAdditiveAndDisabled(t *testing.T) {
 			t.Fatalf("unconfigured %s route status=%d", route, w.Code)
 		}
 	}
-	for _, field := range []CreateSharedProjectRequest{{SpaceID: "../bad", CommandID: "command", Title: "T"}, {SpaceID: "space", CommandID: "command", Title: ""}} {
+	for _, field := range []CreateSharedProjectRequest{{SpaceID: "../bad", CommandID: "command", Title: "T"}, {SpaceID: "space", CommandID: "command", Title: "", BillingIntent: "space_business"}, {SpaceID: "space", CommandID: "command", Title: "T", BillingIntent: "unlimited"}} {
 		if err := field.Validate(); !validation.IsBadRequestError(err) {
 			t.Fatalf("validation is not a client error: %v", err)
 		}
+	}
+	if err := (CreateSharedProjectRequest{SpaceID: "space", CommandID: "command", Title: "Business", BillingIntent: facade4datatug.BillingIntentSpaceBusiness}).Validate(); err != nil {
+		t.Fatalf("supported Business billing intent rejected: %v", err)
 	}
 }

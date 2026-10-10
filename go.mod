@@ -9,7 +9,7 @@ require (
 	github.com/dal-go/dalgo2firestore v0.10.35
 	github.com/dal-go/record v0.1.4
 	github.com/datatug/datatug-core v0.46.0
-	github.com/sneat-co/paymentus/backend v0.33.1
+	github.com/sneat-co/paymentus/backend v0.34.0
 	github.com/sneat-co/sneat-core-modules v0.92.0
 	github.com/sneat-co/sneat-ext-contracts/contactus v0.12.12
 	github.com/sneat-co/sneat-go-core v0.71.3

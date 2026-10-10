@@ -22,12 +22,16 @@ type SharedProjectRouteOptions struct {
 }
 
 type CreateSharedProjectRequest struct {
-	SpaceID   string `json:"spaceID"`
-	CommandID string `json:"commandID"`
-	Title     string `json:"title"`
+	SpaceID       string                                    `json:"spaceID"`
+	CommandID     string                                    `json:"commandID"`
+	Title         string                                    `json:"title"`
+	BillingIntent facade4datatug.SharedProjectBillingIntent `json:"billingIntent,omitempty"`
 }
 
 func (r CreateSharedProjectRequest) Validate() error {
+	if r.BillingIntent.Validate() != nil {
+		return validation.NewErrBadRequestFieldValue("billingIntent", "unsupported billing intent")
+	}
 	for _, field := range []struct{ name, value string }{{"spaceID", r.SpaceID}, {"commandID", r.CommandID}} {
 		if err := models4datatug.ValidateSharedProjectIdentifier(field.value); err != nil {
 			return validation.NewErrBadRequestFieldValue(field.name, err.Error())
@@ -56,7 +60,7 @@ func httpPostCreateSharedProject(options SharedProjectRouteOptions) http.Handler
 			return
 		}
 		response, err := options.Service.Create(ctx, facade4datatug.SharedProjectCreateCommand{
-			ActorID: ctx.User().GetUserID(), SpaceID: request.SpaceID, CommandID: request.CommandID, Title: request.Title,
+			ActorID: ctx.User().GetUserID(), SpaceID: request.SpaceID, CommandID: request.CommandID, Title: request.Title, BillingIntent: request.BillingIntent,
 		})
 		if err != nil {
 			status, code := http.StatusServiceUnavailable, "unavailable"

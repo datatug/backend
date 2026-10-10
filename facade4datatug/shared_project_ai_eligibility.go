@@ -112,7 +112,11 @@ func (s *SharedProjectService) readProjectAIEligibility(ctx context.Context, act
 }
 
 func (s *SharedProjectService) projectAIEligibilityForAdmission(ctx context.Context, tx dal.ReadTransaction, options PaidSharedProjectOptions, admission *models4datatug.ProjectAdmission, at time.Time) (ProjectAIEligibility, error) {
-	if admission == nil {
+	// Pro is the only admission type currently authorized for AI. In the
+	// unified Pro/Business service, payer IDs may coincide (or be corrupted to
+	// coincide); the immutable product/version must be checked before any Pro
+	// sponsor authority is consulted.
+	if admission == nil || admission.Validate() != nil || admission.Version != 1 || admission.Mode != options.Mode || admission.Product != "datatug" || options.Product != "datatug" {
 		return ProjectAIEligibility{}, ErrProjectAIEligibilityUnavailable
 	}
 	if err := options.Personal.VerifyPersonalOwner(ctx, tx, admission.ActorID, admission.PayerID); err != nil {

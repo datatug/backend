@@ -1,3 +1,4 @@
+// Copyright 2026 Sneat.co
 package facade4datatug
 
 import (
@@ -7,6 +8,16 @@ import (
 
 	"github.com/dal-go/dalgo/dal"
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
+)
+
+const (
+	BusinessProjectProductID   = "datatug-business-usage"
+	BusinessProjectServiceID   = "datatug"
+	BusinessProjectOwnerFamily = "datatug"
+	BusinessProjectAccountKind = "space"
+	BusinessMonthlyPlanID      = "datatug-business-usage-monthly"
+	BusinessAnnualPlanID       = "datatug-business-usage-annual"
 )
 
 var (
@@ -14,9 +25,9 @@ var (
 	ErrBusinessServiceEnded    = errors.New("business space service has ended")
 )
 
-// SpaceServiceAccess is the product-neutral, current paid-service projection
-// supplied by a trusted Paymentus adapter. It is not a checkout session or a
-// purchase claim. Historical project admissions never substitute for it.
+// SpaceServiceAccess is the product-authorized current service projection.
+// It is derived from Paymentus' read-only financial projection plus this
+// versioned DataTug entitlement policy. The client cannot supply any field.
 type SpaceServiceAccess struct {
 	Mode, ServiceID, PayerSpaceID, OwnerFamily, AccountKind, ProductID, PlanID string
 	OwnerSubscriptionID, PaidServiceProofID, GrantVersion                      string
@@ -24,70 +35,150 @@ type SpaceServiceAccess struct {
 	PaidUntilUTC                                                               time.Time
 	State                                                                      string // active or ended, after complete source reconciliation
 	UnlimitedProjects, UnlimitedContacts                                       bool
+	checkedAtUTC                                                               time.Time
 }
 
-// CurrentSpaceServiceAccessReader must use only the supplied transaction. A
-// production implementation must prove the current owner/money fence, signed
-// provider ingress, paid service, refunds and period from durable source data.
-// Missing, partial, pending and unknown source data must return an error.
-type CurrentSpaceServiceAccessReader interface {
-	ReadCurrentSpaceServiceAccess(context.Context, dal.ReadTransaction, string, string, string) (SpaceServiceAccess, error)
+// BusinessProjectAccessPolicy is server configuration. Unlimited project and
+// contact grants come from this versioned product policy, never from a money
+// field or the absence of Pro limits.
+type BusinessProjectAccessPolicy struct {
+	GrantVersion string
 }
 
-// BusinessProjectAccessVerifier contains no provider, DB or mutation handle.
-// It is deliberately unmounted until the Paymentus reader and every hosted
-// create/write/linkage gate use the same current authority.
+func (p BusinessProjectAccessPolicy) validate() error {
+	if p.GrantVersion == "" || len(p.GrantVersion) > 128 {
+		return ErrBusinessServiceUnproved
+	}
+	return nil
+}
+
+// BusinessProjectAccessVerifier contains no provider or mutation handle. The
+// Paymentus reader can only inspect the caller's transaction; paid end and
+// evidence expiry are both enforced before DataTug uses this result.
 type BusinessProjectAccessVerifier struct {
-	reader CurrentSpaceServiceAccessReader
+	reader contract4paymentus.CurrentSpaceServiceReader
+	policy BusinessProjectAccessPolicy
 	now    func() time.Time
 }
 
-func NewBusinessProjectAccessVerifier(reader CurrentSpaceServiceAccessReader, now func() time.Time) (*BusinessProjectAccessVerifier, error) {
-	if sharedProjectPortAbsent(reader) || now == nil {
+func NewBusinessProjectAccessVerifier(reader contract4paymentus.CurrentSpaceServiceReader, policy BusinessProjectAccessPolicy, now func() time.Time) (*BusinessProjectAccessVerifier, error) {
+	if sharedProjectPortAbsent(reader) || policy.validate() != nil || now == nil {
 		return nil, ErrBusinessServiceUnproved
 	}
-	return &BusinessProjectAccessVerifier{reader: reader, now: now}, nil
+	return &BusinessProjectAccessVerifier{reader: reader, policy: policy, now: now}, nil
 }
 
-// ReadCurrent verifies the selected Space's LIVE DataTug Business base. Caller
-// authority, current Contactus membership and action-specific role remain
-// separate required checks. A replacement owner for the same Space/service can
-// qualify without rewriting immutable project admission provenance.
+// ReadCurrent verifies the selected Space's explicit LIVE DataTug Business
+// service. Current contact membership and action-specific roles are separate
+// checks. Same-Space owner replacement is allowed: the admission's original
+// proof remains provenance, while this read verifies the current owner.
 func (v *BusinessProjectAccessVerifier) ReadCurrent(ctx context.Context, tx dal.ReadTransaction, spaceID string) (SpaceServiceAccess, error) {
 	var zero SpaceServiceAccess
-	if v == nil || sharedProjectPortAbsent(v.reader) || v.now == nil || ctx == nil || sharedProjectPortAbsent(tx) || models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
+	if v == nil || sharedProjectPortAbsent(v.reader) || v.policy.validate() != nil || v.now == nil || ctx == nil || sharedProjectPortAbsent(tx) || models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
 		return zero, ErrBusinessServiceUnproved
 	}
-	at := v.now().UTC()
-	if at.IsZero() {
+	startedAt := v.now().UTC()
+	if startedAt.IsZero() {
 		return zero, ErrBusinessServiceUnproved
 	}
-	got, err := v.reader.ReadCurrentSpaceServiceAccess(ctx, sharedProjectReadTransaction{tx}, "live", "datatug", spaceID)
+	scope := contract4paymentus.ServicePurchaseScope{Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ServiceID: BusinessProjectServiceID}
+	current, err := v.reader.ReadCurrentSpaceServiceAccess(ctx, sharedProjectReadTransaction{tx}, scope)
 	if err != nil {
 		return zero, err
 	}
-	if got.Mode != "live" || got.ServiceID != "datatug" || got.PayerSpaceID != spaceID || got.OwnerFamily != "datatug" || got.AccountKind != "organisation" || got.ProductID != "datatug-business-usage" ||
-		(got.PlanID != "datatug-business-usage-monthly" && got.PlanID != "datatug-business-usage-annual") ||
-		got.OwnerSubscriptionID == "" || got.OwnerGeneration < 1 || got.OwnerRevision < 1 || got.PaidServiceProofID == "" || got.GrantVersion == "" ||
-		got.PaidUntilUTC.IsZero() || got.PaidUntilUTC.Location() != time.UTC || !got.UnlimitedProjects || !got.UnlimitedContacts {
+	if current.Scope != scope || current.PayerSpaceID != spaceID || current.OwnerFamily != BusinessProjectOwnerFamily || current.AccountKind != BusinessProjectAccountKind || current.ProductID != BusinessProjectProductID ||
+		(current.PlanID != BusinessMonthlyPlanID && current.PlanID != BusinessAnnualPlanID) || current.OwnerSubscriptionID == "" || current.OwnerGeneration < 1 || current.OwnerRevision < 1 || current.PaidServiceProofID == "" {
 		return zero, ErrBusinessServiceUnproved
 	}
-	// The source read may cross the paid-period boundary. Check a fresh server
-	// clock after it returns so an expired grant cannot be admitted using the
-	// time sampled before the read.
-	current := v.now().UTC()
-	if current.IsZero() || current.Before(at) {
-		return zero, ErrBusinessServiceUnproved
-	}
-	switch got.State {
-	case "ended":
+	if current.State == contract4paymentus.ServiceCurrentFinancialEnded || current.State == contract4paymentus.ServiceCurrentFinancialRefunded {
 		return zero, ErrBusinessServiceEnded
-	case "active":
-		if !current.Before(got.PaidUntilUTC) {
-			return zero, ErrBusinessServiceEnded
-		}
-		return got, nil
-	default:
+	}
+	if current.State != contract4paymentus.ServiceCurrentFinancialPaid || !validBusinessServiceTime(current.PaidFromUTC) || !validBusinessServiceTime(current.PaidThroughUTC) ||
+		!validBusinessServiceTime(current.EffectiveEndUTC) || (!current.ScheduledEndUTC.IsZero() && !validBusinessServiceTime(current.ScheduledEndUTC)) ||
+		!validBusinessServiceTime(current.ObservedAtUTC) || !validBusinessServiceTime(current.EvidenceValidUntilUTC) {
 		return zero, ErrBusinessServiceUnproved
+	}
+	// The source read may cross a paid or evidence boundary. Recheck with a
+	// fresh server time after it returns; do not round or extend either fence.
+	now := v.now().UTC()
+	if now.IsZero() || now.Before(startedAt) || now.Before(current.ObservedAtUTC) || now.Before(current.PaidFromUTC) {
+		return zero, ErrBusinessServiceUnproved
+	}
+	paidUntil := earlierBusinessTime(current.PaidThroughUTC, current.EvidenceValidUntilUTC, current.EffectiveEndUTC, current.ScheduledEndUTC)
+	if !now.Before(paidUntil) {
+		return zero, ErrBusinessServiceEnded
+	}
+	return SpaceServiceAccess{
+		Mode: string(scope.Mode), ServiceID: scope.ServiceID, PayerSpaceID: current.PayerSpaceID,
+		OwnerFamily: current.OwnerFamily, AccountKind: current.AccountKind, ProductID: current.ProductID, PlanID: current.PlanID,
+		OwnerSubscriptionID: current.OwnerSubscriptionID, OwnerGeneration: current.OwnerGeneration, OwnerRevision: current.OwnerRevision,
+		PaidServiceProofID: current.PaidServiceProofID, GrantVersion: v.policy.GrantVersion,
+		PaidUntilUTC: paidUntil, State: "active", UnlimitedProjects: true, UnlimitedContacts: true, checkedAtUTC: now,
+	}, nil
+}
+
+func validBusinessServiceTime(t time.Time) bool {
+	return !t.IsZero() && t.Location() == time.UTC
+}
+
+func earlierBusinessTime(first time.Time, rest ...time.Time) time.Time {
+	for _, candidate := range rest {
+		if !candidate.IsZero() && candidate.Before(first) {
+			first = candidate
+		}
+	}
+	return first
+}
+
+func verifyBusinessProjectAccessAt(access SpaceServiceAccess, at time.Time) error {
+	if access.State != "active" || access.PaidUntilUTC.IsZero() || at.IsZero() || !access.checkedAtUTC.IsZero() && at.Before(access.checkedAtUTC) {
+		return ErrBusinessServiceUnproved
+	}
+	if !at.Before(access.PaidUntilUTC) {
+		return ErrBusinessServiceEnded
+	}
+	return nil
+}
+
+// verifyBusinessProjectAccessAfterRead fences authority that was read during
+// an earlier command observation. The check time must be sampled after the
+// reader returns so a normal advancing clock cannot make a fresh grant appear
+// to come from the future. The paid end remains exclusive.
+func verifyBusinessProjectAccessAfterRead(access SpaceServiceAccess, observedAt time.Time, now func() time.Time) error {
+	if now == nil {
+		return ErrBusinessServiceUnproved
+	}
+	checkedAt := now().UTC()
+	if checkedAt.IsZero() || observedAt.IsZero() || checkedAt.Before(observedAt) || !access.checkedAtUTC.IsZero() && checkedAt.Before(access.checkedAtUTC) {
+		return ErrBusinessServiceUnproved
+	}
+	return verifyBusinessProjectAccessAt(access, checkedAt)
+}
+
+func (s *SharedProjectService) verifyCurrentProjectService(ctx context.Context, tx dal.ReadTransaction, admission *models4datatug.ProjectAdmission, at time.Time) error {
+	if s == nil || admission == nil {
+		return ErrSharedProjectUnauthorized
+	}
+	switch admission.Version {
+	case 1:
+		if s.paid == nil || admission.Product != "datatug" {
+			return ErrSharedProjectUnauthorized
+		}
+		_, err := readCurrentPaidProjectAccess(ctx, tx, *s.paid, admission.ActorID, admission.PayerID, at)
+		return err
+	case 2:
+		if s.business == nil || admission.Product != BusinessProjectProductID || admission.PayerID != admission.SpaceID || admission.ServiceID != BusinessProjectServiceID {
+			return ErrBusinessServiceUnproved
+		}
+		access, err := s.business.ReadCurrent(ctx, tx, admission.SpaceID)
+		if err != nil {
+			return err
+		}
+		if access.ProductID != admission.Product || access.PayerSpaceID != admission.PayerID {
+			return ErrBusinessServiceUnproved
+		}
+		return verifyBusinessProjectAccessAfterRead(access, at, s.now)
+	default:
+		return ErrSharedProjectUnauthorized
 	}
 }

@@ -8,12 +8,15 @@ import (
 	"github.com/sneat-co/sneat-core-modules/linkage/contract4linkage"
 )
 
-func readLinkedProjectAdmission(ctx context.Context, tx dal.ReadTransaction, ref contract4linkage.RelationshipEntityRef, project *models4datatug.SharedLinkedProject) (*models4datatug.ProjectAdmission, error) {
+func readLinkedProjectAdmission(ctx context.Context, tx dal.ReadTransaction, ref contract4linkage.RelationshipEntityRef, project *models4datatug.SharedLinkedProject, allowInitializing ...bool) (*models4datatug.ProjectAdmission, error) {
 	r, admission := models4datatug.NewProjectAdmissionRecord(string(ref.SpaceID), ref.ItemRef.ItemID)
 	if err := tx.Get(ctx, r); err != nil {
 		return nil, err
 	}
-	if admission.Validate() != nil || admission.Mode != "live" || admission.Product != "datatug" || admission.SpaceID != string(ref.SpaceID) || admission.ProjectID != ref.ItemRef.ItemID || admission.OwnerContact.Validate() != nil || project.Created == nil || !project.Created.At.Equal(admission.CreatedAt) || project.Storage == models4datatug.GithubStoreID && project.Status != models4datatug.GitHubProjectReady {
+	productMatches := admission.Version == 1 && admission.Product == "datatug" || admission.Version == 2 && admission.Product == BusinessProjectProductID
+	githubInitializingReplay := len(allowInitializing) != 0 && allowInitializing[0] && project.Status == models4datatug.GitHubProjectInitializing
+	githubStatusInvalid := project.Storage == models4datatug.GithubStoreID && project.Status != models4datatug.GitHubProjectReady && !githubInitializingReplay
+	if admission.Validate() != nil || admission.Mode != "live" || !productMatches || admission.SpaceID != string(ref.SpaceID) || admission.ProjectID != ref.ItemRef.ItemID || admission.OwnerContact.Validate() != nil || project.Created == nil || !project.Created.At.Equal(admission.CreatedAt) || githubStatusInvalid {
 		return nil, ErrSharedProjectConflict
 	}
 	rr, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(admission.SpaceID, admission.CommandID)

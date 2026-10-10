@@ -14,8 +14,8 @@ func validBusinessAdmission() ProjectAdmission {
 		ActorID: "creator", SpaceID: "business-space", ProjectID: "project", CommandID: "operation",
 		RequestDigest: "bound-request", LimitsVersion: "business-grant-v1", ProfileVersion: "business-profile-v1",
 		SubscriptionID: "subscription", OwnerGeneration: 3, OwnerRevision: 5,
-		QuotaBasisDigest: "complete-inventory", QuotaRevision: 1, ServiceID: "datatug",
-		PlanID: "datatug-business-usage-monthly", PaidServiceProofID: "paid-service-proof",
+		ServiceID: "datatug",
+		PlanID:    "datatug-business-usage-monthly", PaidServiceProofID: "paid-service-proof",
 		UnlimitedProjects: true, UnlimitedContacts: true, CreatedAt: time.Now().UTC(),
 		OwnerContact: ProjectOwnerContactProof{
 			Version: 1, Role: "owner", CatalogVersion: "1",
@@ -46,12 +46,14 @@ func TestBusinessAdmissionRequiresExplicitUnlimitedServiceProvenance(t *testing.
 		"foreign owner": func(a *ProjectAdmission) {
 			a.OwnerContact.Contact.SpaceID = coretypes.SpaceID("foreign-space")
 		},
-		"wrong owner role":    func(a *ProjectAdmission) { a.OwnerContact.Role = "viewer" },
+		"missing owner role":  func(a *ProjectAdmission) { a.OwnerContact.Role = "" },
 		"invalid paid proof":  func(a *ProjectAdmission) { a.PaidServiceProofID = "../proof" },
 		"finite projects":     func(a *ProjectAdmission) { a.UnlimitedProjects = false },
 		"finite contacts":     func(a *ProjectAdmission) { a.UnlimitedContacts = false },
 		"mixed project count": func(a *ProjectAdmission) { a.ProtectedProjectsLimit = 1 },
 		"mixed contact count": func(a *ProjectAdmission) { a.ProtectedUsersLimit = 1 },
+		"fake quota digest":   func(a *ProjectAdmission) { a.QuotaBasisDigest = "not-a-business-quota" },
+		"fake quota revision": func(a *ProjectAdmission) { a.QuotaRevision = 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := valid

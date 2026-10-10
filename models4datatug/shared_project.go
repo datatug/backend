@@ -143,7 +143,7 @@ func (r SharedProjectCreateReceipt) Validate() error {
 		digest = PaidSharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title, r.PayerID, r.Mode, r.Product)
 	}
 	if r.Version == 2 {
-		if r.GitHub == nil || r.GitHub.Binding.Validate() != nil || r.GitHub.ExpectedHead == "" || r.GitHub.TemplateID == "" || r.GitHub.TemplateCommit == "" || r.Mode != "live" || r.Product != "datatug" {
+		if r.GitHub == nil || r.GitHub.Binding.Validate() != nil || r.GitHub.ExpectedHead == "" || r.GitHub.TemplateID == "" || r.GitHub.TemplateCommit == "" || r.Mode != "live" || (r.Product != "datatug" && r.Product != "datatug-business-usage") || (r.Product == "datatug-business-usage" && r.PayerID != r.SpaceID) {
 			return fmt.Errorf("invalid GitHub shared project source")
 		}
 		digest = GitHubSharedProjectCreateDigest(r.ActorID, r.SpaceID, r.CommandID, r.Title, r.PayerID, r.Mode, r.Product, *r.GitHub)

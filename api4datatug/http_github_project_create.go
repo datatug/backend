@@ -104,10 +104,11 @@ func httpPostCreateProjectByStore(ids facade4datatug.IDGenerator, github GitHubP
 }
 
 type CreateGitHubProjectRequest struct {
-	Title       string `json:"title"`
-	SpaceID     string `json:"spaceID"`
-	OperationID string `json:"operationId"`
-	GitHub      struct {
+	Title         string                                    `json:"title"`
+	SpaceID       string                                    `json:"spaceID"`
+	OperationID   string                                    `json:"operationId"`
+	BillingIntent facade4datatug.SharedProjectBillingIntent `json:"billingIntent,omitempty"`
+	GitHub        struct {
 		RepositoryID       int64  `json:"repositoryID"`
 		Owner              string `json:"owner"`
 		Name               string `json:"name"`
@@ -140,7 +141,7 @@ func (v *CreateGitHubProjectRequest) UnmarshalJSON(data []byte) error {
 }
 
 func (v CreateGitHubProjectRequest) Validate() error {
-	if models4datatug.ValidateSharedProjectTitle(v.Title) != nil || models4datatug.ValidateSharedProjectIdentifier(v.SpaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(v.OperationID) != nil || v.GitHub.RepositoryID < 1 || v.GitHub.Owner == "" || v.GitHub.Name == "" || template4datatug.ValidateFolder(v.GitHub.Folder) != nil || v.GitHub.Branch == "" || v.GitHub.ExpectedBranchHead == "" || v.Template.ID != template4datatug.DemoProjectID || v.Template.Commit != template4datatug.DemoProjectCommit {
+	if v.BillingIntent.Validate() != nil || models4datatug.ValidateSharedProjectTitle(v.Title) != nil || models4datatug.ValidateSharedProjectIdentifier(v.SpaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(v.OperationID) != nil || v.GitHub.RepositoryID < 1 || v.GitHub.Owner == "" || v.GitHub.Name == "" || template4datatug.ValidateFolder(v.GitHub.Folder) != nil || v.GitHub.Branch == "" || v.GitHub.ExpectedBranchHead == "" || v.Template.ID != template4datatug.DemoProjectID || v.Template.Commit != template4datatug.DemoProjectCommit {
 		return validation.NewErrBadRequestFieldValue("body", "invalid GitHub project create request")
 	}
 	return nil
@@ -175,6 +176,7 @@ func httpPostCreateGitHubProject(options GitHubProjectRouteOptions) http.Handler
 		}
 		command := facade4datatug.GitHubProjectCreateCommand{
 			ActorID: actorID, SpaceID: request.SpaceID, OperationID: request.OperationID, Title: request.Title,
+			BillingIntent: request.BillingIntent,
 			Source: models4datatug.GitHubCreateSource{
 				Binding: models4datatug.GitHubProjectBinding{
 					RepositoryID: request.GitHub.RepositoryID, Owner: request.GitHub.Owner, Name: request.GitHub.Name,

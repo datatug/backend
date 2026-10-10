@@ -25,9 +25,29 @@ var (
 
 type SharedProjectCreateCommand struct {
 	ActorID, SpaceID, CommandID, Title string
+	BillingIntent                      SharedProjectBillingIntent
+}
+
+// SharedProjectBillingIntent is only a user's plan choice. It grants no
+// access: the service still verifies current Pro or Business authority.
+type SharedProjectBillingIntent string
+
+const (
+	BillingIntentPersonalPro   SharedProjectBillingIntent = "personal_pro"
+	BillingIntentSpaceBusiness SharedProjectBillingIntent = "space_business"
+)
+
+func (i SharedProjectBillingIntent) Validate() error {
+	if i != "" && i != BillingIntentPersonalPro && i != BillingIntentSpaceBusiness {
+		return ErrSharedProjectInvalid
+	}
+	return nil
 }
 
 func (c SharedProjectCreateCommand) Validate() error {
+	if c.BillingIntent.Validate() != nil {
+		return ErrSharedProjectInvalid
+	}
 	if c.ActorID == "" || len(c.ActorID) > 128 || c.ActorID != strings.TrimSpace(c.ActorID) || !utf8.ValidString(c.ActorID) {
 		return ErrSharedProjectInvalid
 	}
@@ -55,6 +75,7 @@ type SharedProjectService struct {
 	authority                 SharedProjectCreateAuthority
 	now                       func() time.Time
 	paid                      *PaidSharedProjectOptions
+	business                  *BusinessProjectAccessVerifier
 	ownerLinks                *sharedProjectOwnerLinks
 	activation                *sharedProjectActivation
 	recordQueryEditCandidates bool
@@ -88,22 +109,11 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 	if err := command.Validate(); err != nil {
 		return result, err
 	}
-	binding := SharedProjectCreateBinding{
-		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.CommandID,
-		RequestDigest: models4datatug.SharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title),
+	binding, err := s.resolveSharedProjectCreateBinding(ctx, command.ActorID, command.SpaceID, command.CommandID, command.Title, command.BillingIntent)
+	if err != nil {
+		return result, err
 	}
-	if s.paid != nil {
-		account, err := ResolvePersonalPayer(ctx, command.ActorID, "", s.paid.Directory)
-		if err != nil {
-			return result, ErrSharedProjectUnauthorized
-		}
-		if models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
-			return result, ErrSharedProjectUnauthorized
-		}
-		binding.PayerID, binding.Mode, binding.Product = account.ID, s.paid.Mode, s.paid.Product
-		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
-	}
-	if s.activation != nil {
+	if s.activation != nil && !isBusinessProjectBinding(binding) {
 		userCtx, ok := ctx.(facade.ContextWithUser)
 		if !ok || sharedProjectPortAbsent(userCtx) {
 			return result, ErrSharedProjectUnauthorized
@@ -130,7 +140,8 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			return err
 		}
 		var admission *projectAdmissionState
-		if s.paid != nil {
+		var businessAccess *SpaceServiceAccess
+		if s.paid != nil && !isBusinessProjectBinding(binding) {
 			var err error
 			// Recheck paid-through against the actual time of every transaction
 			// attempt. Command entropy and audit time remain stable through retry.
@@ -142,6 +153,16 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			if err != nil {
 				return err
 			}
+		} else if s.business != nil {
+			paidAt := s.now().UTC()
+			if paidAt.IsZero() || paidAt.Before(observedAt) {
+				return ErrSharedProjectUnauthorized
+			}
+			access, err := s.business.ReadCurrent(txCtx, tx, command.SpaceID)
+			if err != nil {
+				return err
+			}
+			businessAccess = &access
 		}
 		receiptRecord, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(command.SpaceID, command.CommandID)
 		if err := tx.Get(txCtx, receiptRecord); err != nil && !record.IsNotFound(err) {
@@ -164,6 +185,13 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 				if err := s.verifyProjectOwnerReplay(txCtx, tx, binding, receipt.ProjectID, receipt.OwnerContact); err != nil {
 					return err
 				}
+			} else if businessAccess != nil {
+				if err := verifyBusinessProjectAdmissionReplay(txCtx, tx, binding, receipt.ProjectID); err != nil {
+					return err
+				}
+				if err := s.verifyProjectOwnerReplay(txCtx, tx, binding, receipt.ProjectID, receipt.OwnerContact); err != nil {
+					return err
+				}
 			}
 			if err := s.applyExplicitCreateActivation(userCtx, txCtx, tx, binding, observedAt); err != nil {
 				return err
@@ -180,12 +208,21 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			if err := admission.readNewAllocation(txCtx, tx, binding, projectID); err != nil {
 				return err
 			}
+		} else if businessAccess != nil {
+			if err := readNewBusinessProjectAllocation(txCtx, tx, binding, projectID); err != nil {
+				return err
+			}
 		}
 		var ownerPlan *projectOwnerLinkPlan
-		if admission != nil {
+		if admission != nil || businessAccess != nil {
 			var err error
 			ownerPlan, err = s.prepareProjectOwnerLink(txCtx, tx, binding, projectID, observedAt)
 			if err != nil {
+				return err
+			}
+		}
+		if businessAccess != nil {
+			if err := verifyBusinessProjectAccessAt(*businessAccess, s.now().UTC()); err != nil {
 				return err
 			}
 		}
@@ -220,6 +257,10 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		}
 		if admission != nil {
 			if err := admission.writeAllocation(txCtx, tx, binding, projectID, observedAt, ownerPlan.proof); err != nil {
+				return err
+			}
+		} else if businessAccess != nil {
+			if err := writeBusinessProjectAdmission(txCtx, tx, binding, projectID, observedAt, ownerPlan.proof, *businessAccess); err != nil {
 				return err
 			}
 		}

@@ -373,10 +373,10 @@ func TestHostedGitHubCreateRoutePassesVerifiedActorAndSelectedHead(t *testing.T)
 		}
 		return &routeCreateRepo{}, nil
 	}
-	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"436350d41371103be11144ffa346c605f85e1342"}}`
+	body := `{"title":"Owned","spaceID":"space","operationId":"create-1","billingIntent":"space_business","github":{"repositoryID":91,"owner":"owner","name":"repo","folder":"datatug","branch":"work","expectedBranchHead":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"template":{"id":"demo-project-1","commit":"436350d41371103be11144ffa346c605f85e1342"}}`
 	w := httptest.NewRecorder()
 	httpPostCreateGitHubProject(options)(w, httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/create_project?store=github.com", strings.NewReader(body)))
-	if w.Code != http.StatusCreated || service.createCalls != 1 || service.createCommand.ActorID != "firebase-actor" || service.createCommand.Source.ExpectedHead != routeHead {
+	if w.Code != http.StatusCreated || service.createCalls != 1 || service.createCommand.ActorID != "firebase-actor" || service.createCommand.BillingIntent != facade4datatug.BillingIntentSpaceBusiness || service.createCommand.Source.ExpectedHead != routeHead {
 		t.Fatalf("create status=%d body=%s calls=%d command=%+v", w.Code, w.Body.String(), service.createCalls, service.createCommand)
 	}
 	service.errorCreate = facade4datatug.ErrGitHubProjectConflict
@@ -558,10 +558,11 @@ func TestHostedGitHubCreateRejectsUnknownInputAndUnavailableApp(t *testing.T) {
 	for _, body := range []string{
 		strings.Replace(valid, `"branch":"work"`, `"branch":"work","unhandledGrant":"x"`, 1),
 		strings.Replace(valid, `"title":"Owned"`, `"title":"Owned","unknown":"x"`, 1),
+		strings.Replace(valid, `"operationId":"create-1"`, `"operationId":"create-1","billingIntent":"unlimited"`, 1),
 		valid + `{}`,
 	} {
 		var request CreateGitHubProjectRequest
-		if err := json.Unmarshal([]byte(body), &request); err == nil {
+		if err := json.Unmarshal([]byte(body), &request); err == nil && request.Validate() == nil {
 			t.Fatalf("unknown/extra create input accepted: %s", body)
 		}
 	}

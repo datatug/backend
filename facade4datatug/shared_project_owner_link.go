@@ -104,7 +104,9 @@ func (s *SharedProjectService) verifyProjectOwnerReplay(ctx context.Context, tx 
 	if err := tx.Get(ctx, r); err != nil {
 		return err
 	}
-	admission, err := readLinkedProjectAdmission(ctx, tx, ref, project)
+	// An exact retry may still be completing an accepted GitHub reservation.
+	// Other access paths keep the default READY-only rule.
+	admission, err := readLinkedProjectAdmission(ctx, tx, ref, project, true)
 	if err != nil {
 		return err
 	}
