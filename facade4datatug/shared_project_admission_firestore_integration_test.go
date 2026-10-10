@@ -19,6 +19,7 @@ import (
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/dalgo2firestore"
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -360,5 +361,56 @@ func TestBusinessUsageLifecycleFirestoreCollectionGroupCursorUsesFullPath(t *tes
 	second, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPeriodCheckpointsCollection, firstPath, 1, false)
 	if err != nil || len(second) != 1 || hasMore || second[0].Key().String() == firstPath {
 		t.Fatalf("full-path cursor did not resume collection-group page: len=%d hasMore=%t first=%q err=%v", len(second), hasMore, firstPath, err)
+	}
+}
+
+func TestBusinessUsageLifecycleFirestorePendingGroupFiltersAndResumesDuplicateLeafIDs(t *testing.T) {
+	db, _, ctx, _ := paidFirestore(t)
+	anchor := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		spaceID       string
+		deliveryState string
+	}{
+		{spaceID: "pending-space-a", deliveryState: models4datatug.QueryActivityPendingStatePending},
+		{spaceID: "pending-space-b", deliveryState: models4datatug.QueryActivityPendingStatePending},
+		{spaceID: "pending-space-c", deliveryState: models4datatug.QueryActivityPendingStateDelivered},
+	} {
+		period := lifecycleTestPeriod(t, item.spaceID, anchor)
+		const leafID = "same-leaf-id"
+		activity := contract4paymentus.UsageActivity{
+			Ref: period.Ref, SourceID: models4datatug.QueryActivitySourceID, EventID: "event-" + item.spaceID,
+			UserID: "actor-" + item.spaceID, EvidenceDigest: strings.Repeat("a", 64), OccurredAtUTC: anchor,
+		}
+		recordValue, pending := models4datatug.NewQueryActivityPendingRecord(item.spaceID, leafID)
+		*pending = models4datatug.QueryActivityPending{
+			Version: 1, ReceiptID: leafID, SpaceID: item.spaceID, Period: period.Ref, Activity: activity,
+			Sequence: 1, DeliveryState: item.deliveryState, UpdatedAtUTC: anchor,
+		}
+		if item.deliveryState == models4datatug.QueryActivityPendingStateDelivered {
+			pending.DeliveryProofDigest = strings.Repeat("b", 64)
+			pending.DeliveredAtUTC = anchor.Add(time.Minute)
+		}
+		if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+			return tx.Insert(txCtx, recordValue)
+		}); err != nil {
+			t.Fatalf("insert %s pending fixture: %v", item.spaceID, err)
+		}
+	}
+
+	worker := &BusinessUsageLifecycleWorker{query: db}
+	first, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPendingCollection, "", 1, true)
+	if err != nil || len(first) != 1 || !hasMore {
+		t.Fatalf("first filtered pending page: len=%d hasMore=%t err=%v", len(first), hasMore, err)
+	}
+	firstPath := first[0].Key().String()
+	if !strings.HasPrefix(firstPath, "spaces/") {
+		t.Fatalf("pending cursor did not retain a full document path: %q", firstPath)
+	}
+	second, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPendingCollection, firstPath, 1, true)
+	if err != nil || len(second) != 1 || hasMore || second[0].Key().String() == firstPath {
+		t.Fatalf("filtered pending cursor skipped or repeated a Space row: len=%d hasMore=%t first=%q err=%v", len(second), hasMore, firstPath, err)
+	}
+	if first[0].Key().ID != second[0].Key().ID || firstPath == second[0].Key().String() {
+		t.Fatalf("fixtures did not prove duplicate leaf IDs across distinct Spaces: %q / %q", first[0].Key(), second[0].Key())
 	}
 }

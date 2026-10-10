@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -123,6 +124,105 @@ func TestBusinessUsageLifecycleWorkerRecoversOpeningAfterRolloverAndHoldsMissing
 				t.Fatalf("historical close consulted expired current access %d times", f.accessRead())
 			}
 		})
+	}
+}
+
+func TestBusinessUsageLifecycleWorkerHoldsOpeningWhenNativeSnapshotOrCountConflicts(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*contract4paymentus.UsagePeriodState)
+	}{
+		{name: "snapshot differs", mutate: func(state *contract4paymentus.UsagePeriodState) {
+			state.Snapshot.Config.MonthlyOverageUnitMinor++
+		}},
+		{name: "native count differs", mutate: func(state *contract4paymentus.UsagePeriodState) { state.DistinctMAU = 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newBusinessOpeningRecoveryFixture(t, true, false)
+			reader := f.worker.periods.periods.(*businessUsagePeriodStateReader)
+			reader.mu.Lock()
+			state := reader.states[f.period.Ref]
+			test.mutate(&state)
+			reader.states[f.period.Ref] = state
+			reader.mu.Unlock()
+			result, err := f.worker.Run(context.Background(), 10)
+			if err != nil || result.PeriodsOpened != 0 || result.Failures != 1 {
+				t.Fatalf("worker trusted conflicting native period evidence: %+v / %v", result, err)
+			}
+			checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+			if err := f.db.Get(context.Background(), checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointOpening {
+				t.Fatalf("conflict advanced Opening checkpoint: %+v / %v", checkpoint, err)
+			}
+		})
+	}
+}
+
+func TestBusinessUsageLifecycleWorkerRetriesCancelledDrainWithoutSkippingAcceptedActivity(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	type receipt struct{ id, eventID string }
+	var receipts []receipt
+	for _, actorID := range []string{"worker-cancel-a", "worker-cancel-b"} {
+		activityContext := f.issue(actorID, "cancel-project")
+		accepted, err := f.service.Report(f.ctx, actorID, "business-space", QueryActivityReport{
+			ContextID: activityContext.ContextID, OperationID: "worker-cancel-report", Kind: models4datatug.QueryActivityEdit,
+		})
+		if err != nil || !accepted.Accepted {
+			t.Fatalf("accept activity for %s: %+v / %v", actorID, accepted, err)
+		}
+		receipts = append(receipts, receipt{accepted.ReceiptID, models4datatug.NewQueryActivityEventID(activityContext.ContextID, "worker-cancel-report")})
+	}
+	sort.Slice(receipts, func(i, j int) bool { return receipts[i].id < receipts[j].id })
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	f.service.ledger = queryActivityCancelAtLedger{UsageLedger: f.ledger, targetEventID: receipts[1].eventID, cancel: cancel}
+	worker, err := NewBusinessUsageLifecycleWorker(f.db, f.db, &BusinessUsagePeriodService{}, f.service, func() time.Time { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := worker.Run(ctx, 10)
+	if err != nil || first.ActivityDelivered != 1 || first.Failures == 0 {
+		t.Fatalf("cancelled drain did not preserve partial progress and report its hold: %+v / %v", first, err)
+	}
+	for _, item := range receipts {
+		pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord("business-space", item.id)
+		if readErr := f.db.Get(context.Background(), pendingRecord); readErr != nil || pending.Validate() != nil {
+			t.Fatalf("read pending activity after cancellation: %+v / %v", pending, readErr)
+		}
+		if item.id == receipts[0].id && pending.DeliveryState != models4datatug.QueryActivityPendingStateDelivered {
+			t.Fatalf("completed activity before cancellation was lost: %+v", pending)
+		}
+		if item.id == receipts[1].id && pending.DeliveryState != models4datatug.QueryActivityPendingStatePending {
+			t.Fatalf("activity cancelled before commit was advanced: %+v", pending)
+		}
+	}
+	f.service.ledger = f.ledger
+	second, err := worker.Run(f.ctx, 10)
+	if err != nil || second.ActivityDelivered != 1 || second.Failures != 0 {
+		t.Fatalf("retry did not deliver the remaining activity: %+v / %v", second, err)
+	}
+}
+
+func TestBusinessUsageLifecycleWorkerLeavesDuePeriodOpenWhenCloseAuthorityIsUnavailable(t *testing.T) {
+	f := newBusinessOpeningRecoveryFixture(t, true, false)
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(context.Background(), checkpointRecord); err != nil || checkpoint.Validate() != nil {
+		t.Fatalf("read Opening checkpoint: %+v / %v", checkpoint, err)
+	}
+	checkpoint.State = models4datatug.QueryActivityCheckpointReady
+	if err := f.db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Set(ctx, checkpointRecord)
+	}); err != nil {
+		t.Fatalf("prepare due Ready checkpoint: %v", err)
+	}
+	// The scheduler must hold an ended period when native close verification is
+	// unavailable; it must not infer a successful close from the elapsed grace.
+	f.worker.periods = &BusinessUsagePeriodService{}
+	result, err := f.worker.Run(context.Background(), 10)
+	if err != nil || result.PeriodsClosed != 0 || result.Failures != 1 {
+		t.Fatalf("worker did not hold unverifiable due period: %+v / %v", result, err)
+	}
+	if err := f.db.Get(context.Background(), checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointReady {
+		t.Fatalf("unverified close changed the checkpoint: %+v / %v", checkpoint, err)
 	}
 }
 
@@ -733,6 +833,98 @@ func TestBusinessUsageLifecycleWorkerCatchesUpWatermarkFromDeliveredRows(t *test
 	}
 	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.DeliveredThrough != checkpoint.AcceptedCount {
 		t.Fatalf("delivered watermark did not catch up: %+v / %v", checkpoint, err)
+	}
+}
+
+func TestBusinessUsageLifecycleWorkerAdvancesPastUnscopedPendingRows(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	activityContext := f.issue("pending-cursor-actor", "pending-cursor-project")
+	accepted, err := f.service.Report(f.ctx, "pending-cursor-actor", "business-space", QueryActivityReport{
+		ContextID: activityContext.ContextID, OperationID: "pending-cursor-report", Kind: models4datatug.QueryActivityEdit,
+	})
+	if err != nil || !accepted.Accepted {
+		t.Fatalf("accept activity fixture: %+v / %v", accepted, err)
+	}
+	validRecord, _ := models4datatug.NewQueryActivityPendingRecord("business-space", accepted.ReceiptID)
+	if err := f.db.Get(f.ctx, validRecord); err != nil {
+		t.Fatalf("read accepted pending row: %v", err)
+	}
+	foreignOne := record.NewRecordWithData(record.NewKeyWithID(models4datatug.QueryActivityPendingCollection, "foreign-one"), validRecord.Data())
+	foreignTwo := record.NewRecordWithData(record.NewKeyWithID(models4datatug.QueryActivityPendingCollection, "foreign-two"), validRecord.Data())
+	worker, err := NewBusinessUsageLifecycleWorker(f.db, f.db, &BusinessUsagePeriodService{}, f.service, func() time.Time { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.query = &lifecycleSequencedQueryExecutor{pages: [][]record.Record{{}, {foreignOne, foreignTwo}, {}, {validRecord}}}
+
+	first, err := worker.Run(f.ctx, 1)
+	if err != nil || first.Failures != 1 || first.ActivityDelivered != 0 || !first.PendingHasMore || first.PendingAfter != foreignOne.Key().String() {
+		t.Fatalf("first pass did not hold and advance past unscoped pending row: %+v / %v", first, err)
+	}
+	second, err := worker.Run(f.ctx, 1)
+	if err != nil || second.Failures != 0 || second.ActivitySpaces != 1 || second.ActivityDelivered != 1 {
+		t.Fatalf("valid pending row was starved behind unscoped row: %+v / %v", second, err)
+	}
+	if err := f.db.Get(f.ctx, validRecord); err != nil {
+		t.Fatalf("read delivered pending row: %v", err)
+	}
+	if pending, ok := validRecord.Data().(*models4datatug.QueryActivityPending); !ok || pending.DeliveryState != models4datatug.QueryActivityPendingStateDelivered {
+		t.Fatalf("valid pending row did not reach delivery: %#v", validRecord.Data())
+	}
+}
+
+func TestBusinessUsageLifecycleWorkerKeepsOtherSpacesMovingWhenDrainCursorIsCorrupt(t *testing.T) {
+	ctx := context.Background()
+	db := sneatcoretesting.NewMemoryDB()
+	anchor := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	rows := make([]record.Record, 0, 2)
+	for _, spaceID := range []string{"space-a", "space-b"} {
+		period := lifecycleTestPeriod(t, spaceID, anchor)
+		activity := contract4paymentus.UsageActivity{
+			Ref: period.Ref, SourceID: models4datatug.QueryActivitySourceID, EventID: "event-" + spaceID,
+			UserID: "actor-" + spaceID, EvidenceDigest: strings.Repeat("a", 64), OccurredAtUTC: anchor,
+		}
+		id := models4datatug.NewQueryActivityReceiptID(activity.UserID, period.Ref)
+		value, pending := models4datatug.NewQueryActivityPendingRecord(spaceID, id)
+		*pending = models4datatug.QueryActivityPending{
+			Version: 1, ReceiptID: id, SpaceID: spaceID, Period: period.Ref, Activity: activity,
+			Sequence: 1, DeliveryState: models4datatug.QueryActivityPendingStatePending, UpdatedAtUTC: anchor,
+		}
+		if err := pending.Validate(); err != nil {
+			t.Fatalf("pending fixture for %s is invalid: %v", spaceID, err)
+		}
+		if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+			return tx.Insert(txCtx, value)
+		}); err != nil {
+			t.Fatalf("insert pending row for %s: %v", spaceID, err)
+		}
+		if err := db.Get(ctx, value); err != nil {
+			t.Fatalf("read pending row for %s: %v", spaceID, err)
+		}
+		rows = append(rows, value)
+	}
+	corruptRecord, corrupt := models4datatug.NewQueryActivityDrainCursorRecord("space-a")
+	*corrupt = models4datatug.QueryActivityDrainCursor{Version: 1, SpaceID: "wrong-space", UpdatedAtUTC: anchor}
+	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Insert(txCtx, corruptRecord)
+	}); err != nil {
+		t.Fatalf("insert corrupt Space cursor: %v", err)
+	}
+	worker, err := NewBusinessUsageLifecycleWorker(db, &lifecycleSequencedQueryExecutor{pages: [][]record.Record{{}, rows}},
+		&BusinessUsagePeriodService{}, &QueryActivityService{}, func() time.Time { return anchor })
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := worker.Run(ctx, 10)
+	if err != nil || result.ActivitySpaces != 2 || result.Failures != 2 {
+		t.Fatalf("a corrupt Space cursor blocked later Space processing: %+v / %v", result, err)
+	}
+	if err := db.Get(ctx, corruptRecord); err != nil || corrupt.Validate() != nil || corrupt.SpaceID != "wrong-space" {
+		t.Fatalf("worker rewrote the corrupt cursor instead of holding that Space: %+v / %v", corrupt, err)
+	}
+	otherRecord, other := models4datatug.NewQueryActivityDrainCursorRecord("space-b")
+	if err := db.Get(ctx, otherRecord); err != nil || other.Validate() != nil || other.SpaceID != "space-b" {
+		t.Fatalf("worker failed to initialize an independent Space cursor: %+v / %v", other, err)
 	}
 }
 
