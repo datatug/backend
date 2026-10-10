@@ -3,6 +3,7 @@ package facade4datatug
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,13 +28,16 @@ func TestBusinessUsageTaxPolicyAuthorityBindsCurrentAndHistoricalTerms(t *testin
 
 	db := sneatcoretesting.NewMemoryDB()
 	quote := runtimeTestServiceQuote(current)
+	if quote.Currency != "eur" || current.Currency != "EUR" {
+		t.Fatalf("test must exercise native lowercase quote and canonical uppercase policy: quote=%q policy=%q", quote.Currency, current.Currency)
+	}
 	scope := contract4paymentus.ServicePurchaseScope{Mode: contract4paymentus.ModeTest, SpaceID: "business-space", ServiceID: BusinessProjectServiceID}
 	if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
 		got, err := authority.ReadCurrentUsagePeriodTaxPolicy(ctx, tx, scope, quote)
 		if err != nil {
 			return err
 		}
-		if got.Binding != current.Binding || got.ProductID != quote.ProductID || got.ProviderProductID != quote.ProviderProductID || got.Currency != quote.Currency {
+		if got.Binding != current.Binding || got.ProductID != quote.ProductID || got.ProviderProductID != quote.ProviderProductID || !strings.EqualFold(got.Currency, quote.Currency) {
 			t.Fatalf("current policy was not bound to the exact quote: %#v", got)
 		}
 		for name, mutate := range map[string]func(*contract4paymentus.ServiceQuoteSnapshot){
@@ -206,6 +210,6 @@ func runtimeTestTaxPolicy(mode contract4paymentus.Mode, revision, providerProduc
 func runtimeTestServiceQuote(policy contract4paymentus.UsageInvoiceStripeTaxPolicy) contract4paymentus.ServiceQuoteSnapshot {
 	return contract4paymentus.ServiceQuoteSnapshot{
 		ProductID: policy.ProductID, ProviderProductID: policy.Binding.ProviderProductID,
-		Currency: policy.Currency, ProviderProductTaxCode: policy.TaxCode, TaxBehavior: policy.TaxBehavior,
+		Currency: strings.ToLower(policy.Currency), ProviderProductTaxCode: policy.TaxCode, TaxBehavior: policy.TaxBehavior,
 	}
 }

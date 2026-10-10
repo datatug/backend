@@ -3,6 +3,7 @@ package facade4datatug
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/dal-go/dalgo/dal"
@@ -165,7 +166,7 @@ func (a *businessUsageTaxPolicyAuthority) ReadCurrentUsagePeriodTaxPolicy(ctx co
 	}
 	policy := a.current
 	if policy.ProductID != quote.ProductID || policy.Binding.ProviderProductID != quote.ProviderProductID ||
-		policy.Currency != quote.Currency || policy.TaxCode != quote.ProviderProductTaxCode || policy.TaxBehavior != quote.TaxBehavior {
+		!strings.EqualFold(policy.Currency, quote.Currency) || policy.TaxCode != quote.ProviderProductTaxCode || policy.TaxBehavior != quote.TaxBehavior {
 		return zero, ErrBusinessUsageRuntimeUnavailable
 	}
 	return businessUsagePeriodTaxPolicy(policy, scope), nil
