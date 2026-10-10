@@ -145,7 +145,7 @@ type QueryActivityPending struct {
 	Sequence            int64                             `firestore:"sequence,omitempty"`
 	DeliveryProofDigest string                            `firestore:"deliveryProofDigest,omitempty"`
 	DeliveredAtUTC      time.Time                         `firestore:"deliveredAtUTC,omitempty"`
-	DeliveryState       string                            `firestore:"deliveryState"`
+	DeliveryState       string                            `firestore:"deliveryState" json:"deliveryState"`
 	Attempts            int64                             `firestore:"attempts"`
 	UpdatedAtUTC        time.Time                         `firestore:"updatedAtUTC"`
 }

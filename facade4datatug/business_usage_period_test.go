@@ -629,6 +629,9 @@ func TestBusinessUsagePeriodOpenRecoversAfterLedgerCommitAndCloseUsesHistoricalP
 	if err := db.Get(ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointReady || checkpoint.AnchorUTC != anchor {
 		t.Fatalf("confirmed Open checkpoint: %+v / %v", checkpoint, err)
 	}
+	if _, err := service.CloseDue(ctx, snapshot.Ref); !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
+		t.Fatalf("server-derived CloseDue accepted a not-yet-due period: %v", err)
+	}
 	readyCheckpoint := *checkpoint
 	checkpoint.AnchorProofDigest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
@@ -964,19 +967,32 @@ func TestBusinessUsagePeriodOpenRecoversAfterLedgerCommitAndCloseUsesHistoricalP
 	periods.states[snapshot.Ref] = state
 	periods.mu.Unlock()
 	ledger.failClose = true
-	if _, err := service.Close(ctx, request); err == nil {
+	if _, err := service.CloseDue(ctx, snapshot.Ref); err == nil {
 		t.Fatal("service hid a native ledger close failure before commit")
 	}
+	if err := db.Get(ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointClosing {
+		t.Fatalf("server-derived CloseDue did not persist a retry fence: %+v / %v", checkpoint, err)
+	}
+	request = checkpoint.CloseRequest
 	ledger.failCloseAfterCommit = true
-	if _, err := service.Close(ctx, request); err == nil {
+	if _, err := service.CloseDue(ctx, snapshot.Ref); err == nil {
 		t.Fatal("lost Close response was hidden")
 	}
 	if err := db.Get(ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointClosing {
 		t.Fatalf("lost Close response did not retain the retry fence: %+v / %v", checkpoint, err)
 	}
-	closed, err := service.Close(ctx, request)
+	activityService := &QueryActivityService{db: db, now: func() time.Time { return serverNow }}
+	worker, err := NewBusinessUsageLifecycleWorker(db, db, service, activityService, func() time.Time { return serverNow })
+	if err != nil {
+		t.Fatalf("construct Business usage lifecycle worker: %v", err)
+	}
+	workerResult, err := worker.Run(ctx, 10)
+	if err != nil || workerResult.PeriodsClosed != 1 || workerResult.Failures != 0 {
+		t.Fatalf("worker did not recover the staged close: %+v / %v", workerResult, err)
+	}
+	closed, err := service.CloseDue(ctx, snapshot.Ref)
 	if err != nil || closed.Request != request || closed.Period != snapshot {
-		t.Fatalf("close at the authorized boundary: %+v / %v", closed, err)
+		t.Fatalf("close replay at the authorized boundary: %+v / %v", closed, err)
 	}
 	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		return authority.VerifyUsage(txCtx, tx, contract4paymentus.UsageOperation{

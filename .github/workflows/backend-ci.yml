@@ -127,7 +127,7 @@ jobs:
         run: |
           firebase emulators:exec --only firestore --project demo-datatug-paid-create \
             --config facade4datatug/testdata/firestore-emulator.json \
-            "go test -tags=integration -race -count=1 -run '^TestPaidSharedProjectFirestoreRoundtrip$' ./facade4datatug"
+            "go test -tags=integration -race -count=1 -run '^(TestPaidSharedProjectFirestoreRoundtrip|TestBusinessUsageLifecycleFirestoreCollectionGroupCursorUsesFullPath)$' ./facade4datatug"
 
       - name: Remove ephemeral module credential configuration
         if: always()

@@ -401,9 +401,77 @@ func NewBusinessUsagePeriodService(db dal.DB, authority *NativeBusinessUsagePeri
 }
 
 func (s *BusinessUsagePeriodService) OpenCurrent(ctx context.Context, spaceID string) (contract4paymentus.UsagePeriodSnapshot, error) {
+	return s.openCurrent(ctx, spaceID, nil)
+}
+
+// ResumeOpening recovers an Opening checkpoint without granting current access.
+// If the native Open never committed, it may retry only while the exact same
+// anchored period is still current and independently authorized.
+func (s *BusinessUsagePeriodService) ResumeOpening(ctx context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsagePeriodSnapshot, error) {
+	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.authority) || s.now == nil ||
+		!validBusinessUsageRef(ref) {
+		return contract4paymentus.UsagePeriodSnapshot{}, ErrBusinessUsagePeriodUnavailable
+	}
+	recovered, missingNative, err := s.recoverOpening(ctx, ref)
+	if err != nil {
+		return contract4paymentus.UsagePeriodSnapshot{}, err
+	}
+	if !missingNative {
+		return recovered, nil
+	}
+	return s.openCurrent(ctx, ref.Scope.SpaceID, &ref)
+}
+
+func (s *BusinessUsagePeriodService) recoverOpening(ctx context.Context, ref contract4paymentus.UsagePeriodRef) (snapshot contract4paymentus.UsagePeriodSnapshot, missingNative bool, err error) {
+	err = s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(ref)
+		if err := tx.Get(txCtx, checkpointRecord); err != nil || checkpoint.Validate() != nil ||
+			checkpoint.Period != ref ||
+			(checkpoint.State != models4datatug.QueryActivityCheckpointOpening && checkpoint.State != models4datatug.QueryActivityCheckpointReady) {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		wasOpening := checkpoint.State == models4datatug.QueryActivityCheckpointOpening
+		if wasOpening && (checkpoint.AcceptedCount != 0 || checkpoint.DeliveredThrough != 0) {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		initial, err := s.authority.readInitialStart(txCtx, tx, ref.Scope.SpaceID)
+		if err != nil || !usagePeriodMatchesOriginalStart(checkpoint.Snapshot, initial) ||
+			checkpoint.AnchorUTC != models4datatug.CanonicalQueryActivityTime(initial.AnchorUTC) ||
+			checkpoint.AnchorProofDigest != businessInitialStartDigest(initial) {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		state, err := s.periods.ReadPeriod(txCtx, tx, ref)
+		if errors.Is(err, contract4paymentus.ErrUsagePeriodMissing) {
+			if !wasOpening {
+				return ErrBusinessUsagePeriodUnavailable
+			}
+			missingNative = true
+			return nil
+		}
+		if err != nil || state.Snapshot != checkpoint.Snapshot || state.Closed ||
+			state.DistinctMAU != checkpoint.AcceptedCount || wasOpening && state.DistinctMAU != 0 {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		if wasOpening {
+			checkpoint.State = models4datatug.QueryActivityCheckpointReady
+			checkpoint.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
+			if checkpoint.Validate() != nil {
+				return ErrBusinessUsagePeriodUnavailable
+			}
+			if err := tx.Set(txCtx, checkpointRecord); err != nil {
+				return err
+			}
+		}
+		snapshot = checkpoint.Snapshot
+		return nil
+	})
+	return snapshot, missingNative, err
+}
+
+func (s *BusinessUsagePeriodService) openCurrent(ctx context.Context, spaceID string, requiredRef *contract4paymentus.UsagePeriodRef) (contract4paymentus.UsagePeriodSnapshot, error) {
 	var snapshot contract4paymentus.UsagePeriodSnapshot
 	wasReady := false
-	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.authority) || sharedProjectPortAbsent(s.ledger) ||
+	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.authority) || sharedProjectPortAbsent(s.ledger) || s.now == nil ||
 		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
 		return snapshot, ErrBusinessUsagePeriodUnavailable
 	}
@@ -415,6 +483,9 @@ func (s *BusinessUsagePeriodService) OpenCurrent(ctx context.Context, spaceID st
 		_, initial, expected, err := s.authority.readCurrentOpenFacts(txCtx, tx, spaceID, observedAt)
 		if err != nil {
 			return err
+		}
+		if requiredRef != nil && expected.Ref != *requiredRef {
+			return ErrBusinessUsagePeriodUnavailable
 		}
 		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(expected.Ref)
 		if err := tx.Get(txCtx, checkpointRecord); err != nil && !record.IsNotFound(err) {
@@ -529,6 +600,77 @@ func (s *BusinessUsagePeriodService) Close(ctx context.Context, request contract
 	return closed, nil
 }
 
+// CloseDue derives the close request from the server clock, the stored
+// completeness checkpoint, the frozen native period, and server-verified
+// close terms. Callers cannot select a close time, capacity, or price inputs.
+// A previously staged or completed close reuses its immutable request.
+func (s *BusinessUsagePeriodService) CloseDue(ctx context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsagePeriodClose, error) {
+	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.authority) ||
+		sharedProjectPortAbsent(s.authority.periods) || sharedProjectPortAbsent(s.authority.closeTerms) || !validBusinessUsageRef(ref) {
+		return contract4paymentus.UsagePeriodClose{}, ErrBusinessUsagePeriodUnavailable
+	}
+	var request contract4paymentus.UsageCloseRequest
+	err := s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(ref)
+		if err := tx.Get(txCtx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.Period != ref ||
+			checkpoint.DeliveredThrough != checkpoint.AcceptedCount ||
+			(checkpoint.State != models4datatug.QueryActivityCheckpointReady && checkpoint.State != models4datatug.QueryActivityCheckpointClosing && checkpoint.State != models4datatug.QueryActivityCheckpointClosed) {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		if checkpoint.State == models4datatug.QueryActivityCheckpointClosing || checkpoint.State == models4datatug.QueryActivityCheckpointClosed {
+			request = checkpoint.CloseRequest
+			return nil
+		}
+		now := s.now().UTC()
+		if !businessUsageCloseTimeAllowed(checkpoint.Snapshot.EndUTC, now, now) {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		state, err := s.periods.ReadPeriod(txCtx, tx, ref)
+		if err != nil || state.Snapshot != checkpoint.Snapshot || state.Closed || state.DistinctMAU != checkpoint.AcceptedCount {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		terms, err := s.authority.closeTerms.ReadBusinessUsageCloseTerms(txCtx, tx, checkpoint.Snapshot)
+		if err != nil {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		request = contract4paymentus.UsageCloseRequest{
+			Ref: ref, Capacity: terms.Capacity, BaseEvent: terms.BaseEvent,
+			BillMonthlyOverage: terms.BillMonthlyOverage, DiscountPercent: terms.DiscountPercent,
+		}
+		request.CloseID = businessUsageCloseID(checkpoint, request)
+		if !validQueryActivityID(request.CloseID) {
+			return ErrBusinessUsagePeriodUnavailable
+		}
+		return nil
+	})
+	if err != nil {
+		return contract4paymentus.UsagePeriodClose{}, err
+	}
+	return s.Close(ctx, request)
+}
+
+func businessUsageCloseID(checkpoint *models4datatug.QueryActivityPeriodCheckpoint, request contract4paymentus.UsageCloseRequest) string {
+	if checkpoint == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(struct {
+		Version   string                                   `json:"version"`
+		Period    contract4paymentus.UsagePeriodRef        `json:"period"`
+		Snapshot  contract4paymentus.UsagePeriodSnapshot   `json:"snapshot"`
+		Count     int64                                    `json:"count"`
+		Capacity  contract4paymentus.UsageCapacityEvidence `json:"capacity"`
+		BaseEvent contract4paymentus.UsageBaseEvent        `json:"baseEvent"`
+		Bill      bool                                     `json:"bill"`
+		Discount  int                                      `json:"discount"`
+	}{"datatug-business-usage-close/1", checkpoint.Period, checkpoint.Snapshot, checkpoint.AcceptedCount,
+		request.Capacity, request.BaseEvent, request.BillMonthlyOverage, request.DiscountPercent})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *BusinessUsagePeriodService) prepareClose(ctx context.Context, request contract4paymentus.UsageCloseRequest) error {
 	if !validBusinessUsageRef(request.Ref) {
 		return ErrBusinessUsagePeriodUnavailable
@@ -554,6 +696,12 @@ func (s *BusinessUsagePeriodService) prepareClose(ctx context.Context, request c
 		if err != nil || state.Snapshot != checkpoint.Snapshot || state.DistinctMAU != checkpoint.AcceptedCount {
 			return ErrBusinessUsagePeriodUnavailable
 		}
+		if state.Closed {
+			if (checkpoint.State == models4datatug.QueryActivityCheckpointClosing || checkpoint.State == models4datatug.QueryActivityCheckpointClosed) && checkpoint.CloseRequest == request && state.Closure.Request == request {
+				return nil
+			}
+			return ErrBusinessUsagePeriodUnavailable
+		}
 		if checkpoint.State == models4datatug.QueryActivityCheckpointClosing || checkpoint.State == models4datatug.QueryActivityCheckpointClosed {
 			if checkpoint.CloseRequest != request {
 				return ErrBusinessUsagePeriodUnavailable
@@ -564,8 +712,6 @@ func (s *BusinessUsagePeriodService) prepareClose(ctx context.Context, request c
 			if checkpoint.State == models4datatug.QueryActivityCheckpointClosed {
 				return ErrBusinessUsagePeriodUnavailable
 			}
-		} else if state.Closed {
-			return ErrBusinessUsagePeriodUnavailable
 		}
 		terms, err := s.authority.closeTerms.ReadBusinessUsageCloseTerms(txCtx, tx, checkpoint.Snapshot)
 		if err != nil || request.Ref != checkpoint.Period || request.Capacity != terms.Capacity || request.BaseEvent != terms.BaseEvent ||

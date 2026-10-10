@@ -327,3 +327,38 @@ func TestPaidSharedProjectFirestoreRoundtrip(t *testing.T) {
 
 	})
 }
+
+func TestBusinessUsageLifecycleFirestoreCollectionGroupCursorUsesFullPath(t *testing.T) {
+	db, _, ctx, _ := paidFirestore(t)
+	anchor := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	for _, spaceID := range []string{"cursor-space-a", "cursor-space-b"} {
+		period := lifecycleTestPeriod(t, spaceID, anchor)
+		recordValue, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(period.Ref)
+		*checkpoint = models4datatug.QueryActivityPeriodCheckpoint{
+			Version: 1, Period: period.Ref, Snapshot: period, AnchorUTC: anchor,
+			AnchorProofDigest: strings.Repeat("a", 64), State: models4datatug.QueryActivityCheckpointOpening,
+			UpdatedAtUTC: anchor,
+		}
+		if err := checkpoint.Validate(); err != nil {
+			t.Fatalf("invalid checkpoint fixture: %v", err)
+		}
+		if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+			return tx.Insert(txCtx, recordValue)
+		}); err != nil {
+			t.Fatalf("insert checkpoint for %s: %v", spaceID, err)
+		}
+	}
+	worker := &BusinessUsageLifecycleWorker{query: db}
+	first, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPeriodCheckpointsCollection, "", 1, false)
+	if err != nil || len(first) != 1 || !hasMore {
+		t.Fatalf("first real collection-group page: len=%d hasMore=%t err=%v", len(first), hasMore, err)
+	}
+	firstPath := first[0].Key().String()
+	if !validWorkerCursorPath(firstPath, models4datatug.QueryActivityPeriodCheckpointsCollection) {
+		t.Fatalf("Firestore cursor is not a validated full Space-owned document path: %q", firstPath)
+	}
+	second, hasMore, err := worker.readGroupPage(ctx, models4datatug.QueryActivityPeriodCheckpointsCollection, firstPath, 1, false)
+	if err != nil || len(second) != 1 || hasMore || second[0].Key().String() == firstPath {
+		t.Fatalf("full-path cursor did not resume collection-group page: len=%d hasMore=%t first=%q err=%v", len(second), hasMore, firstPath, err)
+	}
+}
