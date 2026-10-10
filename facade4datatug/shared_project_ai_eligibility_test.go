@@ -11,6 +11,7 @@ import (
 	"github.com/dal-go/dalgo/dal"
 	"github.com/dal-go/record/update"
 	"github.com/datatug/backend/models4datatug"
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 )
 
 func paidSharedProjectWithReader(t *testing.T) (*linkagePolicyFixture, time.Time) {
@@ -98,7 +99,7 @@ func TestUnifiedBusinessAdmissionCannotInheritProAIWhenPayerIDsCoincide(t *testi
 			access.Scope.SpaceID, access.PayerSpaceID = "personal-1", "personal-1"
 			reader := &businessCurrentServiceReader{access: access}
 			service, err := NewProBusinessSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, ProBusinessSharedProjectOptions{
-				Pro: pro, Business: BusinessSharedProjectOptions{AccessPolicy: BusinessProjectAccessPolicy{GrantVersion: "business-v1"}, ServiceReader: reader},
+				Pro: pro, Business: BusinessSharedProjectOptions{AccessPolicy: BusinessProjectAccessPolicy{GrantVersion: "business-v1", Mode: contract4paymentus.ModeLive}, ServiceReader: reader},
 			})
 			if err != nil {
 				t.Fatal(err)

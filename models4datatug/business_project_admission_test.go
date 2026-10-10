@@ -34,7 +34,6 @@ func TestBusinessAdmissionRequiresExplicitUnlimitedServiceProvenance(t *testing.
 	}
 	for name, change := range map[string]func(*ProjectAdmission){
 		"wrong version":      func(a *ProjectAdmission) { a.Version = 3 },
-		"TEST":               func(a *ProjectAdmission) { a.Mode = "test" },
 		"personal product":   func(a *ProjectAdmission) { a.Product = "datatug" },
 		"foreign payer":      func(a *ProjectAdmission) { a.PayerID = "foreign-space" },
 		"missing service":    func(a *ProjectAdmission) { a.ServiceID = "" },

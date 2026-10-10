@@ -162,6 +162,9 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			if err != nil {
 				return err
 			}
+			if access.Mode != binding.Mode {
+				return ErrSharedProjectUnauthorized
+			}
 			businessAccess = &access
 		}
 		receiptRecord, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(command.SpaceID, command.CommandID)

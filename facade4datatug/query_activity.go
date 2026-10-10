@@ -29,10 +29,10 @@ var (
 // not caller claims. QueryUseAllowed includes current actor/project query-use
 // access; publish/contributor permission is deliberately not required.
 type BusinessActivityBinding struct {
-	Period                                     contract4paymentus.UsagePeriodRef
-	PeriodStartUTC, PeriodEndUTC, PaidUntilUTC time.Time
-	PaidBindingProofID, QueryUseProofID        string
-	QueryUseAllowed                            bool
+	Period                                                  contract4paymentus.UsagePeriodRef
+	PeriodStartUTC, PeriodEndUTC, PaidUntilUTC              time.Time
+	PaidBindingProofID, PayerBindingDigest, QueryUseProofID string
+	QueryUseAllowed                                         bool
 }
 
 // BusinessActivityBindingReader must validate current reciprocal membership,
@@ -63,6 +63,7 @@ type QueryActivityReportResult struct {
 // and an unbound instance fail closed; browser attribution remains reported,
 // first-party activity rather than proof of local execution.
 type QueryActivityService struct {
+	mode        contract4paymentus.Mode
 	db          dal.DB
 	binding     BusinessActivityBindingReader
 	ledger      contract4paymentus.UsageLedger
@@ -70,11 +71,11 @@ type QueryActivityService struct {
 	now         func() time.Time
 }
 
-func NewQueryActivityService(db dal.DB, binding BusinessActivityBindingReader, ledger contract4paymentus.UsageLedger, corrections contract4paymentus.UsageCorrectionInbox, now func() time.Time) (*QueryActivityService, error) {
-	if sharedProjectPortAbsent(db) || sharedProjectPortAbsent(binding) || sharedProjectPortAbsent(ledger) || sharedProjectPortAbsent(corrections) || now == nil {
+func NewQueryActivityService(mode contract4paymentus.Mode, db dal.DB, binding BusinessActivityBindingReader, ledger contract4paymentus.UsageLedger, corrections contract4paymentus.UsageCorrectionInbox, now func() time.Time) (*QueryActivityService, error) {
+	if !validBusinessUsageMode(mode) || sharedProjectPortAbsent(db) || sharedProjectPortAbsent(binding) || sharedProjectPortAbsent(ledger) || sharedProjectPortAbsent(corrections) || now == nil {
 		return nil, ErrQueryActivityUnavailable
 	}
-	return &QueryActivityService{db: db, binding: binding, ledger: ledger, corrections: corrections, now: now}, nil
+	return &QueryActivityService{mode: mode, db: db, binding: binding, ledger: ledger, corrections: corrections, now: now}, nil
 }
 
 // IssueContext returns a reusable actor/project/period context. Repeated loads
@@ -82,7 +83,7 @@ func NewQueryActivityService(db dal.DB, binding BusinessActivityBindingReader, l
 // create unbounded rows or change an accepted receipt's original evidence.
 func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceID, projectID string) (QueryActivityContextResponse, error) {
 	var result QueryActivityContextResponse
-	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.binding) || s.now == nil ||
+	if s == nil || !validBusinessUsageMode(s.mode) || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.binding) || s.now == nil ||
 		!validQueryActivityActor(actorID) || models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(projectID) != nil {
 		return result, ErrQueryActivityInvalid
 	}
@@ -119,7 +120,7 @@ func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceI
 				Version: 1, ContextID: contextID, ActorID: actorID, SpaceID: spaceID, ProjectID: projectID,
 				Period: persistedBinding.Period, PeriodStartUTC: persistedBinding.PeriodStartUTC, PeriodEndUTC: persistedBinding.PeriodEndUTC, PaidUntilUTC: persistedBinding.PaidUntilUTC,
 				BindingDigest:      queryActivityBindingDigest(actorID, spaceID, projectID, persistedBinding),
-				PaidBindingProofID: binding.PaidBindingProofID, QueryUseProofID: binding.QueryUseProofID,
+				PaidBindingProofID: binding.PaidBindingProofID, PayerBindingDigest: binding.PayerBindingDigest, QueryUseProofID: binding.QueryUseProofID,
 				IssuedAtUTC: models4datatug.CanonicalQueryActivityTime(at), ExpiresAtUTC: earlierActivityTime(persistedBinding.PeriodEndUTC, persistedBinding.PaidUntilUTC),
 			}
 			if err := activityContext.Validate(); err != nil {
@@ -132,6 +133,7 @@ func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceI
 		} else {
 			activityContext.BindingDigest = queryActivityBindingDigest(actorID, spaceID, projectID, persistedBinding)
 			activityContext.PaidBindingProofID = binding.PaidBindingProofID
+			activityContext.PayerBindingDigest = binding.PayerBindingDigest
 			activityContext.QueryUseProofID = binding.QueryUseProofID
 			activityContext.PaidUntilUTC = persistedBinding.PaidUntilUTC
 			activityContext.ExpiresAtUTC = earlierActivityTime(persistedBinding.PeriodEndUTC, persistedBinding.PaidUntilUTC)
@@ -186,7 +188,7 @@ func (s *QueryActivityService) IssueContext(ctx context.Context, actorID, spaceI
 // and pending delivery outbox.
 func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID string, report QueryActivityReport) (QueryActivityReportResult, error) {
 	var result QueryActivityReportResult
-	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.binding) || s.now == nil ||
+	if s == nil || !validBusinessUsageMode(s.mode) || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.binding) || s.now == nil ||
 		!validQueryActivityActor(actorID) || models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil ||
 		!validQueryActivityID(report.ContextID) || !validQueryActivityID(report.OperationID) || !report.Kind.Valid() {
 		return result, ErrQueryActivityInvalid
@@ -215,9 +217,8 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 			return ErrQueryActivityUnauthorized
 		}
 		persistedBinding := canonicalActivityBinding(binding)
-		if binding.Period != activityContext.Period || persistedBinding.PeriodStartUTC != activityContext.PeriodStartUTC || persistedBinding.PeriodEndUTC != activityContext.PeriodEndUTC || persistedBinding.PaidUntilUTC != activityContext.PaidUntilUTC ||
-			binding.PaidBindingProofID != activityContext.PaidBindingProofID || binding.QueryUseProofID != activityContext.QueryUseProofID ||
-			queryActivityBindingDigest(actorID, activityContext.SpaceID, activityContext.ProjectID, persistedBinding) != activityContext.BindingDigest {
+		if binding.Period != activityContext.Period || persistedBinding.PeriodStartUTC != activityContext.PeriodStartUTC || persistedBinding.PeriodEndUTC != activityContext.PeriodEndUTC ||
+			binding.PayerBindingDigest != activityContext.PayerBindingDigest {
 			return ErrQueryActivityUnauthorized
 		}
 		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(binding.Period)
@@ -270,8 +271,9 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 			Version: 1, ContextID: report.ContextID, OperationID: report.OperationID, Kind: report.Kind,
 			ActorID: actorID, SpaceID: activityContext.SpaceID, ProjectID: activityContext.ProjectID, Period: binding.Period,
 			PeriodStartUTC: persistedBinding.PeriodStartUTC, PeriodEndUTC: persistedBinding.PeriodEndUTC, PaidUntilUTC: persistedBinding.PaidUntilUTC,
-			BindingDigest: activityContext.BindingDigest, PaidBindingProofID: activityContext.PaidBindingProofID,
-			QueryUseProofID: activityContext.QueryUseProofID, AcceptedAtUTC: persistedAt,
+			BindingDigest:      queryActivityBindingDigest(actorID, activityContext.SpaceID, activityContext.ProjectID, persistedBinding),
+			PaidBindingProofID: binding.PaidBindingProofID, PayerBindingDigest: binding.PayerBindingDigest,
+			QueryUseProofID: binding.QueryUseProofID, AcceptedAtUTC: persistedAt,
 		}
 		structural.ReceiptID = models4datatug.NewQueryActivityReceiptID(actorID, binding.Period)
 		structural.Activity = contract4paymentus.UsageActivity{
@@ -342,7 +344,7 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 // Ledger admission and late-evidence retention happen outside the acceptance
 // transaction. A crash before marking completion is safe to replay.
 func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID string) error {
-	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.corrections) || s.now == nil ||
+	if s == nil || !validBusinessUsageMode(s.mode) || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.corrections) || s.now == nil ||
 		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil || !validQueryActivityID(receiptID) {
 		return ErrQueryActivityUnavailable
 	}
@@ -356,7 +358,7 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 			}
 			return err
 		}
-		if stored.Validate() != nil || stored.ReceiptID != receiptID || stored.SpaceID != spaceID {
+		if stored.Validate() != nil || stored.ReceiptID != receiptID || stored.SpaceID != spaceID || stored.Period.Scope.Mode != s.mode {
 			return ErrQueryActivityConflict
 		}
 		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(stored.Period)
@@ -441,7 +443,7 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 		if err := tx.Get(txCtx, pendingRecord); err != nil {
 			return err
 		}
-		if stored.Validate() != nil || stored.SpaceID != spaceID || stored.ReceiptID != receiptID || stored.Activity != pending.Activity {
+		if stored.Validate() != nil || stored.SpaceID != spaceID || stored.ReceiptID != receiptID || stored.Activity != pending.Activity || stored.Period.Scope.Mode != s.mode {
 			return ErrQueryActivityConflict
 		}
 		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(stored.Period)
@@ -593,11 +595,11 @@ func (s *QueryActivityService) readActivityBinding(ctx context.Context, tx dal.R
 	if err != nil {
 		return BusinessActivityBinding{}, err
 	}
-	if !b.QueryUseAllowed || b.Period.Scope.Mode != contract4paymentus.ModeLive || b.Period.Scope.SpaceID != spaceID ||
+	if !b.QueryUseAllowed || b.Period.Scope.Mode != s.mode || b.Period.Scope.SpaceID != spaceID ||
 		b.Period.Scope.ProductID != "datatug-business-usage" || b.Period.Scope.ServiceID != "datatug" ||
 		!validQueryActivityTime(b.PeriodStartUTC) || !validQueryActivityTime(b.PeriodEndUTC) || !validQueryActivityTime(b.PaidUntilUTC) ||
 		!b.PeriodEndUTC.After(b.PeriodStartUTC) || !b.PaidUntilUTC.After(b.PeriodStartUTC) || at.Before(b.PeriodStartUTC) || !at.Before(b.PeriodEndUTC) || !at.Before(b.PaidUntilUTC) ||
-		!validQueryActivityID(b.PaidBindingProofID) || !validQueryActivityID(b.QueryUseProofID) {
+		b.Period.Scope.Mode != s.mode || !validQueryActivityID(b.PaidBindingProofID) || !validBusinessPayerDigest(b.PayerBindingDigest) || !validQueryActivityID(b.QueryUseProofID) {
 		return BusinessActivityBinding{}, ErrQueryActivityUnauthorized
 	}
 	return b, nil
@@ -627,7 +629,7 @@ func canonicalActivityBinding(binding BusinessActivityBinding) BusinessActivityB
 }
 
 func queryActivityBindingDigest(actorID, spaceID, projectID string, binding BusinessActivityBinding) string {
-	return models4datatug.QueryActivityBindingDigest(actorID, spaceID, projectID, binding.Period, binding.PeriodStartUTC, binding.PeriodEndUTC, binding.PaidUntilUTC, binding.PaidBindingProofID, binding.QueryUseProofID)
+	return models4datatug.QueryActivityBindingDigest(actorID, spaceID, projectID, binding.Period, binding.PeriodStartUTC, binding.PeriodEndUTC, binding.PaidUntilUTC, binding.PayerBindingDigest, binding.PaidBindingProofID, binding.QueryUseProofID)
 }
 
 func earlierActivityTime(a, b time.Time) time.Time {

@@ -17,6 +17,75 @@ import (
 	"github.com/sneat-co/sneat-go-core/sneatcoretesting"
 )
 
+type retryableBusinessUsageInvoiceService struct {
+	prepareCalls int
+	processCalls int
+	readCalls    int
+	processErr   error
+}
+
+func (s *retryableBusinessUsageInvoiceService) Prepare(_ context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsageInvoiceResult, error) {
+	s.prepareCalls++
+	return contract4paymentus.UsageInvoiceResult{IntentID: "intent-" + ref.PeriodID}, nil
+}
+
+func (s *retryableBusinessUsageInvoiceService) Process(_ context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsageInvoiceResult, error) {
+	s.processCalls++
+	if s.processErr != nil {
+		err := s.processErr
+		s.processErr = nil
+		return contract4paymentus.UsageInvoiceResult{IntentID: "intent-" + ref.PeriodID}, err
+	}
+	return contract4paymentus.UsageInvoiceResult{IntentID: "intent-" + ref.PeriodID}, nil
+}
+
+func (s *retryableBusinessUsageInvoiceService) Read(_ context.Context, ref contract4paymentus.UsagePeriodRef) (contract4paymentus.UsageInvoiceResult, error) {
+	s.readCalls++
+	return contract4paymentus.UsageInvoiceResult{IntentID: "intent-" + ref.PeriodID}, nil
+}
+
+func TestBusinessUsageWorkerRediscoversClosedPeriodAndRetriesInvoiceOutbox(t *testing.T) {
+	f := newBusinessOpeningRecoveryFixture(t, true, false)
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
+	if err := f.db.Get(context.Background(), checkpointRecord); err != nil || checkpoint.Validate() != nil {
+		t.Fatalf("read source checkpoint: %+v / %v", checkpoint, err)
+	}
+	checkpoint.State = models4datatug.QueryActivityCheckpointClosed
+	checkpoint.CloseRequest = contract4paymentus.UsageCloseRequest{
+		Ref: f.period.Ref, CloseID: "closed-usage-close",
+		Capacity:  contract4paymentus.UsageCapacityEvidence{Revision: "capacity-v1", Digest: strings.Repeat("c", 64)},
+		BaseEvent: contract4paymentus.UsageBaseNone,
+	}
+	if err := checkpoint.Validate(); err != nil {
+		t.Fatalf("construct immutable closed checkpoint: %v", err)
+	}
+	if err := f.db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+		return tx.Set(ctx, checkpointRecord)
+	}); err != nil {
+		t.Fatalf("persist closed checkpoint: %v", err)
+	}
+
+	providerErr := errors.New("temporary invoice provider outage")
+	invoices := &retryableBusinessUsageInvoiceService{processErr: providerErr}
+	worker, err := NewBusinessUsageLifecycleWorkerWithInvoices(contract4paymentus.ModeLive, f.db, f.db, f.worker.periods, f.worker.activity, invoices, func() time.Time {
+		return f.period.EndUTC.Add(BusinessUsageCloseGrace + time.Minute)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := worker.Run(context.Background(), 10)
+	if err != nil || first.Failures != 1 || invoices.prepareCalls != 1 || invoices.processCalls != 1 {
+		t.Fatalf("first closed-period invoice attempt: result=%+v prepare=%d process=%d err=%v", first, invoices.prepareCalls, invoices.processCalls, err)
+	}
+	second, err := worker.Run(context.Background(), 10)
+	if err != nil || second.Failures != 0 || invoices.prepareCalls != 2 || invoices.processCalls != 2 || invoices.readCalls != 0 {
+		t.Fatalf("closed-period outbox was not rediscovered and retried: result=%+v prepare=%d process=%d read=%d err=%v", second, invoices.prepareCalls, invoices.processCalls, invoices.readCalls, err)
+	}
+	if err := f.db.Get(context.Background(), checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.State != models4datatug.QueryActivityCheckpointClosed {
+		t.Fatalf("invoice retry changed the already-closed usage checkpoint: %+v / %v", checkpoint, err)
+	}
+}
+
 type lifecyclePeriodOpenerFunc func(context.Context, string) (contract4paymentus.UsagePeriodSnapshot, error)
 
 func (f lifecyclePeriodOpenerFunc) OpenCurrent(ctx context.Context, spaceID string) (contract4paymentus.UsagePeriodSnapshot, error) {
@@ -64,7 +133,7 @@ func TestBusinessUsageLifecycleGroupPagesResumeByFullSpaceDocumentPath(t *testin
 		t.Fatalf("first checkpoint page: len=%d hasMore=%t err=%v", len(first), hasMore, err)
 	}
 	firstPath := first[0].Key().String()
-	cursorState := models4datatug.BusinessUsageWorkerState{Version: 1, CheckpointAfterPath: firstPath, UpdatedAtUTC: anchor}
+	cursorState := models4datatug.BusinessUsageWorkerState{Version: 1, Mode: contract4paymentus.ModeLive, CheckpointAfterPath: firstPath, UpdatedAtUTC: anchor}
 	if !strings.HasPrefix(firstPath, "spaces/space-") || !strings.Contains(firstPath, "/ext/datatug/"+models4datatug.QueryActivityPeriodCheckpointsCollection+"/") ||
 		cursorState.Validate() != nil {
 		t.Fatalf("checkpoint cursor omitted full Space path: %q", firstPath)
@@ -252,7 +321,7 @@ func TestBusinessUsageLifecycleWorkersRaceOpeningCheckpointAndCursorsSafely(t *t
 		(checkpoint.State != models4datatug.QueryActivityCheckpointReady && checkpoint.State != models4datatug.QueryActivityCheckpointClosed) {
 		t.Fatalf("concurrent recovery corrupted or lost the checkpoint: %+v / %v", checkpoint, err)
 	}
-	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord()
+	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
 	if err := f.db.Get(context.Background(), stateRecord); err != nil || state.Validate() != nil {
 		t.Fatalf("concurrent collection cursors are invalid: %+v / %v", state, err)
 	}
@@ -315,13 +384,13 @@ func newBusinessOpeningRecoveryFixture(t *testing.T, nativeCommitted, currentAcc
 	if nativeCommitted {
 		periods.states[period.Ref] = contract4paymentus.UsagePeriodState{Snapshot: period}
 	}
-	terms, err := NewNativeBusinessUsageCloseTermsReader(db, initialReader, periods)
+	terms, err := NewNativeBusinessUsageCloseTermsReader(contract4paymentus.ModeLive, db, initialReader, periods)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pricing := contract4paymentus.DataTugBusinessUsagePricing()
 	authority, err := NewNativeBusinessUsagePeriodAuthority(BusinessUsagePeriodAuthorityOptions{
-		Access: access, InitialStarts: initialReader, Periods: periods, CloseTerms: terms,
+		Mode: contract4paymentus.ModeLive, Access: access, InitialStarts: initialReader, Periods: periods, CloseTerms: terms,
 		Pricing: func() contract4paymentus.UsagePricingConfig { return pricing }, Now: func() time.Time { return now },
 	})
 	if err != nil {
@@ -346,7 +415,7 @@ func newBusinessOpeningRecoveryFixture(t *testing.T, nativeCommitted, currentAcc
 	}); err != nil {
 		t.Fatal(err)
 	}
-	worker, err := NewBusinessUsageLifecycleWorker(db, db, service, &QueryActivityService{}, func() time.Time { return now })
+	worker, err := NewBusinessUsageLifecycleWorker(db, db, service, &QueryActivityService{mode: contract4paymentus.ModeLive}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,16 +499,16 @@ func TestBusinessUsageLifecycleCollectionGroupCandidatesEnforceSpaceOwnership(t 
 	if err := pending.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := businessUsagePendingSpace(pendingRecord); !ok || got != "space-a" {
-		t.Fatalf("valid pending candidate: %q %t", got, ok)
+	if got, mode, ok := businessUsagePendingSpace(pendingRecord); !ok || got != "space-a" || mode != contract4paymentus.ModeLive {
+		t.Fatalf("valid pending candidate: %q %q %t", got, mode, ok)
 	}
 	wrongSpaceRecord, wrongSpace := models4datatug.NewQueryActivityPendingRecord("space-b", id)
 	*wrongSpace = *pending
-	if _, ok := businessUsagePendingSpace(wrongSpaceRecord); ok {
+	if _, _, ok := businessUsagePendingSpace(wrongSpaceRecord); ok {
 		t.Fatal("pending receipt whose payload names a different Space was accepted")
 	}
 	wrongPendingData := record.NewRecordWithData(pendingRecord.Key(), "not pending")
-	if _, ok := businessUsagePendingSpace(wrongPendingData); ok {
+	if _, _, ok := businessUsagePendingSpace(wrongPendingData); ok {
 		t.Fatal("pending row with unexpected data type was accepted")
 	}
 	for _, key := range []*record.Key{
@@ -448,7 +517,7 @@ func TestBusinessUsageLifecycleCollectionGroupCandidatesEnforceSpaceOwnership(t 
 		record.NewKeyWithParentAndID(record.NewKeyWithParentAndID(record.NewKeyWithParentAndID(record.NewKeyWithID("orgs", "org-a"), "spaces", "space-a"), "ext", "datatug"), models4datatug.QueryActivityPendingCollection, id),
 	} {
 		row := record.NewRecordWithData(key, pending)
-		if _, ok := businessUsagePendingSpace(row); ok {
+		if _, _, ok := businessUsagePendingSpace(row); ok {
 			t.Fatalf("pending row with malformed collection-group path was accepted: %q", key.String())
 		}
 	}
@@ -493,7 +562,7 @@ func TestBusinessUsageLifecycleWorkerCountsForeignCheckpointAndUnscopedPendingRo
 	}); err != nil {
 		t.Fatal(err)
 	}
-	worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{}, func() time.Time { return now })
+	worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{mode: contract4paymentus.ModeLive}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +685,7 @@ func TestBusinessUsageLifecycleGroupReaderPropagatesReadAndCloseFailures(t *test
 
 func TestBusinessUsageLifecycleWorkerConstructorAndRunRejectInvalidInputs(t *testing.T) {
 	db := sneatcoretesting.NewMemoryDB()
-	queryActivity := &QueryActivityService{}
+	queryActivity := &QueryActivityService{mode: contract4paymentus.ModeLive}
 	periods := &BusinessUsagePeriodService{}
 	now := func() time.Time { return time.Now().UTC() }
 	for name, args := range map[string]struct {
@@ -657,12 +726,12 @@ func TestBusinessUsageLifecycleWorkerFailsClosedOnCorruptStateAndQueryFailures(t
 	ctx := context.Background()
 	db := sneatcoretesting.NewMemoryDB()
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-	worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{}, func() time.Time { return now })
+	worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{mode: contract4paymentus.ModeLive}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord()
-	*state = models4datatug.BusinessUsageWorkerState{Version: 1, UpdatedAtUTC: now}
+	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
+	*state = models4datatug.BusinessUsageWorkerState{Version: 1, Mode: contract4paymentus.ModeLive, UpdatedAtUTC: now}
 	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		return tx.Insert(txCtx, stateRecord)
 	}); err != nil {
@@ -725,7 +794,7 @@ func TestBusinessUsageLifecycleWorkerCancellationLeavesOpeningCheckpointForRetry
 	}); err != nil {
 		t.Fatal(err)
 	}
-	worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{}, func() time.Time { return now })
+	worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{mode: contract4paymentus.ModeLive}, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,7 +812,7 @@ func TestBusinessUsageLifecycleCursorWritesValidateAndPreserveIndependentPositio
 	ctx := context.Background()
 	db := sneatcoretesting.NewMemoryDB()
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-	worker := &BusinessUsageLifecycleWorker{db: db, now: func() time.Time { return now }}
+	worker := &BusinessUsageLifecycleWorker{mode: contract4paymentus.ModeLive, db: db, now: func() time.Time { return now }}
 	checkpointPath := "spaces/space-a/ext/datatug/" + models4datatug.QueryActivityPeriodCheckpointsCollection + "/checkpoint"
 	if err := worker.saveWorkerCursor(ctx, true, "not-a-full-path"); err == nil {
 		t.Fatal("module cursor accepted an unscoped path")
@@ -755,7 +824,7 @@ func TestBusinessUsageLifecycleCursorWritesValidateAndPreserveIndependentPositio
 	if err := worker.saveWorkerCursor(ctx, false, pendingPath); err != nil {
 		t.Fatalf("update independent pending cursor: %v", err)
 	}
-	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord()
+	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
 	if err := db.Get(ctx, stateRecord); err != nil || state.Validate() != nil || state.CheckpointAfterPath != checkpointPath || state.PendingAfterPath != pendingPath {
 		t.Fatalf("module cursor update overwrote the other collection position: %+v / %v", state, err)
 	}
@@ -765,7 +834,7 @@ func TestBusinessUsageLifecycleCursorWritesValidateAndPreserveIndependentPositio
 	if err := worker.saveSpaceDrainCursor(ctx, "space-a", "invalid"); err == nil {
 		t.Fatal("per-Space activity cursor accepted an arbitrary document ID")
 	}
-	drainRecord, drain := models4datatug.NewQueryActivityDrainCursorRecord("space-a")
+	drainRecord, drain := models4datatug.NewQueryActivityDrainCursorRecord(contract4paymentus.ModeLive, "space-a")
 	if err := db.Get(ctx, drainRecord); err != nil || drain.Validate() != nil || drain.AfterID != strings.Repeat("a", 64) {
 		t.Fatalf("invalid cursor attempt damaged the stored position: %+v / %v", drain, err)
 	}
@@ -797,6 +866,63 @@ func TestBusinessUsageLifecycleWorkerDiscoversAndDrainsAcceptedActivity(t *testi
 	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(f.period.Ref)
 	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.DeliveredThrough != 1 || checkpoint.AcceptedCount != 1 {
 		t.Fatalf("worker did not advance complete delivery watermark: %+v / %v", checkpoint, err)
+	}
+}
+
+func TestTestModeWorkerCannotAdvanceLiveUsageOrReceiptInSharedDatabase(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	actorID, projectID := "mixed-mode-actor", "mixed-mode-project"
+	contextValue := f.issue(actorID, projectID)
+	accepted, err := f.service.Report(f.ctx, actorID, "business-space", QueryActivityReport{
+		ContextID: contextValue.ContextID, OperationID: "mixed-mode-live-event", Kind: models4datatug.QueryActivityEdit,
+	})
+	if err != nil || !accepted.Accepted {
+		t.Fatalf("seed a real LIVE pending receipt: %+v / %v", accepted, err)
+	}
+	pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord("business-space", accepted.ReceiptID)
+	if err := f.db.Get(f.ctx, pendingRecord); err != nil || pending.Validate() != nil || pending.Period.Scope.Mode != contract4paymentus.ModeLive {
+		t.Fatalf("seeded LIVE pending row is invalid: %+v / %v", pending, err)
+	}
+	checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(pending.Period)
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || checkpoint.Validate() != nil {
+		t.Fatalf("seeded LIVE checkpoint is invalid: %+v / %v", checkpoint, err)
+	}
+	pendingBefore, checkpointBefore := *pending, *checkpoint
+
+	testService, err := NewQueryActivityService(contract4paymentus.ModeTest, f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := testService.Deliver(f.ctx, "business-space", accepted.ReceiptID); !errors.Is(err, ErrQueryActivityConflict) {
+		t.Fatalf("TEST delivery accepted a LIVE receipt: %v", err)
+	}
+	drain, err := testService.Drain(f.ctx, "business-space", QueryActivityDrainRequest{Limit: 10})
+	if err != nil || drain.Delivered != 0 || drain.Failed != 0 || drain.Scanned != 1 {
+		t.Fatalf("TEST drain crossed into LIVE receipt: %+v / %v", drain, err)
+	}
+	worker, err := NewBusinessUsageLifecycleWorker(f.db, f.db, &BusinessUsagePeriodService{}, testService, func() time.Time { return f.now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := worker.Run(f.ctx, 10)
+	if err != nil || result.PeriodsClosed != 0 || result.PeriodsOpened != 0 || result.ActivitySpaces != 0 || result.InvoicesProcessed != 0 || result.Failures != 0 {
+		t.Fatalf("TEST worker advanced LIVE lifecycle state: %+v / %v", result, err)
+	}
+	if err := f.db.Get(f.ctx, pendingRecord); err != nil || *pending != pendingBefore {
+		t.Fatalf("LIVE receipt changed under TEST worker: %+v / %v", pending, err)
+	}
+	if err := f.db.Get(f.ctx, checkpointRecord); err != nil || *checkpoint != checkpointBefore {
+		t.Fatalf("LIVE period changed under TEST worker: %+v / %v", checkpoint, err)
+	}
+	testStateRecord, testState := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeTest)
+	if err := f.db.Get(f.ctx, testStateRecord); err != nil || testState.Validate() != nil || testState.Mode != contract4paymentus.ModeTest {
+		t.Fatalf("TEST worker did not use its isolated cursor namespace: %+v / %v", testState, err)
+	}
+	liveStateRecord, _ := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
+	if err := f.db.Get(f.ctx, liveStateRecord); err == nil {
+		t.Fatal("TEST worker wrote the LIVE operational cursor")
+	} else if !record.IsNotFound(err) {
+		t.Fatalf("read LIVE operational cursor: %v", err)
 	}
 }
 
@@ -903,15 +1029,15 @@ func TestBusinessUsageLifecycleWorkerKeepsOtherSpacesMovingWhenDrainCursorIsCorr
 		}
 		rows = append(rows, value)
 	}
-	corruptRecord, corrupt := models4datatug.NewQueryActivityDrainCursorRecord("space-a")
-	*corrupt = models4datatug.QueryActivityDrainCursor{Version: 1, SpaceID: "wrong-space", UpdatedAtUTC: anchor}
+	corruptRecord, corrupt := models4datatug.NewQueryActivityDrainCursorRecord(contract4paymentus.ModeLive, "space-a")
+	*corrupt = models4datatug.QueryActivityDrainCursor{Version: 1, Mode: contract4paymentus.ModeLive, SpaceID: "wrong-space", UpdatedAtUTC: anchor}
 	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		return tx.Insert(txCtx, corruptRecord)
 	}); err != nil {
 		t.Fatalf("insert corrupt Space cursor: %v", err)
 	}
 	worker, err := NewBusinessUsageLifecycleWorker(db, &lifecycleSequencedQueryExecutor{pages: [][]record.Record{{}, rows}},
-		&BusinessUsagePeriodService{}, &QueryActivityService{}, func() time.Time { return anchor })
+		&BusinessUsagePeriodService{}, &QueryActivityService{mode: contract4paymentus.ModeLive}, func() time.Time { return anchor })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,7 +1048,7 @@ func TestBusinessUsageLifecycleWorkerKeepsOtherSpacesMovingWhenDrainCursorIsCorr
 	if err := db.Get(ctx, corruptRecord); err != nil || corrupt.Validate() != nil || corrupt.SpaceID != "wrong-space" {
 		t.Fatalf("worker rewrote the corrupt cursor instead of holding that Space: %+v / %v", corrupt, err)
 	}
-	otherRecord, other := models4datatug.NewQueryActivityDrainCursorRecord("space-b")
+	otherRecord, other := models4datatug.NewQueryActivityDrainCursorRecord(contract4paymentus.ModeLive, "space-b")
 	if err := db.Get(ctx, otherRecord); err != nil || other.Validate() != nil || other.SpaceID != "space-b" {
 		t.Fatalf("worker failed to initialize an independent Space cursor: %+v / %v", other, err)
 	}
@@ -962,13 +1088,14 @@ func TestBusinessUsageLifecycleWorkerReportsHeldPendingRowsAndResetsWrappedCurso
 		ctx := context.Background()
 		db := sneatcoretesting.NewMemoryDB()
 		now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-		worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{}, func() time.Time { return now })
+		worker, err := NewBusinessUsageLifecycleWorker(db, db, &BusinessUsagePeriodService{}, &QueryActivityService{mode: contract4paymentus.ModeLive}, func() time.Time { return now })
 		if err != nil {
 			t.Fatal(err)
 		}
-		stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord()
+		stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
 		*state = models4datatug.BusinessUsageWorkerState{
 			Version:             1,
+			Mode:                contract4paymentus.ModeLive,
 			CheckpointAfterPath: "spaces/space-a/ext/datatug/" + models4datatug.QueryActivityPeriodCheckpointsCollection + "/checkpoint",
 			PendingAfterPath:    "spaces/space-b/ext/datatug/" + models4datatug.QueryActivityPendingCollection + "/receipt",
 			UpdatedAtUTC:        now,
@@ -1009,11 +1136,11 @@ func TestBusinessUsageLifecycleWorkerInitializesCursorsWithNilMissingContract(t 
 	if err != nil || result.ActivityDelivered != 1 || result.Failures != 0 {
 		t.Fatalf("worker failed with nil+Exists=false missing reads: %+v / %v", result, err)
 	}
-	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord()
+	stateRecord, state := models4datatug.NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
 	if err := f.db.Get(f.ctx, stateRecord); err != nil || state.Validate() != nil || state.PendingAfterPath != "" {
 		t.Fatalf("module scan state was not initialized: %+v / %v", state, err)
 	}
-	drainRecord, drain := models4datatug.NewQueryActivityDrainCursorRecord("business-space")
+	drainRecord, drain := models4datatug.NewQueryActivityDrainCursorRecord(contract4paymentus.ModeLive, "business-space")
 	if err := f.db.Get(f.ctx, drainRecord); err != nil || drain.Validate() != nil {
 		t.Fatalf("Space drain cursor was not initialized: %+v / %v", drain, err)
 	}

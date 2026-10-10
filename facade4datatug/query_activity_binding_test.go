@@ -73,19 +73,19 @@ func TestNewQueryActivityServiceRequiresEveryProductionPort(t *testing.T) {
 		new  func() (*QueryActivityService, error)
 	}{
 		{"database", func() (*QueryActivityService, error) {
-			return NewQueryActivityService(nil, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
+			return NewQueryActivityService(contract4paymentus.ModeLive, nil, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, func() time.Time { return f.now })
 		}},
 		{"binding reader", func() (*QueryActivityService, error) {
-			return NewQueryActivityService(f.db, nil, f.ledger, f.service.corrections, func() time.Time { return f.now })
+			return NewQueryActivityService(contract4paymentus.ModeLive, f.db, nil, f.ledger, f.service.corrections, func() time.Time { return f.now })
 		}},
 		{"usage ledger", func() (*QueryActivityService, error) {
-			return NewQueryActivityService(f.db, queryActivityTestBindingReader{}, nil, f.service.corrections, func() time.Time { return f.now })
+			return NewQueryActivityService(contract4paymentus.ModeLive, f.db, queryActivityTestBindingReader{}, nil, f.service.corrections, func() time.Time { return f.now })
 		}},
 		{"correction inbox", func() (*QueryActivityService, error) {
-			return NewQueryActivityService(f.db, queryActivityTestBindingReader{}, f.ledger, nil, func() time.Time { return f.now })
+			return NewQueryActivityService(contract4paymentus.ModeLive, f.db, queryActivityTestBindingReader{}, f.ledger, nil, func() time.Time { return f.now })
 		}},
 		{"clock", func() (*QueryActivityService, error) {
-			return NewQueryActivityService(f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, nil)
+			return NewQueryActivityService(contract4paymentus.ModeLive, f.db, queryActivityTestBindingReader{}, f.ledger, f.service.corrections, nil)
 		}},
 	}
 	for _, test := range tests {
@@ -106,9 +106,15 @@ func TestQueryActivityReportRejectsMissingExpiredAndStaleContexts(t *testing.T) 
 
 	activityContext := f.issue("actor", "project")
 	f.setGrant("actor", "project", true, true, "revised-paid-proof")
+	// A quiet refresh/renewal may replace volatile provider proof IDs; only a
+	// changed frozen payer requires the accepted operation to be held.
+	if _, err := f.service.Report(f.ctx, "actor", "business-space", QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "same-payer-renewal", Kind: models4datatug.QueryActivityEdit}); err != nil {
+		t.Fatalf("same-payer renewal proof refresh was rejected: %v", err)
+	}
+	f.setGrantPayerDigest("actor", "project", strings.Repeat("b", 64))
 	request := QueryActivityReport{ContextID: activityContext.ContextID, OperationID: "stale-operation", Kind: models4datatug.QueryActivityEdit}
 	if _, err := f.service.Report(f.ctx, "actor", "business-space", request); !errors.Is(err, ErrQueryActivityUnauthorized) {
-		t.Fatalf("context with stale paid-binding proof accepted: %v", err)
+		t.Fatalf("context with changed stable payer accepted: %v", err)
 	}
 
 	if _, err := f.service.IssueContext(f.ctx, "actor", "business-space", "project"); err != nil {
@@ -204,6 +210,29 @@ func TestQueryActivityDeliveryIsIdempotentAndRejectsUnknownReceipt(t *testing.T)
 	f.service.ledger = queryActivityUnexpectedAdmissionLedger{UsageLedger: f.ledger}
 	if err := f.service.Deliver(f.ctx, "business-space", accepted.ReceiptID); err != nil {
 		t.Fatalf("delivered receipt was not an idempotent no-op: %v", err)
+	}
+}
+
+func TestAcceptedQueryActivityDrainsAfterCurrentBusinessAccessIsRevoked(t *testing.T) {
+	f := newQueryActivityFixture(t)
+	activityContext := f.issue("actor", "project")
+	accepted, err := f.service.Report(f.ctx, "actor", "business-space", QueryActivityReport{
+		ContextID: activityContext.ContextID, OperationID: "accepted-before-revocation", Kind: models4datatug.QueryActivityEdit,
+	})
+	if err != nil || !accepted.Accepted {
+		t.Fatalf("accept activity before revocation: %+v / %v", accepted, err)
+	}
+	// Once Report commits the receipt, the bounded drain uses its immutable
+	// receipt/period evidence. It must not require the Space to regain current
+	// Business access before retrying delivery.
+	f.setGrant("actor", "project", false, false, "revoked-paid-proof")
+	f.now = f.period.EndUTC.Add(time.Minute)
+	if err := f.service.Deliver(f.ctx, "business-space", accepted.ReceiptID); err != nil {
+		t.Fatalf("deliver accepted receipt after access ended: %v", err)
+	}
+	pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord("business-space", accepted.ReceiptID)
+	if err := f.db.Get(f.ctx, pendingRecord); err != nil || pending.Validate() != nil || pending.DeliveryState != models4datatug.QueryActivityPendingStateDelivered {
+		t.Fatalf("accepted receipt was not durably drained: %+v / %v", pending, err)
 	}
 }
 

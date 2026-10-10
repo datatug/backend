@@ -4,15 +4,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 )
 
 func TestBusinessUsageWorkerStateRecordsUseOnlyCursorInfrastructureAndSpaceScope(t *testing.T) {
-	stateRecord, state := NewBusinessUsageWorkerStateRecord()
-	if state == nil || stateRecord.Key().String() != businessUsageWorkerStateCollection+"/business-usage-lifecycle" {
+	stateRecord, state := NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeLive)
+	if state == nil || stateRecord.Key().String() != businessUsageWorkerStateCollection+"/business-usage-lifecycle-live" {
 		t.Fatalf("worker cursor record key/data = %v / %p", stateRecord.Key(), state)
 	}
-	drainRecord, drain := NewQueryActivityDrainCursorRecord("space-a")
-	want := "spaces/space-a/ext/datatug/" + queryActivityDrainCursorsCollection + "/business-usage"
+	testStateRecord, _ := NewBusinessUsageWorkerStateRecord(contract4paymentus.ModeTest)
+	if testStateRecord.Key().String() == stateRecord.Key().String() {
+		t.Fatal("TEST and LIVE lifecycle cursors share a key")
+	}
+	drainRecord, drain := NewQueryActivityDrainCursorRecord(contract4paymentus.ModeLive, "space-a")
+	want := "spaces/space-a/ext/datatug/" + queryActivityDrainCursorsCollection + "/business-usage-live"
 	if drain == nil || drainRecord.Key().String() != want {
 		t.Fatalf("per-Space drain cursor key/data = %v / %p, want %q", drainRecord.Key(), drain, want)
 	}
@@ -20,7 +26,7 @@ func TestBusinessUsageWorkerStateRecordsUseOnlyCursorInfrastructureAndSpaceScope
 
 func TestBusinessUsageWorkerCursorModelsFailClosed(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-	valid := BusinessUsageWorkerState{Version: 1, UpdatedAtUTC: now}
+	valid := BusinessUsageWorkerState{Version: 1, Mode: contract4paymentus.ModeLive, UpdatedAtUTC: now}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("empty initial worker state rejected: %v", err)
 	}
@@ -28,6 +34,11 @@ func TestBusinessUsageWorkerCursorModelsFailClosed(t *testing.T) {
 	valid.PendingAfterPath = "spaces/space-b/ext/datatug/" + QueryActivityPendingCollection + "/receipt"
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid full-path scan cursors rejected: %v", err)
+	}
+	wrongMode := valid
+	wrongMode.Mode = "sandbox"
+	if err := wrongMode.Validate(); err == nil {
+		t.Fatal("worker cursor accepted an unconfigured environment")
 	}
 	valid.CheckpointAfterPath = "orgs/org-a/spaces/space-a/ext/datatug/" + QueryActivityPeriodCheckpointsCollection + "/checkpoint"
 	if err := valid.Validate(); err != nil {
@@ -51,9 +62,14 @@ func TestBusinessUsageWorkerCursorModelsFailClosed(t *testing.T) {
 			}
 		})
 	}
-	drain := QueryActivityDrainCursor{Version: 1, SpaceID: "space-a", AfterID: strings.Repeat("a", 64), UpdatedAtUTC: now}
+	drain := QueryActivityDrainCursor{Version: 1, Mode: contract4paymentus.ModeLive, SpaceID: "space-a", AfterID: strings.Repeat("a", 64), UpdatedAtUTC: now}
 	if err := drain.Validate(); err != nil {
 		t.Fatalf("valid per-Space drain cursor rejected: %v", err)
+	}
+	wrongModeDrain := drain
+	wrongModeDrain.Mode = "sandbox"
+	if err := wrongModeDrain.Validate(); err == nil {
+		t.Fatal("Space drain cursor accepted an unconfigured environment")
 	}
 	drain.AfterID = "receipt-id"
 	if err := drain.Validate(); err == nil {

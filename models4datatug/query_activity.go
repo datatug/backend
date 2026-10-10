@@ -49,6 +49,7 @@ type QueryActivityContext struct {
 	PeriodEndUTC       time.Time                         `firestore:"periodEndUTC"`
 	PaidUntilUTC       time.Time                         `firestore:"paidUntilUTC"`
 	BindingDigest      string                            `firestore:"bindingDigest"`
+	PayerBindingDigest string                            `firestore:"payerBindingDigest"`
 	PaidBindingProofID string                            `firestore:"paidBindingProofID"`
 	QueryUseProofID    string                            `firestore:"queryUseProofID"`
 	IssuedAtUTC        time.Time                         `firestore:"issuedAtUTC"`
@@ -59,7 +60,7 @@ func (c QueryActivityContext) Validate() error {
 	if c.Version != 1 || !validActivityID(c.ContextID) || !validActivityID(c.ActorID) ||
 		ValidateSharedProjectIdentifier(c.SpaceID) != nil || ValidateSharedProjectIdentifier(c.ProjectID) != nil ||
 		!validActivityPeriod(c.Period, c.SpaceID) || !validActivityUTC(c.PeriodStartUTC) || !validActivityUTC(c.PeriodEndUTC) || !validActivityUTC(c.PaidUntilUTC) ||
-		!c.PeriodEndUTC.After(c.PeriodStartUTC) || !c.PaidUntilUTC.After(c.PeriodStartUTC) || !validActivityDigest(c.BindingDigest) ||
+		!c.PeriodEndUTC.After(c.PeriodStartUTC) || !c.PaidUntilUTC.After(c.PeriodStartUTC) || !validActivityDigest(c.BindingDigest) || !validActivityDigest(c.PayerBindingDigest) ||
 		!validActivityID(c.PaidBindingProofID) || !validActivityID(c.QueryUseProofID) ||
 		!validActivityUTC(c.IssuedAtUTC) || !validActivityUTC(c.ExpiresAtUTC) ||
 		c.ExpiresAtUTC.After(c.PeriodEndUTC) || c.ExpiresAtUTC.After(c.PaidUntilUTC) || !c.ExpiresAtUTC.After(c.IssuedAtUTC) ||
@@ -109,6 +110,7 @@ type QueryActivityReceipt struct {
 	PaidUntilUTC       time.Time                         `firestore:"paidUntilUTC"`
 	Activity           contract4paymentus.UsageActivity  `firestore:"activity"`
 	BindingDigest      string                            `firestore:"bindingDigest"`
+	PayerBindingDigest string                            `firestore:"payerBindingDigest"`
 	PaidBindingProofID string                            `firestore:"paidBindingProofID"`
 	QueryUseProofID    string                            `firestore:"queryUseProofID"`
 	AcceptedAtUTC      time.Time                         `firestore:"acceptedAtUTC"`
@@ -125,8 +127,8 @@ func (r QueryActivityReceipt) Validate() error {
 		r.Activity.SourceID != QueryActivitySourceID || r.Activity.EventID != NewQueryActivityEventID(r.ContextID, r.OperationID) ||
 		r.Activity.UserID != r.ActorID || r.Activity.OccurredAtUTC != r.AcceptedAtUTC || !validActivityUTC(r.AcceptedAtUTC) ||
 		r.AcceptedAtUTC.Before(r.PeriodStartUTC) || !r.AcceptedAtUTC.Before(r.PeriodEndUTC) || !r.AcceptedAtUTC.Before(r.PaidUntilUTC) ||
-		QueryActivityBindingDigest(r.ActorID, r.SpaceID, r.ProjectID, r.Period, r.PeriodStartUTC, r.PeriodEndUTC, r.PaidUntilUTC, r.PaidBindingProofID, r.QueryUseProofID) != r.BindingDigest ||
-		!validActivityDigest(r.BindingDigest) || !validActivityID(r.PaidBindingProofID) || !validActivityID(r.QueryUseProofID) ||
+		QueryActivityBindingDigest(r.ActorID, r.SpaceID, r.ProjectID, r.Period, r.PeriodStartUTC, r.PeriodEndUTC, r.PaidUntilUTC, r.PayerBindingDigest, r.PaidBindingProofID, r.QueryUseProofID) != r.BindingDigest ||
+		!validActivityDigest(r.BindingDigest) || !validActivityDigest(r.PayerBindingDigest) || !validActivityID(r.PaidBindingProofID) || !validActivityID(r.QueryUseProofID) ||
 		r.StructuralDigest != QueryActivityStructuralDigest(r) || r.Activity.EvidenceDigest != r.StructuralDigest {
 		return ErrInvalidQueryActivity
 	}
@@ -222,7 +224,7 @@ func NewQueryActivityEventID(contextID, operationID string) string {
 func QueryActivityStructuralDigest(r QueryActivityReceipt) string {
 	return activityDigest("query-activity-evidence/1", r.ContextID, r.OperationID, string(r.Kind), r.ActorID,
 		r.SpaceID, r.ProjectID, r.Period.Scope.SpaceID, string(r.Period.Scope.Mode), r.Period.Scope.ProductID,
-		r.Period.Scope.PayerID, r.Period.Scope.ServiceID, r.Period.PeriodID, r.BindingDigest,
+		r.Period.Scope.PayerID, r.Period.Scope.ServiceID, r.Period.PeriodID, r.BindingDigest, r.PayerBindingDigest,
 		r.PaidBindingProofID, r.QueryUseProofID, CanonicalQueryActivityTime(r.PeriodStartUTC).Format(time.RFC3339Nano),
 		CanonicalQueryActivityTime(r.PeriodEndUTC).Format(time.RFC3339Nano), CanonicalQueryActivityTime(r.PaidUntilUTC).Format(time.RFC3339Nano),
 		CanonicalQueryActivityTime(r.AcceptedAtUTC).Format(time.RFC3339Nano), r.Activity.EventID)
@@ -231,17 +233,17 @@ func QueryActivityStructuralDigest(r QueryActivityReceipt) string {
 // QueryActivityBindingDigest freezes the canonical paid and query-use binding
 // that authorized the first accepted report. It deliberately excludes later
 // mutable authority revisions while retaining the original period fence.
-func QueryActivityBindingDigest(actorID, spaceID, projectID string, period contract4paymentus.UsagePeriodRef, startUTC, endUTC, paidUntilUTC time.Time, paidProofID, queryUseProofID string) string {
+func QueryActivityBindingDigest(actorID, spaceID, projectID string, period contract4paymentus.UsagePeriodRef, startUTC, endUTC, paidUntilUTC time.Time, payerBindingDigest, paidProofID, queryUseProofID string) string {
 	startUTC = CanonicalQueryActivityTime(startUTC)
 	endUTC = CanonicalQueryActivityTime(endUTC)
 	paidUntilUTC = CanonicalQueryActivityTime(paidUntilUTC)
 	values := struct {
-		Version                             int
-		ActorID, SpaceID, ProjectID         string
-		Period                              contract4paymentus.UsagePeriodRef
-		StartUTC, EndUTC, PaidUntilUTC      time.Time
-		PaidBindingProofID, QueryUseProofID string
-	}{1, actorID, spaceID, projectID, period, startUTC, endUTC, paidUntilUTC, paidProofID, queryUseProofID}
+		Version                                                 int
+		ActorID, SpaceID, ProjectID                             string
+		Period                                                  contract4paymentus.UsagePeriodRef
+		StartUTC, EndUTC, PaidUntilUTC                          time.Time
+		PayerBindingDigest, PaidBindingProofID, QueryUseProofID string
+	}{1, actorID, spaceID, projectID, period, startUTC, endUTC, paidUntilUTC, payerBindingDigest, paidProofID, queryUseProofID}
 	encoded, _ := json.Marshal(values)
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:])

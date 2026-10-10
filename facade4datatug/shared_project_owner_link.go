@@ -106,7 +106,7 @@ func (s *SharedProjectService) verifyProjectOwnerReplay(ctx context.Context, tx 
 	}
 	// An exact retry may still be completing an accepted GitHub reservation.
 	// Other access paths keep the default READY-only rule.
-	admission, err := readLinkedProjectAdmission(ctx, tx, ref, project, true)
+	admission, err := readLinkedProjectAdmissionForMode(ctx, tx, ref, project, b.Mode, true)
 	if err != nil {
 		return err
 	}

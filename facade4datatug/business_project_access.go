@@ -30,7 +30,8 @@ var (
 // versioned DataTug entitlement policy. The client cannot supply any field.
 type SpaceServiceAccess struct {
 	Mode, ServiceID, PayerSpaceID, OwnerFamily, AccountKind, ProductID, PlanID string
-	OwnerSubscriptionID, PaidServiceProofID, GrantVersion                      string
+	ProviderAccountID, CustomerID, LineageID, OwnerSubscriptionID              string
+	PaidServiceProofID, GrantVersion                                           string
 	OwnerGeneration, OwnerRevision                                             int64
 	PaidUntilUTC                                                               time.Time
 	State                                                                      string // active or ended, after complete source reconciliation
@@ -43,10 +44,13 @@ type SpaceServiceAccess struct {
 // field or the absence of Pro limits.
 type BusinessProjectAccessPolicy struct {
 	GrantVersion string
+	// Mode is fixed by trusted server composition. Request values never select
+	// the Paymentus environment.
+	Mode contract4paymentus.Mode
 }
 
 func (p BusinessProjectAccessPolicy) validate() error {
-	if p.GrantVersion == "" || len(p.GrantVersion) > 128 {
+	if p.GrantVersion == "" || len(p.GrantVersion) > 128 || (p.Mode != contract4paymentus.ModeTest && p.Mode != contract4paymentus.ModeLive) {
 		return ErrBusinessServiceUnproved
 	}
 	return nil
@@ -58,23 +62,31 @@ func (p BusinessProjectAccessPolicy) validate() error {
 type BusinessProjectAccessVerifier struct {
 	reader contract4paymentus.CurrentSpaceServiceReader
 	policy BusinessProjectAccessPolicy
+	mode   contract4paymentus.Mode
 	now    func() time.Time
 }
 
 func NewBusinessProjectAccessVerifier(reader contract4paymentus.CurrentSpaceServiceReader, policy BusinessProjectAccessPolicy, now func() time.Time) (*BusinessProjectAccessVerifier, error) {
-	if sharedProjectPortAbsent(reader) || reader.Mode() != contract4paymentus.ModeLive || policy.validate() != nil || now == nil {
+	if sharedProjectPortAbsent(reader) || policy.validate() != nil || reader.Mode() != policy.Mode || now == nil {
 		return nil, ErrBusinessServiceUnproved
 	}
-	return &BusinessProjectAccessVerifier{reader: reader, policy: policy, now: now}, nil
+	return &BusinessProjectAccessVerifier{reader: reader, policy: policy, mode: policy.Mode, now: now}, nil
 }
 
-// ReadCurrent verifies the selected Space's explicit LIVE DataTug Business
+func (v *BusinessProjectAccessVerifier) Mode() contract4paymentus.Mode {
+	if v == nil {
+		return ""
+	}
+	return v.mode
+}
+
+// ReadCurrent verifies the selected Space's explicitly configured DataTug Business
 // service. Current contact membership and action-specific roles are separate
 // checks. Same-Space owner replacement is allowed: the admission's original
 // proof remains provenance, while this read verifies the current owner.
 func (v *BusinessProjectAccessVerifier) ReadCurrent(ctx context.Context, tx dal.ReadTransaction, spaceID string) (SpaceServiceAccess, error) {
 	var zero SpaceServiceAccess
-	if v == nil || sharedProjectPortAbsent(v.reader) || v.reader.Mode() != contract4paymentus.ModeLive ||
+	if v == nil || sharedProjectPortAbsent(v.reader) || v.reader.Mode() != v.mode || v.policy.Mode != v.mode ||
 		v.policy.validate() != nil || v.now == nil || ctx == nil || sharedProjectPortAbsent(tx) ||
 		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
 		return zero, ErrBusinessServiceUnproved
@@ -83,7 +95,7 @@ func (v *BusinessProjectAccessVerifier) ReadCurrent(ctx context.Context, tx dal.
 	if startedAt.IsZero() {
 		return zero, ErrBusinessServiceUnproved
 	}
-	scope := contract4paymentus.ServicePurchaseScope{Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ServiceID: BusinessProjectServiceID}
+	scope := contract4paymentus.ServicePurchaseScope{Mode: v.policy.Mode, SpaceID: spaceID, ServiceID: BusinessProjectServiceID}
 	current, err := v.reader.ReadCurrentSpaceServiceAccess(ctx, sharedProjectReadTransaction{tx}, scope)
 	if err != nil {
 		return zero, err
@@ -113,6 +125,7 @@ func (v *BusinessProjectAccessVerifier) ReadCurrent(ctx context.Context, tx dal.
 	return SpaceServiceAccess{
 		Mode: string(scope.Mode), ServiceID: scope.ServiceID, PayerSpaceID: current.PayerSpaceID,
 		OwnerFamily: current.OwnerFamily, AccountKind: current.AccountKind, ProductID: current.ProductID, PlanID: current.PlanID,
+		ProviderAccountID: current.ProviderAccountID, CustomerID: current.CustomerID, LineageID: current.LineageID,
 		OwnerSubscriptionID: current.OwnerSubscriptionID, OwnerGeneration: current.OwnerGeneration, OwnerRevision: current.OwnerRevision,
 		PaidServiceProofID: current.PaidServiceProofID, GrantVersion: v.policy.GrantVersion,
 		PaidUntilUTC: paidUntil, State: "active", UnlimitedProjects: true, UnlimitedContacts: true, checkedAtUTC: now,
@@ -163,13 +176,13 @@ func (s *SharedProjectService) verifyCurrentProjectService(ctx context.Context, 
 	}
 	switch admission.Version {
 	case 1:
-		if s.paid == nil || admission.Product != "datatug" {
+		if s.paid == nil || admission.Mode != s.paid.Mode || admission.Product != "datatug" {
 			return ErrSharedProjectUnauthorized
 		}
 		_, err := readCurrentPaidProjectAccess(ctx, tx, *s.paid, admission.ActorID, admission.PayerID, at)
 		return err
 	case 2:
-		if s.business == nil || admission.Product != BusinessProjectProductID || admission.PayerID != admission.SpaceID || admission.ServiceID != BusinessProjectServiceID {
+		if s.business == nil || admission.Mode != string(s.business.Mode()) || admission.Product != BusinessProjectProductID || admission.PayerID != admission.SpaceID || admission.ServiceID != BusinessProjectServiceID {
 			return ErrBusinessServiceUnproved
 		}
 		access, err := s.business.ReadCurrent(ctx, tx, admission.SpaceID)

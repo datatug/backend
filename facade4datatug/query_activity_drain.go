@@ -37,7 +37,7 @@ type QueryActivityDrainResult struct {
 // is only a scan position, never an identity or authorization fact.
 func (s *QueryActivityService) Drain(ctx context.Context, spaceID string, request QueryActivityDrainRequest) (QueryActivityDrainResult, error) {
 	var result QueryActivityDrainResult
-	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.corrections) || s.now == nil ||
+	if s == nil || !validBusinessUsageMode(s.mode) || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.ledger) || sharedProjectPortAbsent(s.corrections) || s.now == nil ||
 		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil || request.Limit < 1 || request.Limit > QueryActivityMaxDrainBatchSize || !validQueryActivityDrainCursor(request.AfterID) {
 		return result, ErrQueryActivityInvalid
 	}
@@ -95,6 +95,13 @@ func (s *QueryActivityService) Drain(ctx context.Context, spaceID string, reques
 		pending := candidate.pending
 		if !candidate.valid || pending.Validate() != nil || pending.SpaceID != spaceID || pending.ReceiptID != candidate.id {
 			result.Failed++
+			result.NextAfterID = candidate.id
+			continue
+		}
+		if pending.Period.Scope.Mode != s.mode {
+			// The subtree may contain periods from other fixed-mode runtimes. The
+			// bounded scan cursor advances, but this service never reads or writes
+			// their delivery watermark or receipt state.
 			result.NextAfterID = candidate.id
 			continue
 		}

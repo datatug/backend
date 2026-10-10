@@ -114,7 +114,7 @@ jobs:
           PRIVATE_MODULE_READ_TOKEN: ${{ steps.private-module-token.outputs.token }}
         run: |
           go mod download github.com/sneat-co/sneat-core-modules@v0.92.0
-          go mod download github.com/sneat-co/paymentus/backend@v0.41.0
+          go mod download github.com/sneat-co/paymentus/backend
       - name: Remove module credentials before running repository tests
         shell: bash
         run: |
