@@ -52,7 +52,7 @@ type GitHubQueryRepository interface {
 // is one CAS operation containing the metadata/body pair. A durable intent
 // precedes that commit; retries prove the original commit before finalizing.
 func (s *SharedProjectService) SaveGitHubQuery(ctx context.Context, actorID string, repositoryID int64, owner, name, folder string, request dto.SaveQueryRequest, repo GitHubQueryRepository) (*dto.SaveQueryResponse, error) {
-	if s == nil || s.paid == nil || sharedProjectPortAbsent(repo) || actorID == "" || request.Validate() != nil || request.StoreID != models4datatug.GithubStoreID || request.ProjectID != models4datatug.NewGithubProjectID(owner, name, folder) || !gitHubCommitOID.MatchString(request.ExpectedBranchHead) || request.Branch == "" {
+	if s == nil || (s.paid == nil && s.business == nil) || s.now == nil || sharedProjectPortAbsent(repo) || actorID == "" || request.Validate() != nil || request.StoreID != models4datatug.GithubStoreID || request.ProjectID != models4datatug.NewGithubProjectID(owner, name, folder) || !gitHubCommitOID.MatchString(request.ExpectedBranchHead) || request.Branch == "" {
 		return nil, ErrGitHubQueryInvalid
 	}
 	scope := repo.Scope()
@@ -104,6 +104,11 @@ func (s *SharedProjectService) SaveGitHubQuery(ctx context.Context, actorID stri
 		}
 	}
 	err = s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+		if s.business != nil {
+			if err := s.verifyGitHubQueryCandidateGrant(txCtx, tx, access, actorID, repositoryID, folder, s.now().UTC()); err != nil {
+				return err
+			}
+		}
 		opRecord, op := models4datatug.NewGitHubQueryOperationRecord(actorID, request.OperationID)
 		if err := tx.Get(txCtx, opRecord); err != nil && !record.IsNotFound(err) {
 			return err
@@ -213,7 +218,7 @@ func queryEditCandidateMatchesOperation(candidate models4datatug.QueryEditCandid
 // read protects the durable accepted-draft fact against a changed project,
 // member, or paid grant between that read and intent insertion.
 func (s *SharedProjectService) verifyGitHubQueryCandidateGrant(ctx context.Context, tx dal.ReadTransaction, access GitHubProjectAccess, actorID string, repositoryID int64, folder string, at time.Time) error {
-	if s.ownerLinks == nil || s.paid == nil {
+	if s.ownerLinks == nil || (s.paid == nil && s.business == nil) {
 		return ErrSharedProjectUnavailable
 	}
 	locatorRecord, locator := models4datatug.NewGitHubProjectLocatorRecord(repositoryID, folder)
@@ -241,8 +246,7 @@ func (s *SharedProjectService) verifyGitHubQueryCandidateGrant(ctx context.Conte
 	if err != nil {
 		return err
 	}
-	_, err = readCurrentPaidProjectAccess(ctx, tx, *s.paid, admission.ActorID, admission.PayerID, at)
-	return err
+	return s.verifyCurrentProjectService(ctx, tx, admission, at)
 }
 
 func githubQueryMarker(actorID, operationID, digest string) string {

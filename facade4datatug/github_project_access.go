@@ -20,7 +20,7 @@ type GitHubProjectAccess struct {
 	Binding         models4datatug.GitHubProjectBinding
 }
 
-// AuthorizeGitHubProjectWrite adds a current LIVE Pro grant to registered
+// AuthorizeGitHubProjectWrite adds a current LIVE Pro or Business grant to registered
 // linked-contact membership. GitHub itself independently decides whether the
 // current actor can write; Space roles are not a second GitHub edit ACL.
 func (s *SharedProjectService) AuthorizeGitHubProjectWrite(ctx context.Context, actorID string, repositoryID int64, owner, name, folder string) (GitHubProjectAccess, error) {
@@ -28,7 +28,7 @@ func (s *SharedProjectService) AuthorizeGitHubProjectWrite(ctx context.Context, 
 	if err != nil {
 		return access, err
 	}
-	if s.paid == nil || s.now == nil {
+	if (s.paid == nil && s.business == nil) || s.now == nil {
 		return GitHubProjectAccess{}, ErrSharedProjectUnavailable
 	}
 	at := s.now().UTC()
@@ -42,8 +42,7 @@ func (s *SharedProjectService) AuthorizeGitHubProjectWrite(ctx context.Context, 
 		if err != nil || admission == nil {
 			return ErrSharedProjectUnauthorized
 		}
-		_, err = readCurrentPaidProjectAccess(txCtx, tx, *s.paid, admission.ActorID, admission.PayerID, at)
-		return err
+		return s.verifyCurrentProjectService(txCtx, tx, admission, at)
 	})
 	if err != nil {
 		return GitHubProjectAccess{}, err

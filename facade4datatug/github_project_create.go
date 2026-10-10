@@ -83,7 +83,7 @@ type githubCreateReservation struct {
 // second commit or silently frees capacity.
 func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command GitHubProjectCreateCommand, repo GitHubCreateRepository) (GitHubProjectCreateResult, error) {
 	var zero GitHubProjectCreateResult
-	if s == nil || s.paid == nil || s.ownerLinks == nil || sharedProjectPortAbsent(repo) || command.Validate() != nil {
+	if s == nil || (s.paid == nil && s.business == nil) || s.ownerLinks == nil || sharedProjectPortAbsent(repo) || command.Validate() != nil {
 		return zero, ErrGitHubProjectInvalid
 	}
 	scope := repo.Scope()
@@ -112,17 +112,23 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 	} else if prior.ActorID != command.ActorID || prior.OperationID != command.OperationID {
 		return zero, ErrGitHubProjectConflict
 	}
-	account, err := ResolvePersonalPayer(ctx, command.ActorID, "", s.paid.Directory)
-	if err != nil || models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
-		return zero, ErrSharedProjectUnauthorized
+	var payer, mode, product string
+	if s.business != nil {
+		payer, mode, product = command.SpaceID, "live", BusinessProjectProductID
+	} else {
+		account, err := ResolvePersonalPayer(ctx, command.ActorID, "", s.paid.Directory)
+		if err != nil || models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
+			return zero, ErrSharedProjectUnauthorized
+		}
+		payer, mode, product = account.ID, s.paid.Mode, s.paid.Product
 	}
-	digest := models4datatug.GitHubSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.OperationID, command.Title, account.ID, s.paid.Mode, s.paid.Product, command.Source)
+	digest := models4datatug.GitHubSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.OperationID, command.Title, payer, mode, product, command.Source)
 	if readErr == nil && prior.Match(command.ActorID, command.OperationID, command.SpaceID, digest) != nil {
 		return zero, ErrGitHubProjectConflict
 	}
 	createBinding := SharedProjectCreateBinding{
 		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.OperationID, RequestDigest: digest,
-		PayerID: account.ID, Mode: s.paid.Mode, Product: s.paid.Product,
+		PayerID: payer, Mode: mode, Product: product,
 	}
 	var activationCtx facade.ContextWithUser
 	if s.activation != nil {
@@ -131,8 +137,10 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 		if !ok || sharedProjectPortAbsent(activationCtx) {
 			return zero, ErrSharedProjectUnauthorized
 		}
-		if err := s.EnsureProtectedProjectQuotaForCreate(activationCtx, createBinding); err != nil {
-			return zero, err
+		if s.paid != nil {
+			if err := s.EnsureProtectedProjectQuotaForCreate(activationCtx, createBinding); err != nil {
+				return zero, err
+			}
 		}
 	}
 	prepared, observedAt, preparedActivationCtx, err := s.prepareCreateAuthority(ctx, createBinding)
@@ -207,13 +215,24 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activati
 		if err := s.validatePreparedCreateInTransaction(txCtx, tx, binding, prepared, observedAt); err != nil {
 			return err
 		}
+		var err error
 		paidAt := s.now().UTC()
 		if paidAt.IsZero() || paidAt.Before(observedAt) {
 			return ErrSharedProjectUnauthorized
 		}
-		admission, err := s.readPaidAdmission(txCtx, tx, binding, paidAt)
-		if err != nil {
-			return err
+		var admission *projectAdmissionState
+		var businessAccess *SpaceServiceAccess
+		if s.paid != nil {
+			admission, err = s.readPaidAdmission(txCtx, tx, binding, paidAt)
+			if err != nil {
+				return err
+			}
+		} else {
+			access, err := s.business.ReadCurrent(txCtx, tx, binding.SpaceID)
+			if err != nil {
+				return err
+			}
+			businessAccess = &access
 		}
 		opRecord, op := models4datatug.NewGitHubProjectCreateOperationRecord(command.ActorID, command.OperationID)
 		if err := tx.Get(txCtx, opRecord); err != nil && !record.IsNotFound(err) {
@@ -229,8 +248,23 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activati
 			if op.Match(command.ActorID, command.OperationID, command.SpaceID, binding.RequestDigest) != nil || op.Binding != command.Source.Binding || op.ExpectedHead != command.Source.ExpectedHead || op.TemplateID != command.Source.TemplateID || op.TemplateCommit != command.Source.TemplateCommit {
 				return ErrGitHubProjectConflict
 			}
-			if err := admission.verifyReplay(txCtx, tx, binding, op.ProjectID); err != nil {
+			if admission != nil {
+				if err := admission.verifyReplay(txCtx, tx, binding, op.ProjectID); err != nil {
+					return err
+				}
+			} else if err := verifyBusinessProjectAdmissionReplay(txCtx, tx, binding, op.ProjectID); err != nil {
 				return err
+			}
+			if businessAccess != nil {
+				if err := s.verifyProjectOwnerReplay(txCtx, tx, binding, op.ProjectID, func() models4datatug.ProjectOwnerContactProof {
+					r, value := models4datatug.NewProjectAdmissionRecord(binding.SpaceID, op.ProjectID)
+					if err := tx.Get(txCtx, r); err != nil {
+						return models4datatug.ProjectOwnerContactProof{}
+					}
+					return value.OwnerContact
+				}()); err != nil {
+					return err
+				}
 			}
 			rr, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(command.SpaceID, command.OperationID)
 			if err := tx.Get(txCtx, rr); err != nil || receipt.Validate() != nil || receipt.Version != 2 || receipt.RequestDigest != binding.RequestDigest || receipt.ProjectID != op.ProjectID || receipt.GitHub == nil || *receipt.GitHub != command.Source {
@@ -265,7 +299,11 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activati
 		} else if !record.IsNotFound(err) {
 			return err
 		}
-		if err := admission.readNewAllocation(txCtx, tx, binding, newID); err != nil {
+		if admission != nil {
+			if err := admission.readNewAllocation(txCtx, tx, binding, newID); err != nil {
+				return err
+			}
+		} else if err := readNewBusinessProjectAllocation(txCtx, tx, binding, newID); err != nil {
 			return err
 		}
 		ownerPlan, err := s.prepareProjectOwnerLink(txCtx, tx, binding, newID, observedAt)
@@ -296,6 +334,11 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activati
 			ExpectedHead: command.Source.ExpectedHead, TemplateID: command.Source.TemplateID,
 			TemplateCommit: command.Source.TemplateCommit, Status: models4datatug.GitHubProjectInitializing, CreatedAt: observedAt,
 		}
+		if businessAccess != nil {
+			if err := verifyBusinessProjectAccessAt(*businessAccess, s.now().UTC()); err != nil {
+				return err
+			}
+		}
 		if err := s.applyExplicitCreateActivation(activationCtx, txCtx, tx, binding, observedAt); err != nil {
 			return err
 		}
@@ -304,7 +347,11 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activati
 				return err
 			}
 		}
-		if err := admission.writeAllocation(txCtx, tx, binding, newID, observedAt, ownerPlan.proof); err != nil {
+		if admission != nil {
+			if err := admission.writeAllocation(txCtx, tx, binding, newID, observedAt, ownerPlan.proof); err != nil {
+				return err
+			}
+		} else if err := writeBusinessProjectAdmission(txCtx, tx, binding, newID, observedAt, ownerPlan.proof, *businessAccess); err != nil {
 			return err
 		}
 		if err := ownerPlan.writeContact(txCtx, tx); err != nil {

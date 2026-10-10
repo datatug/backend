@@ -19,6 +19,7 @@ var ErrProjectContactLimit = errors.New("protected project contact limit unavail
 
 type PaidProjectLinkageOptions struct {
 	Paid     PaidSharedProjectOptions
+	Business *BusinessProjectAccessVerifier
 	Roles    ProjectRoleCatalog
 	Contacts CurrentProjectContactPort
 	Manager  ProjectRoleManagerPort
@@ -32,6 +33,7 @@ type PaidProjectLinkageOptions struct {
 // BOTH linkage directions. A UI role list never supplies authority.
 type PaidProjectLinkagePolicy struct {
 	paid     PaidSharedProjectOptions
+	business *BusinessProjectAccessVerifier
 	catalog  projectRoleCatalog
 	contacts CurrentProjectContactPort
 	manager  ProjectRoleManagerPort
@@ -43,13 +45,18 @@ var _ contract4linkage.RelationshipMutationPolicy = (*PaidProjectLinkagePolicy)(
 
 func NewPaidProjectLinkagePolicy(o PaidProjectLinkageOptions) (*PaidProjectLinkagePolicy, error) {
 	catalog, err := snapshotProjectRoleCatalog(o.Roles)
-	if err != nil || o.Paid.validate() != nil || sharedProjectPortAbsent(o.Contacts) || sharedProjectPortAbsent(o.Manager) || sharedProjectPortAbsent(o.Targets) || o.Now == nil {
+	if err != nil || (o.Paid.validate() != nil && (o.Business == nil || o.Business.policy.validate() != nil || sharedProjectPortAbsent(o.Business.reader))) || sharedProjectPortAbsent(o.Contacts) || sharedProjectPortAbsent(o.Manager) || sharedProjectPortAbsent(o.Targets) || o.Now == nil {
 		return nil, ErrSharedProjectUnavailable
 	}
-	return &PaidProjectLinkagePolicy{paid: snapshotPaidSharedProjectOptions(o.Paid), catalog: catalog, contacts: o.Contacts, manager: o.Manager, targets: o.Targets, now: o.Now}, nil
+	policy := &PaidProjectLinkagePolicy{catalog: catalog, contacts: o.Contacts, manager: o.Manager, targets: o.Targets, now: o.Now}
+	if o.Paid.validate() == nil {
+		policy.paid = snapshotPaidSharedProjectOptions(o.Paid)
+	}
+	policy.business = o.Business
+	return policy, nil
 }
 func (p *PaidProjectLinkagePolicy) AuthorizeRelationshipMutation(ctx context.Context, tx dal.ReadTransaction, b contract4linkage.RelationshipMutationBatch) error {
-	if p == nil || p.now == nil || p.paid.validate() != nil || p.catalog.version == "" || !p.catalog.allows(p.catalog.owner) || sharedProjectPortAbsent(p.contacts) || sharedProjectPortAbsent(p.manager) || sharedProjectPortAbsent(p.targets) {
+	if p == nil || p.now == nil || (p.paid.validate() != nil && (p.business == nil || p.business.policy.validate() != nil || sharedProjectPortAbsent(p.business.reader))) || p.catalog.version == "" || !p.catalog.allows(p.catalog.owner) || sharedProjectPortAbsent(p.contacts) || sharedProjectPortAbsent(p.manager) || sharedProjectPortAbsent(p.targets) {
 		return ErrSharedProjectUnavailable
 	}
 	if ctx == nil || sharedProjectPortAbsent(tx) || b.ActorUserID == "" || b.ObservedAt.IsZero() || len(b.Entities) == 0 {
@@ -132,12 +139,31 @@ func (p *PaidProjectLinkagePolicy) authorizeProject(ctx context.Context, tx dal.
 	if err != nil {
 		return err
 	}
-	access, err := readCurrentPaidProjectAccess(ctx, tx, p.paid, admission.ActorID, admission.PayerID, now)
-	if err != nil {
-		return err
-	}
-	if assignedProjectContacts(after) > access.contactLimit {
-		return ErrProjectContactLimit
+	if admission.Version == 2 {
+		if p.business == nil {
+			return ErrBusinessServiceUnproved
+		}
+		access, err := p.business.ReadCurrent(ctx, tx, admission.SpaceID)
+		if err != nil {
+			return err
+		}
+		if err := verifyBusinessProjectAccessAt(access, now); err != nil {
+			return err
+		}
+		if !access.UnlimitedContacts {
+			return ErrProjectContactLimit
+		}
+	} else {
+		if p.paid.validate() != nil {
+			return ErrSharedProjectUnauthorized
+		}
+		access, err := readCurrentPaidProjectAccess(ctx, tx, p.paid, admission.ActorID, admission.PayerID, now)
+		if err != nil {
+			return err
+		}
+		if assignedProjectContacts(after) > access.contactLimit {
+			return ErrProjectContactLimit
+		}
 	}
 	if !slices.Contains(before[admission.OwnerContact.Contact], admission.OwnerContact.Role) || !slices.Contains(after[admission.OwnerContact.Contact], admission.OwnerContact.Role) || !p.catalog.allows(admission.OwnerContact.Role) {
 		return ErrSharedProjectUnauthorized

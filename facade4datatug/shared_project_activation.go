@@ -51,15 +51,34 @@ func NewActivatingPaidSharedProjectService(
 		sharedProjectPortAbsent(activation.Activator) || sharedProjectPortAbsent(activation.InventoryQuery) || len(activation.RequiredRoles) == 0 || len(activation.RequiredRoles) > 10 {
 		return nil, ErrSharedProjectActivationUnavailable
 	}
-	inventory, err := NewDALProtectedProjectInventory(activation.InventoryQuery)
+	activationSnapshot, err := snapshotSharedProjectActivation(activation, true)
 	if err != nil {
-		return nil, ErrSharedProjectActivationUnavailable
+		return nil, err
 	}
 	ownerLinks, err := snapshotProjectOwnerLinks(paid.ContactLinks)
 	if err != nil {
 		return nil, ErrSharedProjectActivationUnavailable
 	}
-	roles := append([]string(nil), activation.RequiredRoles...)
+	paidSnapshot := snapshotPaidSharedProjectOptions(paid)
+	return &SharedProjectService{
+		db: db, ids: ids, now: now, paid: &paidSnapshot, ownerLinks: ownerLinks,
+		activation: activationSnapshot,
+	}, nil
+}
+
+func snapshotSharedProjectActivation(options SharedProjectActivationOptions, requireInventory bool) (*sharedProjectActivation, error) {
+	if sharedProjectPortAbsent(options.Activator) || len(options.RequiredRoles) == 0 || len(options.RequiredRoles) > 10 || (requireInventory && sharedProjectPortAbsent(options.InventoryQuery)) {
+		return nil, ErrSharedProjectActivationUnavailable
+	}
+	var inventory *DALProtectedProjectInventory
+	if !sharedProjectPortAbsent(options.InventoryQuery) {
+		var err error
+		inventory, err = NewDALProtectedProjectInventory(options.InventoryQuery)
+		if err != nil {
+			return nil, ErrSharedProjectActivationUnavailable
+		}
+	}
+	roles := append([]string(nil), options.RequiredRoles...)
 	for index, role := range roles {
 		if strings.TrimSpace(role) == "" || role != strings.TrimSpace(role) {
 			return nil, ErrSharedProjectActivationUnavailable
@@ -71,11 +90,7 @@ func NewActivatingPaidSharedProjectService(
 		}
 	}
 	sort.Strings(roles)
-	paidSnapshot := snapshotPaidSharedProjectOptions(paid)
-	return &SharedProjectService{
-		db: db, ids: ids, now: now, paid: &paidSnapshot, ownerLinks: ownerLinks,
-		activation: &sharedProjectActivation{activator: activation.Activator, requiredRoles: roles, inventory: inventory},
-	}, nil
+	return &sharedProjectActivation{activator: options.Activator, requiredRoles: roles, inventory: inventory}, nil
 }
 
 // EnsureProtectedProjectQuotaForCreate is a command-bound explicit-submit
@@ -174,15 +189,37 @@ func (s *SharedProjectService) PlanExplicitProjectCreateActivationInTransaction(
 	observedAt time.Time,
 ) (contract4spaceus.PreparedRoleCapabilityActivation, error) {
 	var empty contract4spaceus.PreparedRoleCapabilityActivation
-	if s == nil || s.activation == nil || s.paid == nil || sharedProjectPortAbsent(ctx) || sharedProjectPortAbsent(ctx.User()) || sharedProjectPortAbsent(tx) || observedAt.IsZero() {
+	if s == nil || s.activation == nil || (s.paid == nil && s.business == nil) || sharedProjectPortAbsent(ctx) || sharedProjectPortAbsent(ctx.User()) || sharedProjectPortAbsent(tx) || observedAt.IsZero() {
 		return empty, ErrSharedProjectActivationUnavailable
 	}
-	if ctx.User().GetUserID() == "" || ctx.User().GetUserID() != binding.ActorID || binding.Mode != s.paid.Mode || binding.Product != s.paid.Product || binding.Mode != "live" || binding.Product != "datatug" || models4datatug.ValidateSharedProjectIdentifier(binding.SpaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) != nil {
+	validBinding := s.paid != nil && binding.Mode == s.paid.Mode && binding.Product == s.paid.Product && binding.Mode == "live" && binding.Product == "datatug" && models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) == nil
+	if s.business != nil {
+		validBinding = binding.Mode == "live" && binding.Product == BusinessProjectProductID && binding.PayerID == binding.SpaceID
+	}
+	if ctx.User().GetUserID() == "" || ctx.User().GetUserID() != binding.ActorID || !validBinding || models4datatug.ValidateSharedProjectIdentifier(binding.SpaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) != nil {
 		return empty, ErrSharedProjectUnauthorized
 	}
 	requestDigest, err := hex.DecodeString(binding.RequestDigest)
 	if err != nil || len(requestDigest) != sha256.Size || binding.RequestDigest != strings.ToLower(binding.RequestDigest) {
 		return empty, ErrSharedProjectUnauthorized
+	}
+	var businessAccess *SpaceServiceAccess
+	if s.business != nil {
+		access, err := s.business.ReadCurrent(ctx, tx, binding.SpaceID)
+		if err != nil {
+			return empty, err
+		}
+		if err := verifyBusinessProjectAccessAt(access, observedAt); err != nil {
+			return empty, err
+		}
+		businessAccess = &access
+		if _, _, _, err := s.readCurrentProjectOwnerContact(ctx, tx, binding); err != nil {
+			return empty, err
+		}
+	} else {
+		if _, err := readCurrentPaidProjectAccess(ctx, tx, *s.paid, binding.ActorID, binding.PayerID, observedAt); err != nil {
+			return empty, err
+		}
 	}
 	command := sha256.Sum256([]byte("datatug.explicit-shared-project-activation.v1:" + binding.RequestDigest))
 	request := contract4spaceus.ReserveRoleCapabilityRequest{
@@ -196,6 +233,15 @@ func (s *SharedProjectService) PlanExplicitProjectCreateActivationInTransaction(
 	prepared, err := s.activation.activator.PlanRoleCapabilityActivationInTransaction(ctx, tx, request, observedAt)
 	if err != nil || sharedProjectPortAbsent(prepared) {
 		return empty, fmt.Errorf("%w: role capability activation could not be planned", ErrSharedProjectUnauthorized)
+	}
+	if businessAccess != nil {
+		at := s.now().UTC()
+		if at.IsZero() || at.Before(observedAt) {
+			return empty, ErrBusinessServiceUnproved
+		}
+		if err := verifyBusinessProjectAccessAt(*businessAccess, at); err != nil {
+			return empty, err
+		}
 	}
 	return prepared, nil
 }

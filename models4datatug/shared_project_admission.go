@@ -81,7 +81,7 @@ func (a ProjectAdmission) Validate() error {
 			return err
 		}
 	}
-	if (a.Mode != "live" && a.Mode != "test") || a.ActorID == "" || a.RequestDigest == "" || a.LimitsVersion == "" || a.ProfileVersion == "" || a.QuotaBasisDigest == "" || a.QuotaRevision < 1 || a.SubscriptionID == "" || a.OwnerGeneration < 1 || a.CreatedAt.IsZero() || a.CreatedAt.Location() != time.UTC {
+	if (a.Mode != "live" && a.Mode != "test") || a.ActorID == "" || a.RequestDigest == "" || a.ProfileVersion == "" || a.SubscriptionID == "" || a.OwnerGeneration < 1 || a.CreatedAt.IsZero() || a.CreatedAt.Location() != time.UTC {
 		return fmt.Errorf("invalid project admission")
 	}
 	for _, v := range []string{a.Product, a.PayerID, a.SpaceID, a.ProjectID, a.CommandID} {
@@ -91,15 +91,15 @@ func (a ProjectAdmission) Validate() error {
 	}
 	switch a.Version {
 	case 1:
-		if a.ProtectedProjectsLimit < 1 || a.ProtectedUsersLimit < 1 || a.ServiceID != "" || a.PlanID != "" || a.PaidServiceProofID != "" || a.OwnerRevision != 0 || a.UnlimitedProjects || a.UnlimitedContacts {
+		if a.LimitsVersion == "" || a.QuotaBasisDigest == "" || a.QuotaRevision < 1 || a.ProtectedProjectsLimit < 1 || a.ProtectedUsersLimit < 1 || a.ServiceID != "" || a.PlanID != "" || a.PaidServiceProofID != "" || a.OwnerRevision != 0 || a.UnlimitedProjects || a.UnlimitedContacts {
 			return fmt.Errorf("invalid finite project admission")
 		}
 	case 2:
-		if a.Mode != "live" || a.Product != "datatug-business-usage" || a.PayerID != a.SpaceID || a.ServiceID != "datatug" ||
+		if a.Mode != "live" || a.Product != "datatug-business-usage" || a.PayerID != a.SpaceID || a.ServiceID != "datatug" || a.LimitsVersion == "" ||
 			(a.PlanID != "datatug-business-usage-monthly" && a.PlanID != "datatug-business-usage-annual") ||
 			a.PaidServiceProofID == "" || a.OwnerRevision < 1 || !a.UnlimitedProjects || !a.UnlimitedContacts ||
-			a.ProtectedProjectsLimit != 0 || a.ProtectedUsersLimit != 0 || !a.OwnerContact.Present() ||
-			string(a.OwnerContact.Contact.SpaceID) != a.SpaceID || a.OwnerContact.Role != "owner" ||
+			a.QuotaBasisDigest != "" || a.QuotaRevision != 0 || a.ProtectedProjectsLimit != 0 || a.ProtectedUsersLimit != 0 || !a.OwnerContact.Present() ||
+			string(a.OwnerContact.Contact.SpaceID) != a.SpaceID ||
 			ValidateSharedProjectIdentifier(a.PaidServiceProofID) != nil {
 			return fmt.Errorf("invalid Business project admission")
 		}

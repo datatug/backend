@@ -55,6 +55,7 @@ type SharedProjectService struct {
 	authority                 SharedProjectCreateAuthority
 	now                       func() time.Time
 	paid                      *PaidSharedProjectOptions
+	business                  *BusinessProjectAccessVerifier
 	ownerLinks                *sharedProjectOwnerLinks
 	activation                *sharedProjectActivation
 	recordQueryEditCandidates bool
@@ -102,8 +103,11 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		}
 		binding.PayerID, binding.Mode, binding.Product = account.ID, s.paid.Mode, s.paid.Product
 		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
+	} else if s.business != nil {
+		binding.PayerID, binding.Mode, binding.Product = command.SpaceID, "live", BusinessProjectProductID
+		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
 	}
-	if s.activation != nil {
+	if s.activation != nil && s.paid != nil {
 		userCtx, ok := ctx.(facade.ContextWithUser)
 		if !ok || sharedProjectPortAbsent(userCtx) {
 			return result, ErrSharedProjectUnauthorized
@@ -130,6 +134,7 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			return err
 		}
 		var admission *projectAdmissionState
+		var businessAccess *SpaceServiceAccess
 		if s.paid != nil {
 			var err error
 			// Recheck paid-through against the actual time of every transaction
@@ -142,6 +147,16 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			if err != nil {
 				return err
 			}
+		} else if s.business != nil {
+			paidAt := s.now().UTC()
+			if paidAt.IsZero() || paidAt.Before(observedAt) {
+				return ErrSharedProjectUnauthorized
+			}
+			access, err := s.business.ReadCurrent(txCtx, tx, command.SpaceID)
+			if err != nil {
+				return err
+			}
+			businessAccess = &access
 		}
 		receiptRecord, receipt := models4datatug.NewSharedProjectCreateReceiptRecord(command.SpaceID, command.CommandID)
 		if err := tx.Get(txCtx, receiptRecord); err != nil && !record.IsNotFound(err) {
@@ -164,6 +179,13 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 				if err := s.verifyProjectOwnerReplay(txCtx, tx, binding, receipt.ProjectID, receipt.OwnerContact); err != nil {
 					return err
 				}
+			} else if businessAccess != nil {
+				if err := verifyBusinessProjectAdmissionReplay(txCtx, tx, binding, receipt.ProjectID); err != nil {
+					return err
+				}
+				if err := s.verifyProjectOwnerReplay(txCtx, tx, binding, receipt.ProjectID, receipt.OwnerContact); err != nil {
+					return err
+				}
 			}
 			if err := s.applyExplicitCreateActivation(userCtx, txCtx, tx, binding, observedAt); err != nil {
 				return err
@@ -180,12 +202,21 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 			if err := admission.readNewAllocation(txCtx, tx, binding, projectID); err != nil {
 				return err
 			}
+		} else if businessAccess != nil {
+			if err := readNewBusinessProjectAllocation(txCtx, tx, binding, projectID); err != nil {
+				return err
+			}
 		}
 		var ownerPlan *projectOwnerLinkPlan
-		if admission != nil {
+		if admission != nil || businessAccess != nil {
 			var err error
 			ownerPlan, err = s.prepareProjectOwnerLink(txCtx, tx, binding, projectID, observedAt)
 			if err != nil {
+				return err
+			}
+		}
+		if businessAccess != nil {
+			if err := verifyBusinessProjectAccessAt(*businessAccess, s.now().UTC()); err != nil {
 				return err
 			}
 		}
@@ -220,6 +251,10 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		}
 		if admission != nil {
 			if err := admission.writeAllocation(txCtx, tx, binding, projectID, observedAt, ownerPlan.proof); err != nil {
+				return err
+			}
+		} else if businessAccess != nil {
+			if err := writeBusinessProjectAdmission(txCtx, tx, binding, projectID, observedAt, ownerPlan.proof, *businessAccess); err != nil {
 				return err
 			}
 		}
