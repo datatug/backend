@@ -2,6 +2,9 @@ package facade4datatug
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -217,6 +220,11 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 			queryActivityBindingDigest(actorID, activityContext.SpaceID, activityContext.ProjectID, persistedBinding) != activityContext.BindingDigest {
 			return ErrQueryActivityUnauthorized
 		}
+		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(binding.Period)
+		if err := tx.Get(txCtx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.Period != binding.Period ||
+			checkpoint.State != models4datatug.QueryActivityCheckpointReady {
+			return ErrQueryActivityUnavailable
+		}
 		receiptRecord, receipt := models4datatug.NewQueryActivityReceiptRecord(actorID, binding.Period)
 		if err := tx.Get(txCtx, receiptRecord); err != nil && !record.IsNotFound(err) {
 			return err
@@ -276,11 +284,31 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 		if structural.Validate() != nil || quota.Validate() != nil {
 			return ErrQueryActivityUnavailable
 		}
+		if checkpoint.AcceptedCount == math.MaxInt64 {
+			return ErrQueryActivityUnavailable
+		}
+		sequence := checkpoint.AcceptedCount + 1
+		sequenceRecord, periodSequence := models4datatug.NewQueryActivityPeriodSequenceRecord(binding.Period, sequence)
+		if err := tx.Get(txCtx, sequenceRecord); err != nil && !record.IsNotFound(err) {
+			return err
+		}
+		if sequenceRecord.Exists() {
+			return ErrQueryActivityConflict
+		}
+		checkpoint.AcceptedCount = sequence
+		checkpoint.UpdatedAtUTC = persistedAt
+		*periodSequence = models4datatug.QueryActivityPeriodSequence{
+			Version: 1, Period: binding.Period, Sequence: sequence, ReceiptID: structural.ReceiptID,
+			ActivityDigest: structural.Activity.EvidenceDigest, DeliveryState: models4datatug.QueryActivitySequencePending,
+		}
+		if checkpoint.Validate() != nil || periodSequence.Validate() != nil {
+			return ErrQueryActivityUnavailable
+		}
 		*receipt = structural
 		pendingRecord, pending := models4datatug.NewQueryActivityPendingRecord(activityContext.SpaceID, structural.ReceiptID)
 		*pending = models4datatug.QueryActivityPending{
 			Version: 1, ReceiptID: structural.ReceiptID, SpaceID: activityContext.SpaceID, Period: binding.Period,
-			Activity: structural.Activity, DeliveryState: models4datatug.QueryActivityPendingStatePending, UpdatedAtUTC: persistedAt,
+			Activity: structural.Activity, Sequence: sequence, DeliveryState: models4datatug.QueryActivityPendingStatePending, UpdatedAtUTC: persistedAt,
 		}
 		if pending.Validate() != nil {
 			return ErrQueryActivityUnavailable
@@ -289,6 +317,12 @@ func (s *QueryActivityService) Report(ctx context.Context, actorID, spaceID stri
 			return err
 		}
 		if err := tx.Insert(txCtx, pendingRecord); err != nil {
+			return err
+		}
+		if err := tx.Insert(txCtx, sequenceRecord); err != nil {
+			return err
+		}
+		if err := tx.Set(txCtx, checkpointRecord); err != nil {
 			return err
 		}
 		if quotaRecord.Exists() {
@@ -313,6 +347,7 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 		return ErrQueryActivityUnavailable
 	}
 	var pending models4datatug.QueryActivityPending
+	alreadyDelivered := false
 	err := s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		pendingRecord, stored := models4datatug.NewQueryActivityPendingRecord(spaceID, receiptID)
 		if err := tx.Get(txCtx, pendingRecord); err != nil {
@@ -324,15 +359,36 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 		if stored.Validate() != nil || stored.ReceiptID != receiptID || stored.SpaceID != spaceID {
 			return ErrQueryActivityConflict
 		}
+		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(stored.Period)
+		if err := tx.Get(txCtx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.Period != stored.Period ||
+			(checkpoint.State != models4datatug.QueryActivityCheckpointReady && checkpoint.State != models4datatug.QueryActivityCheckpointClosed) ||
+			stored.Sequence < 1 || stored.Sequence > checkpoint.AcceptedCount {
+			return ErrQueryActivityConflict
+		}
+		sequenceRecord, sequence := models4datatug.NewQueryActivityPeriodSequenceRecord(stored.Period, stored.Sequence)
+		if err := tx.Get(txCtx, sequenceRecord); err != nil || sequence.Validate() != nil || sequence.Period != stored.Period ||
+			sequence.Sequence != stored.Sequence || sequence.ReceiptID != receiptID || sequence.ActivityDigest != stored.Activity.EvidenceDigest {
+			return ErrQueryActivityConflict
+		}
 		if stored.DeliveryState == models4datatug.QueryActivityPendingStateDelivered {
+			if sequence.DeliveryState != models4datatug.QueryActivitySequenceDelivered || sequence.DeliveryProofDigest != stored.DeliveryProofDigest || sequence.DeliveredAtUTC != stored.DeliveredAtUTC {
+				return ErrQueryActivityConflict
+			}
 			pending = *stored
+			alreadyDelivered = true
 			return nil
+		}
+		if checkpoint.State != models4datatug.QueryActivityCheckpointReady {
+			return ErrQueryActivityConflict
 		}
 		receiptRecord, receipt := models4datatug.NewQueryActivityReceiptRecord(stored.Activity.UserID, stored.Period)
 		if err := tx.Get(txCtx, receiptRecord); err != nil {
 			return err
 		}
 		if receipt.Validate() != nil || receipt.Activity != stored.Activity || receipt.SpaceID != spaceID || receipt.ReceiptID != receiptID {
+			return ErrQueryActivityConflict
+		}
+		if sequence.DeliveryState != models4datatug.QueryActivitySequencePending || stored.DeliveryState != models4datatug.QueryActivityPendingStatePending {
 			return ErrQueryActivityConflict
 		}
 		if stored.Attempts == math.MaxInt64 {
@@ -349,15 +405,36 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 	if err != nil {
 		return err
 	}
-	if pending.DeliveryState == models4datatug.QueryActivityPendingStateDelivered {
-		return nil
+	if alreadyDelivered {
+		return s.advanceDeliveryWatermark(ctx, pending.Period)
 	}
-	_, err = s.ledger.Admit(ctx, pending.Activity)
+	admission, err := s.ledger.Admit(ctx, pending.Activity)
+	var deliveryProof any
 	if errors.Is(err, contract4paymentus.ErrUsagePeriodClosed) {
-		_, err = s.corrections.RecordLate(ctx, pending.Activity)
+		var late contract4paymentus.UsageLateReceipt
+		late, err = s.corrections.RecordLate(ctx, pending.Activity)
+		if err == nil {
+			if late.Kind == contract4paymentus.UsageLateQueued && late.Evidence.Activity == pending.Activity &&
+				late.Evidence.OriginalClose.Period.Ref == pending.Period && validQueryActivityTime(late.Evidence.ReceivedAtUTC) {
+				deliveryProof = late
+			} else if late.Kind == contract4paymentus.UsageLateAlreadyAdmitted && late.Admission.Activity == pending.Activity && validQueryActivityTime(late.Admission.AcceptedAtUTC) {
+				deliveryProof = late
+			} else {
+				return ErrQueryActivityConflict
+			}
+		}
+	} else if err == nil {
+		if admission.Activity != pending.Activity || !validQueryActivityTime(admission.AcceptedAtUTC) {
+			return ErrQueryActivityConflict
+		}
+		deliveryProof = admission
 	}
 	if err != nil {
 		return err
+	}
+	proofDigest := queryActivityDeliveryProofDigest(deliveryProof)
+	if proofDigest == "" {
+		return ErrQueryActivityUnavailable
 	}
 	return s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
 		pendingRecord, stored := models4datatug.NewQueryActivityPendingRecord(spaceID, receiptID)
@@ -367,16 +444,148 @@ func (s *QueryActivityService) Deliver(ctx context.Context, spaceID, receiptID s
 		if stored.Validate() != nil || stored.SpaceID != spaceID || stored.ReceiptID != receiptID || stored.Activity != pending.Activity {
 			return ErrQueryActivityConflict
 		}
-		if stored.DeliveryState == models4datatug.QueryActivityPendingStateDelivered {
-			return nil
+		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(stored.Period)
+		if err := tx.Get(txCtx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.Period != stored.Period ||
+			(checkpoint.State != models4datatug.QueryActivityCheckpointReady && checkpoint.State != models4datatug.QueryActivityCheckpointClosed) ||
+			stored.Sequence < 1 || stored.Sequence > checkpoint.AcceptedCount {
+			return ErrQueryActivityConflict
+		}
+		sequenceRecord, sequence := models4datatug.NewQueryActivityPeriodSequenceRecord(stored.Period, stored.Sequence)
+		if err := tx.Get(txCtx, sequenceRecord); err != nil || sequence.Validate() != nil || sequence.ReceiptID != receiptID ||
+			sequence.ActivityDigest != stored.Activity.EvidenceDigest || sequence.Period != stored.Period || sequence.Sequence != stored.Sequence {
+			return ErrQueryActivityConflict
+		}
+		if sequence.DeliveryState == models4datatug.QueryActivitySequenceDelivered {
+			if stored.DeliveryState != models4datatug.QueryActivityPendingStateDelivered || stored.DeliveryProofDigest != sequence.DeliveryProofDigest || stored.DeliveredAtUTC != sequence.DeliveredAtUTC {
+				return ErrQueryActivityConflict
+			}
+			previous := checkpoint.DeliveredThrough
+			checkpoint.DeliveredThrough, err = advanceDeliveredQueryActivitySequence(txCtx, tx, checkpoint, sequence, stored)
+			if err != nil || checkpoint.DeliveredThrough == previous {
+				return err
+			}
+			checkpoint.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
+			if !validQueryActivityTime(checkpoint.UpdatedAtUTC) || checkpoint.Validate() != nil {
+				return ErrQueryActivityUnavailable
+			}
+			return tx.Set(txCtx, checkpointRecord)
+		}
+		if checkpoint.State != models4datatug.QueryActivityCheckpointReady {
+			return ErrQueryActivityConflict
+		}
+		stored.DeliveryProofDigest = proofDigest
+		stored.DeliveredAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
+		if !validQueryActivityTime(stored.DeliveredAtUTC) {
+			return ErrQueryActivityUnavailable
 		}
 		stored.DeliveryState = models4datatug.QueryActivityPendingStateDelivered
-		stored.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
+		stored.UpdatedAtUTC = stored.DeliveredAtUTC
 		if !validQueryActivityTime(stored.UpdatedAtUTC) {
 			return ErrQueryActivityUnavailable
 		}
-		return tx.Set(txCtx, pendingRecord)
+		sequence.DeliveryState = models4datatug.QueryActivitySequenceDelivered
+		sequence.DeliveryProofDigest = proofDigest
+		sequence.DeliveredAtUTC = stored.DeliveredAtUTC
+		if sequence.Validate() != nil || stored.Validate() != nil {
+			return ErrQueryActivityUnavailable
+		}
+		checkpoint.DeliveredThrough, err = advanceDeliveredQueryActivitySequence(txCtx, tx, checkpoint, sequence, stored)
+		if err != nil {
+			return err
+		}
+		checkpoint.UpdatedAtUTC = stored.DeliveredAtUTC
+		if checkpoint.Validate() != nil {
+			return ErrQueryActivityUnavailable
+		}
+		if err := tx.Set(txCtx, pendingRecord); err != nil {
+			return err
+		}
+		if err := tx.Set(txCtx, sequenceRecord); err != nil {
+			return err
+		}
+		return tx.Set(txCtx, checkpointRecord)
 	})
+}
+
+const QueryActivityWatermarkBatchSize = 128
+
+func (s *QueryActivityService) advanceDeliveryWatermark(ctx context.Context, period contract4paymentus.UsagePeriodRef) error {
+	return s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
+		checkpointRecord, checkpoint := models4datatug.NewQueryActivityPeriodCheckpointRecord(period)
+		if err := tx.Get(txCtx, checkpointRecord); err != nil || checkpoint.Validate() != nil || checkpoint.Snapshot.Ref != period ||
+			(checkpoint.State != models4datatug.QueryActivityCheckpointReady && checkpoint.State != models4datatug.QueryActivityCheckpointClosed) {
+			return ErrQueryActivityConflict
+		}
+		if checkpoint.State == models4datatug.QueryActivityCheckpointClosed {
+			if checkpoint.DeliveredThrough == checkpoint.AcceptedCount {
+				return nil
+			}
+			return ErrQueryActivityConflict
+		}
+		previous := checkpoint.DeliveredThrough
+		advanced, err := advanceDeliveredQueryActivitySequence(txCtx, tx, checkpoint, nil, nil)
+		if err != nil || advanced == previous {
+			return err
+		}
+		checkpoint.DeliveredThrough = advanced
+		checkpoint.UpdatedAtUTC = models4datatug.CanonicalQueryActivityTime(s.now())
+		if !validQueryActivityTime(checkpoint.UpdatedAtUTC) || checkpoint.Validate() != nil {
+			return ErrQueryActivityUnavailable
+		}
+		return tx.Set(txCtx, checkpointRecord)
+	})
+}
+
+func advanceDeliveredQueryActivitySequence(ctx context.Context, tx dal.ReadTransaction, checkpoint *models4datatug.QueryActivityPeriodCheckpoint, stagedSequence *models4datatug.QueryActivityPeriodSequence, stagedPending *models4datatug.QueryActivityPending) (int64, error) {
+	through := checkpoint.DeliveredThrough
+	for steps := 0; steps < QueryActivityWatermarkBatchSize && through < checkpoint.AcceptedCount; steps++ {
+		next := through + 1
+		var sequence models4datatug.QueryActivityPeriodSequence
+		var pending models4datatug.QueryActivityPending
+		if stagedSequence != nil && stagedPending != nil && stagedSequence.Sequence == next {
+			sequence, pending = *stagedSequence, *stagedPending
+		} else {
+			sequenceRecord, storedSequence := models4datatug.NewQueryActivityPeriodSequenceRecord(checkpoint.Period, next)
+			if err := tx.Get(ctx, sequenceRecord); err != nil {
+				if record.IsNotFound(err) {
+					return through, nil
+				}
+				return through, err
+			}
+			sequence = *storedSequence
+			if sequence.Validate() != nil || sequence.Sequence != next || sequence.Period != checkpoint.Period {
+				return through, ErrQueryActivityConflict
+			}
+			pendingRecord, storedPending := models4datatug.NewQueryActivityPendingRecord(checkpoint.Period.Scope.SpaceID, sequence.ReceiptID)
+			if err := tx.Get(ctx, pendingRecord); err != nil {
+				if record.IsNotFound(err) {
+					return through, nil
+				}
+				return through, err
+			}
+			pending = *storedPending
+		}
+		if sequence.Validate() != nil || pending.Validate() != nil || sequence.DeliveryState != models4datatug.QueryActivitySequenceDelivered ||
+			pending.DeliveryState != models4datatug.QueryActivityPendingStateDelivered || pending.Period != checkpoint.Period || pending.Sequence != next ||
+			pending.ReceiptID != sequence.ReceiptID || pending.Activity.EvidenceDigest != sequence.ActivityDigest ||
+			pending.DeliveryProofDigest != sequence.DeliveryProofDigest || pending.DeliveredAtUTC != sequence.DeliveredAtUTC {
+			return through, nil
+		}
+		through = next
+	}
+	return through, nil
+}
+
+func queryActivityDeliveryProofDigest(proof any) string {
+	if proof == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(proof)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *QueryActivityService) readActivityBinding(ctx context.Context, tx dal.ReadTransaction, actorID, spaceID, projectID string, at time.Time) (BusinessActivityBinding, error) {

@@ -99,6 +99,9 @@ func (s *QueryActivityService) Drain(ctx context.Context, spaceID string, reques
 			continue
 		}
 		if pending.DeliveryState == models4datatug.QueryActivityPendingStateDelivered {
+			if err := s.advanceDeliveryWatermark(ctx, pending.Period); err != nil {
+				result.Failed++
+			}
 			result.NextAfterID = candidate.id
 			continue
 		}
