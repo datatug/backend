@@ -44,11 +44,12 @@ type GitHubCreateRepositoryScope struct {
 
 type GitHubProjectCreateCommand struct {
 	ActorID, SpaceID, OperationID, Title string
+	BillingIntent                        SharedProjectBillingIntent
 	Source                               models4datatug.GitHubCreateSource
 }
 
 func (c GitHubProjectCreateCommand) Validate() error {
-	if (SharedProjectCreateCommand{ActorID: c.ActorID, SpaceID: c.SpaceID, CommandID: c.OperationID, Title: c.Title}).Validate() != nil || c.Source.Binding.Validate() != nil || !gitHubCommitOID.MatchString(c.Source.ExpectedHead) || c.Source.TemplateID != template4datatug.DemoProjectID || c.Source.TemplateCommit != template4datatug.DemoProjectCommit {
+	if (SharedProjectCreateCommand{ActorID: c.ActorID, SpaceID: c.SpaceID, CommandID: c.OperationID, Title: c.Title, BillingIntent: c.BillingIntent}).Validate() != nil || c.Source.Binding.Validate() != nil || !gitHubCommitOID.MatchString(c.Source.ExpectedHead) || c.Source.TemplateID != template4datatug.DemoProjectID || c.Source.TemplateCommit != template4datatug.DemoProjectCommit {
 		return ErrGitHubProjectInvalid
 	}
 	if template4datatug.ValidateFolder(c.Source.Binding.Folder) != nil {
@@ -112,23 +113,17 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 	} else if prior.ActorID != command.ActorID || prior.OperationID != command.OperationID {
 		return zero, ErrGitHubProjectConflict
 	}
-	var payer, mode, product string
-	if s.business != nil {
-		payer, mode, product = command.SpaceID, "live", BusinessProjectProductID
-	} else {
-		account, err := ResolvePersonalPayer(ctx, command.ActorID, "", s.paid.Directory)
-		if err != nil || models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
-			return zero, ErrSharedProjectUnauthorized
-		}
-		payer, mode, product = account.ID, s.paid.Mode, s.paid.Product
+	sharedBinding, err := s.resolveSharedProjectCreateBinding(ctx, command.ActorID, command.SpaceID, command.OperationID, command.Title, command.BillingIntent)
+	if err != nil {
+		return zero, err
 	}
-	digest := models4datatug.GitHubSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.OperationID, command.Title, payer, mode, product, command.Source)
+	digest := models4datatug.GitHubSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.OperationID, command.Title, sharedBinding.PayerID, sharedBinding.Mode, sharedBinding.Product, command.Source)
 	if readErr == nil && prior.Match(command.ActorID, command.OperationID, command.SpaceID, digest) != nil {
 		return zero, ErrGitHubProjectConflict
 	}
 	createBinding := SharedProjectCreateBinding{
 		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.OperationID, RequestDigest: digest,
-		PayerID: payer, Mode: mode, Product: product,
+		PayerID: sharedBinding.PayerID, Mode: sharedBinding.Mode, Product: sharedBinding.Product,
 	}
 	var activationCtx facade.ContextWithUser
 	if s.activation != nil {
@@ -137,7 +132,7 @@ func (s *SharedProjectService) CreateGitHubProject(ctx context.Context, command 
 		if !ok || sharedProjectPortAbsent(activationCtx) {
 			return zero, ErrSharedProjectUnauthorized
 		}
-		if s.paid != nil {
+		if !isBusinessProjectBinding(createBinding) {
 			if err := s.EnsureProtectedProjectQuotaForCreate(activationCtx, createBinding); err != nil {
 				return zero, err
 			}
@@ -222,7 +217,7 @@ func (s *SharedProjectService) reserveGitHubCreate(ctx context.Context, activati
 		}
 		var admission *projectAdmissionState
 		var businessAccess *SpaceServiceAccess
-		if s.paid != nil {
+		if !isBusinessProjectBinding(binding) {
 			admission, err = s.readPaidAdmission(txCtx, tx, binding, paidAt)
 			if err != nil {
 				return err

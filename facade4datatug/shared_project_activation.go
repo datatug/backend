@@ -192,9 +192,9 @@ func (s *SharedProjectService) PlanExplicitProjectCreateActivationInTransaction(
 	if s == nil || s.activation == nil || (s.paid == nil && s.business == nil) || sharedProjectPortAbsent(ctx) || sharedProjectPortAbsent(ctx.User()) || sharedProjectPortAbsent(tx) || observedAt.IsZero() {
 		return empty, ErrSharedProjectActivationUnavailable
 	}
-	validBinding := s.paid != nil && binding.Mode == s.paid.Mode && binding.Product == s.paid.Product && binding.Mode == "live" && binding.Product == "datatug" && models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) == nil
-	if s.business != nil {
-		validBinding = binding.Mode == "live" && binding.Product == BusinessProjectProductID && binding.PayerID == binding.SpaceID
+	validBinding := isBusinessProjectBinding(binding) && s.business != nil
+	if !validBinding {
+		validBinding = s.paid != nil && binding.Mode == s.paid.Mode && binding.Product == s.paid.Product && binding.Mode == "live" && binding.Product == "datatug" && models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) == nil
 	}
 	if ctx.User().GetUserID() == "" || ctx.User().GetUserID() != binding.ActorID || !validBinding || models4datatug.ValidateSharedProjectIdentifier(binding.SpaceID) != nil || models4datatug.ValidateSharedProjectIdentifier(binding.PayerID) != nil {
 		return empty, ErrSharedProjectUnauthorized
@@ -204,12 +204,12 @@ func (s *SharedProjectService) PlanExplicitProjectCreateActivationInTransaction(
 		return empty, ErrSharedProjectUnauthorized
 	}
 	var businessAccess *SpaceServiceAccess
-	if s.business != nil {
+	if isBusinessProjectBinding(binding) {
 		access, err := s.business.ReadCurrent(ctx, tx, binding.SpaceID)
 		if err != nil {
 			return empty, err
 		}
-		if err := verifyBusinessProjectAccessAt(access, observedAt); err != nil {
+		if err := verifyBusinessProjectAccessAfterRead(access, observedAt, s.now); err != nil {
 			return empty, err
 		}
 		businessAccess = &access

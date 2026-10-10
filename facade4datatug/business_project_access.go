@@ -140,6 +140,21 @@ func verifyBusinessProjectAccessAt(access SpaceServiceAccess, at time.Time) erro
 	return nil
 }
 
+// verifyBusinessProjectAccessAfterRead fences authority that was read during
+// an earlier command observation. The check time must be sampled after the
+// reader returns so a normal advancing clock cannot make a fresh grant appear
+// to come from the future. The paid end remains exclusive.
+func verifyBusinessProjectAccessAfterRead(access SpaceServiceAccess, observedAt time.Time, now func() time.Time) error {
+	if now == nil {
+		return ErrBusinessServiceUnproved
+	}
+	checkedAt := now().UTC()
+	if checkedAt.IsZero() || observedAt.IsZero() || checkedAt.Before(observedAt) || !access.checkedAtUTC.IsZero() && checkedAt.Before(access.checkedAtUTC) {
+		return ErrBusinessServiceUnproved
+	}
+	return verifyBusinessProjectAccessAt(access, checkedAt)
+}
+
 func (s *SharedProjectService) verifyCurrentProjectService(ctx context.Context, tx dal.ReadTransaction, admission *models4datatug.ProjectAdmission, at time.Time) error {
 	if s == nil || admission == nil {
 		return ErrSharedProjectUnauthorized
@@ -162,7 +177,7 @@ func (s *SharedProjectService) verifyCurrentProjectService(ctx context.Context, 
 		if access.ProductID != admission.Product || access.PayerSpaceID != admission.PayerID {
 			return ErrBusinessServiceUnproved
 		}
-		return verifyBusinessProjectAccessAt(access, at)
+		return verifyBusinessProjectAccessAfterRead(access, at, s.now)
 	default:
 		return ErrSharedProjectUnauthorized
 	}

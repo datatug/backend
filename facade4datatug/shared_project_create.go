@@ -25,9 +25,29 @@ var (
 
 type SharedProjectCreateCommand struct {
 	ActorID, SpaceID, CommandID, Title string
+	BillingIntent                      SharedProjectBillingIntent
+}
+
+// SharedProjectBillingIntent is only a user's plan choice. It grants no
+// access: the service still verifies current Pro or Business authority.
+type SharedProjectBillingIntent string
+
+const (
+	BillingIntentPersonalPro   SharedProjectBillingIntent = "personal_pro"
+	BillingIntentSpaceBusiness SharedProjectBillingIntent = "space_business"
+)
+
+func (i SharedProjectBillingIntent) Validate() error {
+	if i != "" && i != BillingIntentPersonalPro && i != BillingIntentSpaceBusiness {
+		return ErrSharedProjectInvalid
+	}
+	return nil
 }
 
 func (c SharedProjectCreateCommand) Validate() error {
+	if c.BillingIntent.Validate() != nil {
+		return ErrSharedProjectInvalid
+	}
 	if c.ActorID == "" || len(c.ActorID) > 128 || c.ActorID != strings.TrimSpace(c.ActorID) || !utf8.ValidString(c.ActorID) {
 		return ErrSharedProjectInvalid
 	}
@@ -89,25 +109,11 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 	if err := command.Validate(); err != nil {
 		return result, err
 	}
-	binding := SharedProjectCreateBinding{
-		ActorID: command.ActorID, SpaceID: command.SpaceID, CommandID: command.CommandID,
-		RequestDigest: models4datatug.SharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title),
+	binding, err := s.resolveSharedProjectCreateBinding(ctx, command.ActorID, command.SpaceID, command.CommandID, command.Title, command.BillingIntent)
+	if err != nil {
+		return result, err
 	}
-	if s.paid != nil {
-		account, err := ResolvePersonalPayer(ctx, command.ActorID, "", s.paid.Directory)
-		if err != nil {
-			return result, ErrSharedProjectUnauthorized
-		}
-		if models4datatug.ValidateSharedProjectIdentifier(account.ID) != nil {
-			return result, ErrSharedProjectUnauthorized
-		}
-		binding.PayerID, binding.Mode, binding.Product = account.ID, s.paid.Mode, s.paid.Product
-		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
-	} else if s.business != nil {
-		binding.PayerID, binding.Mode, binding.Product = command.SpaceID, "live", BusinessProjectProductID
-		binding.RequestDigest = models4datatug.PaidSharedProjectCreateDigest(command.ActorID, command.SpaceID, command.CommandID, command.Title, binding.PayerID, binding.Mode, binding.Product)
-	}
-	if s.activation != nil && s.paid != nil {
+	if s.activation != nil && !isBusinessProjectBinding(binding) {
 		userCtx, ok := ctx.(facade.ContextWithUser)
 		if !ok || sharedProjectPortAbsent(userCtx) {
 			return result, ErrSharedProjectUnauthorized
@@ -135,7 +141,7 @@ func (s *SharedProjectService) Create(ctx context.Context, command SharedProject
 		}
 		var admission *projectAdmissionState
 		var businessAccess *SpaceServiceAccess
-		if s.paid != nil {
+		if s.paid != nil && !isBusinessProjectBinding(binding) {
 			var err error
 			// Recheck paid-through against the actual time of every transaction
 			// attempt. Command entropy and audit time remain stable through retry.

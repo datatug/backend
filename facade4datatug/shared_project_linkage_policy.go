@@ -147,7 +147,7 @@ func (p *PaidProjectLinkagePolicy) authorizeProject(ctx context.Context, tx dal.
 		if err != nil {
 			return err
 		}
-		if err := verifyBusinessProjectAccessAt(access, now); err != nil {
+		if err := verifyBusinessProjectAccessAfterRead(access, now, p.now); err != nil {
 			return err
 		}
 		if !access.UnlimitedContacts {

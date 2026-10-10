@@ -55,6 +55,14 @@ func newBusinessProjectFixture(t *testing.T) (dal.DB, *SharedProjectService, *bu
 	return db, service, reader
 }
 
+func advancingBusinessClock() func() time.Time {
+	current := sharedTestTime
+	return func() time.Time {
+		current = current.Add(time.Microsecond)
+		return current
+	}
+}
+
 func TestBusinessCreateSharedProjectUsesLiveSpaceAuthorityWithoutProQuota(t *testing.T) {
 	db, service, reader := newBusinessProjectFixture(t)
 	command := sharedCommand()
@@ -127,9 +135,14 @@ func TestBusinessGitHubCloneAndQueryWriteRecheckCurrentSpacePayer(t *testing.T) 
 	reader.access.OwnerRevision = 1
 	reader.access.PaidServiceProofID = "replacement-proof"
 	reader.access.PlanID = BusinessAnnualPlanID
+	service.now = advancingBusinessClock()
+	service.business.now = service.now
 	queryRepo := &fakeGitHubQueryRepo{scope: GitHubCreateRepositoryScope{ActorID: "actor", RepositoryID: 123, Owner: "owner", Name: "repo", Permission: "write"}, head: createNewHead}
 	if _, err := service.SaveGitHubQuery(context.Background(), "actor", 123, "owner", "repo", "datatug", querySaveRequest(), queryRepo); err != nil || queryRepo.commits != 1 {
 		t.Fatalf("current replacement could not save query; commits=%d err=%v", queryRepo.commits, err)
+	}
+	if _, err := service.AuthorizeGitHubProjectWrite(context.Background(), "actor", 123, "owner", "repo", "datatug"); err != nil {
+		t.Fatalf("advancing clock rejected current Business project access: %v", err)
 	}
 	if err := db.Get(context.Background(), admissionRecord); err != nil {
 		t.Fatal(err)
@@ -158,7 +171,7 @@ func TestBusinessLinkageUsesCurrentGrantAndDeniesAtPaidEnd(t *testing.T) {
 	authority := &projectRoleFixtureAuthority{t: t}
 	policy, err := NewPaidProjectLinkagePolicy(PaidProjectLinkageOptions{
 		Business: service.business, Roles: paidFixtureOwnerLinks().Roles, Contacts: projectContactFixturePort{},
-		Manager: authority, Targets: authority, Now: func() time.Time { return sharedTestTime },
+		Manager: authority, Targets: authority, Now: advancingBusinessClock(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +215,7 @@ func TestBusinessFirstCreateActivatesFreshSpaceOnlyWithAcceptedCommand(t *testin
 			reader := &businessCurrentServiceReader{access: access}
 			plan := &activationProbe{}
 			activator := &transactionalActivatorProbe{plan: plan}
-			service, err := NewActivatingBusinessSharedProjectService(db, &sharedCounterIDs{}, func() time.Time { return sharedTestTime }, BusinessSharedProjectOptions{
+			service, err := NewActivatingBusinessSharedProjectService(db, &sharedCounterIDs{}, advancingBusinessClock(), BusinessSharedProjectOptions{
 				AccessPolicy:  BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"},
 				ServiceReader: reader, ContactLinks: paidFixtureOwnerLinks(),
 			}, SharedProjectActivationOptions{Activator: activator, RequiredRoles: []string{"content-admin", "content-editor"}})
@@ -265,6 +278,76 @@ func TestBusinessFirstCreateActivatesFreshSpaceOnlyWithAcceptedCommand(t *testin
 			}
 			if !errors.Is(denied, ErrBusinessServiceEnded) || activator.called != 1 {
 				t.Fatalf("refunded first-create path reached capability activation: err=%v calls=%d", denied, activator.called)
+			}
+		})
+	}
+}
+
+func TestUnifiedProBusinessServiceSelectsOnlyRequestedVerifiedPlan(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		intent      SharedProjectBillingIntent
+		github      bool
+		wantVersion int
+		wantPayer   string
+	}{
+		{name: "omitted intent defaults to Pro", wantVersion: 1, wantPayer: "personal-1"},
+		{name: "Pro sponsors ordinary Space", intent: BillingIntentPersonalPro, wantVersion: 1, wantPayer: "personal-1"},
+		{name: "Business pays selected Space", intent: BillingIntentSpaceBusiness, wantVersion: 2, wantPayer: "space"},
+		{name: "Pro GitHub clone", intent: BillingIntentPersonalPro, github: true, wantVersion: 1, wantPayer: "personal-1"},
+		{name: "Business GitHub clone", intent: BillingIntentSpaceBusiness, github: true, wantVersion: 2, wantPayer: "space"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _, pro := paidCreateFixture(t)
+			access := validPaymentusBusinessAccess(sharedTestTime)
+			access.Scope.SpaceID, access.PayerSpaceID = "space", "space"
+			reader := &businessCurrentServiceReader{access: access}
+			activator := &transactionalActivatorProbe{plan: &activationProbe{}}
+			service, err := NewActivatingProBusinessSharedProjectService(db, &sharedCounterIDs{}, func() time.Time { return sharedTestTime }, ProBusinessSharedProjectOptions{
+				Pro: pro, Business: BusinessSharedProjectOptions{AccessPolicy: BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"}, ServiceReader: reader},
+			}, SharedProjectActivationOptions{Activator: activator, RequiredRoles: []string{"content-admin", "content-editor"}, InventoryQuery: db})
+			if err != nil {
+				t.Fatal(err)
+			}
+			command := sharedCommand()
+			command.BillingIntent = tc.intent
+			var ref models4datatug.SharedProjectRef
+			if tc.github {
+				github := githubCommand()
+				github.BillingIntent = tc.intent
+				created, err := service.CreateGitHubProject(facade.NewContextWithUserID(context.Background(), "actor"), github, githubRepo())
+				if err != nil {
+					t.Fatalf("GitHub create with %q: %v", tc.intent, err)
+				}
+				ref = models4datatug.SharedProjectRef{StoreID: models4datatug.GithubStoreID, SpaceID: github.SpaceID, ProjectID: created.SharedProjectID}
+			} else {
+				var err error
+				ref, err = service.Create(facade.NewContextWithUserID(context.Background(), "actor"), command)
+				if err != nil {
+					t.Fatalf("create with %q: %v", tc.intent, err)
+				}
+			}
+			r, admission := models4datatug.NewProjectAdmissionRecord(ref.SpaceID, ref.ProjectID)
+			if err := db.Get(context.Background(), r); err != nil {
+				t.Fatal(err)
+			}
+			if admission.Validate() != nil || admission.Version != tc.wantVersion || admission.PayerID != tc.wantPayer {
+				t.Fatalf("billing intent selected wrong durable admission: %+v", admission)
+			}
+			if tc.wantVersion == 1 && reader.calls != 0 {
+				t.Fatalf("Pro intent queried Business authority %d times", reader.calls)
+			}
+			if tc.wantVersion == 2 && reader.calls == 0 {
+				t.Fatal("Business intent skipped current selected-Space proof")
+			}
+			if activator.called == 0 || !activator.plan.(*activationProbe).applied {
+				t.Fatalf("unified service skipped explicit activation: calls=%d", activator.called)
+			}
+			bad := command
+			bad.CommandID = "bad-intent"
+			bad.BillingIntent = "unlimited"
+			if _, err := service.Create(facade.NewContextWithUserID(context.Background(), "actor"), bad); !errors.Is(err, ErrSharedProjectInvalid) {
+				t.Fatalf("unknown billing intent accepted: %v", err)
 			}
 		})
 	}
