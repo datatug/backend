@@ -181,6 +181,19 @@ func TestBusinessUsageRuntimeComposesOneExplicitTestMode(t *testing.T) {
 		runtime.Worker.mode != contract4paymentus.ModeTest || runtime.Periods.authority.mode != contract4paymentus.ModeTest {
 		t.Fatalf("incomplete or cross-mode runtime composition: %#v", runtime)
 	}
+	if _, err := NewBusinessUsageRuntime(BusinessUsageRuntimeOptions{}); !errors.Is(err, ErrBusinessUsageRuntimeUnavailable) {
+		t.Fatalf("public factory accepted an incomplete composition: %v", err)
+	}
+	invalidAccess := options
+	invalidAccess.AccessPolicy.GrantVersion = ""
+	if _, err := NewBusinessUsageRuntime(invalidAccess); !errors.Is(err, ErrBusinessUsageRuntimeUnavailable) {
+		t.Fatalf("runtime accepted an unversioned Business access grant: %v", err)
+	}
+	missingTaxPolicy := options
+	missingTaxPolicy.TaxPolicies = nil
+	if _, err := NewBusinessUsageRuntime(missingTaxPolicy); !errors.Is(err, ErrBusinessUsageRuntimeUnavailable) {
+		t.Fatalf("runtime accepted a missing immutable tax policy: %v", err)
+	}
 	// The public factory must reject a clock-bound reader even when callers
 	// cannot set the private testClock option. This keeps a global Worker from
 	// escaping a one-Space TEST clock runtime.
@@ -201,11 +214,12 @@ func TestBusinessUsageRuntimeComposesOneExplicitTestMode(t *testing.T) {
 func TestBusinessUsageTaxPolicyAuthorityRejectsAmbiguousOrUnapprovedConfig(t *testing.T) {
 	policy := runtimeTestTaxPolicy(contract4paymentus.ModeTest, "2026-10-10", "prod_business_test")
 	for name, entries := range map[string][]BusinessUsageTaxPolicyRegistration{
-		"no current":        {{Policy: policy}},
-		"multiple current":  {{Policy: policy, Current: true}, {Policy: runtimeTestTaxPolicy(contract4paymentus.ModeTest, "2026-10-11", "prod_business_test"), Current: true}},
-		"duplicate binding": {{Policy: policy, Current: true}, {Policy: policy}},
-		"wrong mode":        {{Policy: runtimeTestTaxPolicy(contract4paymentus.ModeLive, "2026-10-10", "prod_business_live"), Current: true}},
-		"wrong product":     {{Policy: contract4paymentus.UsageInvoiceStripeTaxPolicy{ProductID: "other", Mode: policy.Mode, Currency: policy.Currency, TaxCode: policy.TaxCode, TaxBehavior: policy.TaxBehavior, Binding: policy.Binding}, Current: true}},
+		"no current":                {{Policy: policy}},
+		"multiple current":          {{Policy: policy, Current: true}, {Policy: runtimeTestTaxPolicy(contract4paymentus.ModeTest, "2026-10-11", "prod_business_test"), Current: true}},
+		"duplicate binding":         {{Policy: policy, Current: true}, {Policy: policy}},
+		"wrong mode":                {{Policy: runtimeTestTaxPolicy(contract4paymentus.ModeLive, "2026-10-10", "prod_business_live"), Current: true}},
+		"wrong product":             {{Policy: contract4paymentus.UsageInvoiceStripeTaxPolicy{ProductID: "other", Mode: policy.Mode, Currency: policy.Currency, TaxCode: policy.TaxCode, TaxBehavior: policy.TaxBehavior, Binding: policy.Binding}, Current: true}},
+		"invalid canonical binding": {{Policy: contract4paymentus.UsageInvoiceStripeTaxPolicy{ProductID: policy.ProductID, Mode: policy.Mode, Currency: policy.Currency, TaxCode: policy.TaxCode, TaxBehavior: policy.TaxBehavior, Binding: contract4paymentus.UsageInvoiceTaxBinding{ID: "bad", Revision: "2026-10-10", ProviderProductID: "prod_business_test"}}, Current: true}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := newBusinessUsageTaxPolicyAuthority(contract4paymentus.ModeTest, entries); err == nil {
