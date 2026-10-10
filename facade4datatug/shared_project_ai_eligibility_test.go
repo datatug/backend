@@ -85,6 +85,63 @@ func TestSharedProjectAIEligibilityProvesAdmittedCreatorInSameReadTransaction(t 
 	}
 }
 
+func TestUnifiedBusinessAdmissionCannotInheritProAIWhenPayerIDsCoincide(t *testing.T) {
+	for _, github := range []bool{false, true} {
+		name := "cloud"
+		if github {
+			name = "GitHub"
+		}
+		t.Run(name, func(t *testing.T) {
+			db, _, pro := paidCreateFixture(t)
+			seedPaidOwnerContact(t, db, "personal-1")
+			access := validPaymentusBusinessAccess(sharedTestTime)
+			access.Scope.SpaceID, access.PayerSpaceID = "personal-1", "personal-1"
+			reader := &businessCurrentServiceReader{access: access}
+			service, err := NewProBusinessSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime }, ProBusinessSharedProjectOptions{
+				Pro: pro, Business: BusinessSharedProjectOptions{AccessPolicy: BusinessProjectAccessPolicy{GrantVersion: "business-v1"}, ServiceReader: reader},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var projectID string
+			if github {
+				command := githubCommand()
+				command.SpaceID = "personal-1"
+				command.BillingIntent = BillingIntentSpaceBusiness
+				created, err := service.CreateGitHubProject(context.Background(), command, githubRepo())
+				if err != nil {
+					t.Fatalf("create Business GitHub project: %v", err)
+				}
+				projectID = created.SharedProjectID
+			} else {
+				command := sharedCommand()
+				command.SpaceID = "personal-1"
+				command.BillingIntent = BillingIntentSpaceBusiness
+				created, err := service.Create(context.Background(), command)
+				if err != nil {
+					t.Fatalf("create Business cloud project: %v", err)
+				}
+				projectID = created.ProjectID
+			}
+			admissionRecord, admission := models4datatug.NewProjectAdmissionRecord("personal-1", projectID)
+			if err := db.Get(context.Background(), admissionRecord); err != nil || admission.Validate() != nil || admission.Version != 2 || admission.Product != BusinessProjectProductID || admission.PayerID != "personal-1" {
+				t.Fatalf("coincident-payer fixture is not a valid Business admission: %+v, %v", admission, err)
+			}
+			proof := &aiEligibilityOwnerProofProbe{t: t, actor: "actor", payer: "personal-1"}
+			service.paid.Personal, service.paid.Owner = proof, proof
+			var eligibility ProjectAIEligibility
+			if github {
+				eligibility, err = service.ReadGitHubProjectAIEligibility(context.Background(), "actor", 123, "owner", "repo", "datatug")
+			} else {
+				eligibility, err = service.ReadSharedProjectAIEligibility(context.Background(), "actor", "personal-1", projectID)
+			}
+			if !errors.Is(err, ErrProjectAIEligibilityUnavailable) || eligibility.AIAllowed || eligibility.Reason != "" || proof.personalCalls != 0 || proof.ownerReadCalls != 0 {
+				t.Fatalf("Business admission inherited Pro AI or reached sponsor authority: result=%+v proof=%d/%d err=%v", eligibility, proof.personalCalls, proof.ownerReadCalls, err)
+			}
+		})
+	}
+}
+
 func TestSharedProjectAIEligibilityClassifiesEndedAndUnprovedPlansSeparately(t *testing.T) {
 	f, _ := paidSharedProjectWithReader(t)
 	planKey := models4datatug.NewCurrentPlanKey("personal-1")
