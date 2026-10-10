@@ -16,8 +16,19 @@ import (
 
 type businessServiceAccessReader func(context.Context, dal.ReadTransaction, contract4paymentus.ServicePurchaseScope) (contract4paymentus.CurrentSpaceServiceAccess, error)
 
+func (businessServiceAccessReader) Mode() contract4paymentus.Mode { return contract4paymentus.ModeLive }
+
 func (r businessServiceAccessReader) ReadCurrentSpaceServiceAccess(ctx context.Context, tx dal.ReadTransaction, scope contract4paymentus.ServicePurchaseScope) (contract4paymentus.CurrentSpaceServiceAccess, error) {
 	return r(ctx, tx, scope)
+}
+
+type businessTestModeServiceReader struct{}
+
+func (businessTestModeServiceReader) Mode() contract4paymentus.Mode {
+	return contract4paymentus.ModeTest
+}
+func (businessTestModeServiceReader) ReadCurrentSpaceServiceAccess(context.Context, dal.ReadTransaction, contract4paymentus.ServicePurchaseScope) (contract4paymentus.CurrentSpaceServiceAccess, error) {
+	return contract4paymentus.CurrentSpaceServiceAccess{}, nil
 }
 
 func validPaymentusBusinessAccess(at time.Time) contract4paymentus.CurrentSpaceServiceAccess {
@@ -64,6 +75,12 @@ func TestBusinessAccessUsesCallerTransactionAndVerifiedSpace(t *testing.T) {
 	})
 	if err != nil || called != 1 {
 		t.Fatalf("same transaction read: %v, calls %d", err, called)
+	}
+}
+
+func TestBusinessAccessVerifierRejectsTestModeReader(t *testing.T) {
+	if _, err := NewBusinessProjectAccessVerifier(businessTestModeServiceReader{}, BusinessProjectAccessPolicy{GrantVersion: "business-project-v1"}, func() time.Time { return sharedTestTime }); !errors.Is(err, ErrBusinessServiceUnproved) {
+		t.Fatalf("TEST current-service reader error = %v, want LIVE-only refusal", err)
 	}
 }
 

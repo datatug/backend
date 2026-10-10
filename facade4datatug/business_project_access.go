@@ -62,7 +62,7 @@ type BusinessProjectAccessVerifier struct {
 }
 
 func NewBusinessProjectAccessVerifier(reader contract4paymentus.CurrentSpaceServiceReader, policy BusinessProjectAccessPolicy, now func() time.Time) (*BusinessProjectAccessVerifier, error) {
-	if sharedProjectPortAbsent(reader) || policy.validate() != nil || now == nil {
+	if sharedProjectPortAbsent(reader) || reader.Mode() != contract4paymentus.ModeLive || policy.validate() != nil || now == nil {
 		return nil, ErrBusinessServiceUnproved
 	}
 	return &BusinessProjectAccessVerifier{reader: reader, policy: policy, now: now}, nil
@@ -74,7 +74,9 @@ func NewBusinessProjectAccessVerifier(reader contract4paymentus.CurrentSpaceServ
 // proof remains provenance, while this read verifies the current owner.
 func (v *BusinessProjectAccessVerifier) ReadCurrent(ctx context.Context, tx dal.ReadTransaction, spaceID string) (SpaceServiceAccess, error) {
 	var zero SpaceServiceAccess
-	if v == nil || sharedProjectPortAbsent(v.reader) || v.policy.validate() != nil || v.now == nil || ctx == nil || sharedProjectPortAbsent(tx) || models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
+	if v == nil || sharedProjectPortAbsent(v.reader) || v.reader.Mode() != contract4paymentus.ModeLive ||
+		v.policy.validate() != nil || v.now == nil || ctx == nil || sharedProjectPortAbsent(tx) ||
+		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
 		return zero, ErrBusinessServiceUnproved
 	}
 	startedAt := v.now().UTC()
