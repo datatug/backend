@@ -549,10 +549,10 @@ func TestBusinessUsagePeriodOpenRecoversAfterLedgerCommitAndCloseUsesHistoricalP
 	if err := authority.VerifyUsage(ctx, nil, operation); !errors.Is(err, contract4paymentus.ErrUsageAuthority) {
 		t.Fatalf("usage authority accepted a missing caller transaction: %v", err)
 	}
-	if err := authority.VerifyUsage(nil, nil, operation); !errors.Is(err, contract4paymentus.ErrUsageAuthority) {
+	if err := authority.VerifyUsage(context.Background(), nil, operation); !errors.Is(err, contract4paymentus.ErrUsageAuthority) {
 		t.Fatalf("usage authority accepted a missing request context: %v", err)
 	}
-	if _, err := terms.ReadBusinessUsageCloseTerms(nil, nil, snapshot); !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
+	if _, err := terms.ReadBusinessUsageCloseTerms(context.Background(), nil, snapshot); !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
 		t.Fatalf("close terms reader accepted missing context/transaction: %v", err)
 	}
 	if err := db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {

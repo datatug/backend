@@ -357,7 +357,7 @@ func validBusinessUsageSnapshot(period contract4paymentus.UsagePeriodSnapshot) b
 }
 
 func sameBusinessUsageWindow(left, right contract4paymentus.UsagePeriodSnapshot) bool {
-	return left.Ref == right.Ref && left.AnchorUTC == right.AnchorUTC && left.StartUTC == right.StartUTC && left.EndUTC == right.EndUTC
+	return left.Ref == right.Ref && left.AnchorUTC.Equal(right.AnchorUTC) && left.StartUTC.Equal(right.StartUTC) && left.EndUTC.Equal(right.EndUTC)
 }
 
 func readBusinessUsageCheckpoint(ctx context.Context, tx dal.ReadTransaction, period contract4paymentus.UsagePeriodRef) (*models4datatug.QueryActivityPeriodCheckpoint, error) {
