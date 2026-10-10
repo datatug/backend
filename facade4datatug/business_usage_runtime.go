@@ -38,6 +38,9 @@ type BusinessUsageRuntimeOptions struct {
 	InvoiceProvider contract4paymentus.UsageInvoiceProvider
 	Pricing         func() contract4paymentus.UsagePricingConfig
 	Now             func() time.Time
+	// testClock can only be set by the scoped TEST harness constructor below;
+	// the public runtime factory never exposes a clocked global worker.
+	testClock *contract4paymentus.ServiceTestClockCapability
 }
 
 // BusinessUsageRuntime exposes the server-owned composition used by project
@@ -54,12 +57,36 @@ type BusinessUsageRuntime struct {
 }
 
 func NewBusinessUsageRuntime(options BusinessUsageRuntimeOptions) (*BusinessUsageRuntime, error) {
+	if options.testClock != nil || hasBusinessUsageTestClock(options.CurrentService) {
+		return nil, ErrBusinessUsageRuntimeUnavailable
+	}
+	return newBusinessUsageRuntime(options)
+}
+
+func hasBusinessUsageTestClock(reader contract4paymentus.CurrentSpaceServiceReader) bool {
+	bound, ok := reader.(interface {
+		TestClockCapability() *contract4paymentus.ServiceTestClockCapability
+	})
+	return ok && bound.TestClockCapability() != nil
+}
+
+func newBusinessUsageRuntime(options BusinessUsageRuntimeOptions) (*BusinessUsageRuntime, error) {
 	if !validBusinessUsageMode(options.Mode) || sharedProjectPortAbsent(options.DB) || sharedProjectPortAbsent(options.Query) ||
 		sharedProjectPortAbsent(options.CurrentService) || options.CurrentService.Mode() != options.Mode ||
 		sharedProjectPortAbsent(options.InitialStarts) || sharedProjectPortAbsent(options.Contacts) || sharedProjectPortAbsent(options.Actors) ||
 		options.AccessPolicy.Mode != options.Mode ||
 		sharedProjectPortAbsent(options.InvoiceProvider) || options.Now == nil {
 		return nil, ErrBusinessUsageRuntimeUnavailable
+	}
+	if options.testClock != nil {
+		clock := options.testClock
+		bound, ok := options.CurrentService.(interface {
+			TestClockCapability() *contract4paymentus.ServiceTestClockCapability
+		})
+		if !ok || options.Mode != contract4paymentus.ModeTest || clock.Mode() != contract4paymentus.ModeTest ||
+			!validBusinessUsageRuntimePolicyScope(clock.Scope()) || bound.TestClockCapability() != clock {
+			return nil, ErrBusinessUsageRuntimeUnavailable
+		}
 	}
 	access, err := NewBusinessProjectAccessVerifier(options.CurrentService, options.AccessPolicy, options.Now)
 	if err != nil {
@@ -85,7 +112,15 @@ func NewBusinessUsageRuntime(options BusinessUsageRuntimeOptions) (*BusinessUsag
 	if err != nil {
 		return nil, ErrBusinessUsageRuntimeUnavailable
 	}
-	ledger, err := contract4paymentus.NewDalgoUsageLedgerWithPayerBinding(options.DB, periodAuthority, payerAuthority)
+	var ledger contract4paymentus.UsageLedger
+	if options.testClock != nil {
+		scope := options.testClock.Scope()
+		clockScope := contract4paymentus.UsageScope{Mode: contract4paymentus.ModeTest, SpaceID: scope.SpaceID,
+			ProductID: BusinessProjectProductID, PayerID: scope.SpaceID, ServiceID: BusinessProjectServiceID}
+		ledger, err = contract4paymentus.NewDalgoUsageLedgerWithTestClock(options.DB, periodAuthority, payerAuthority, clockScope, options.testClock)
+	} else {
+		ledger, err = contract4paymentus.NewDalgoUsageLedgerWithPayerBinding(options.DB, periodAuthority, payerAuthority)
+	}
 	if err != nil {
 		return nil, ErrBusinessUsageRuntimeUnavailable
 	}

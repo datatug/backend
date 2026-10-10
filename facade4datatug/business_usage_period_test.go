@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dal-go/dalgo/dal"
+	"github.com/dal-go/dalgo/recordset"
 	"github.com/dal-go/record"
 	"github.com/datatug/backend/models4datatug"
 	"github.com/sneat-co/paymentus/backend/contract4paymentus"
@@ -43,6 +44,19 @@ func (tx failingBusinessUsageReadwriteTx) Get(context.Context, record.Record) er
 type failingBusinessUsageReadTx struct {
 	dal.ReadTransaction
 	err error
+}
+
+type failingBusinessUsageCapacityQueryTx struct {
+	dal.ReadTransaction
+	err error
+}
+
+func (tx failingBusinessUsageCapacityQueryTx) ExecuteQueryToRecordsReader(context.Context, dal.Query) (dal.RecordsReader, error) {
+	return nil, tx.err
+}
+
+func (tx failingBusinessUsageCapacityQueryTx) ExecuteQueryToRecordsetReader(context.Context, dal.Query, ...recordset.Option) (dal.RecordsetReader, error) {
+	return nil, tx.err
 }
 
 func (tx failingBusinessUsageReadTx) Get(context.Context, record.Record) error {
@@ -286,6 +300,45 @@ func TestBusinessUsageCloseTermsRequireEmptyPaidCapacityBasis(t *testing.T) {
 	}
 }
 
+func TestBusinessUsageCapacityReadAuthorityRejectsMutationAndForeignOwner(t *testing.T) {
+	period := validBusinessUsageTestSnapshot(t, contract4paymentus.DataTugBusinessUsagePricing(),
+		time.Date(2026, 10, 1, 7, 0, 0, 0, time.UTC), time.Date(2026, 10, 1, 7, 0, 0, 0, time.UTC))
+	authority := businessUsageCapacityReadAuthority{mode: contract4paymentus.ModeLive, period: period}
+	owner := contract4paymentus.CapacityOwner{
+		Mode: contract4paymentus.ModeLive, SpaceID: "space-a", ProductID: BusinessProjectProductID, PayerID: "space-a",
+	}
+	for _, tc := range []struct {
+		name      string
+		operation contract4paymentus.CapacityOperation
+	}{
+		{name: "mutation action", operation: contract4paymentus.CapacityOperation{Action: contract4paymentus.CapacityConfirm, Owner: owner}},
+		{name: "foreign space", operation: contract4paymentus.CapacityOperation{Action: contract4paymentus.CapacityRead, Owner: contract4paymentus.CapacityOwner{Mode: owner.Mode, SpaceID: "other-space", ProductID: owner.ProductID, PayerID: "other-space"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := sneatcoretesting.NewMemoryDB()
+			if err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+				if err := authority.VerifyCapacityAction(ctx, tx, tc.operation); !errors.Is(err, contract4paymentus.ErrCapacityAuthority) {
+					t.Fatalf("capacity authority accepted unauthorized operation: %v", err)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestBusinessUsageResumeOpeningRejectsForeignModeBeforeRecovery(t *testing.T) {
+	service := &BusinessUsagePeriodService{
+		db: sneatcoretesting.NewMemoryDB(), authority: &NativeBusinessUsagePeriodAuthority{mode: contract4paymentus.ModeLive},
+		now: func() time.Time { return time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC) },
+	}
+	ref := testClockHarnessPeriodRef()
+	if _, err := service.ResumeOpening(context.Background(), ref); !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
+		t.Fatalf("recovery accepted a TEST period under the LIVE authority: %v", err)
+	}
+}
+
 func TestNativeBusinessCloseTermsRejectBrokenAnchorAndPeriodReads(t *testing.T) {
 	ctx := context.Background()
 	db := sneatcoretesting.NewMemoryDB()
@@ -355,7 +408,7 @@ func TestNativeBusinessCloseTermsRejectBrokenAnchorAndPeriodReads(t *testing.T) 
 	periods.mu.Unlock()
 	assertUnavailable("closed period")
 
-	capacityAuthority := businessUsageCapacityReadAuthority{initialStarts: initialReader, periods: periods, period: period}
+	capacityAuthority := businessUsageCapacityReadAuthority{mode: contract4paymentus.ModeLive, initialStarts: initialReader, periods: periods, period: period}
 	operation := contract4paymentus.CapacityOperation{
 		Action: contract4paymentus.CapacityRead,
 		Owner:  contract4paymentus.CapacityOwner{Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ProductID: BusinessProjectProductID, PayerID: spaceID},
@@ -375,6 +428,34 @@ func TestNativeBusinessCloseTermsRejectBrokenAnchorAndPeriodReads(t *testing.T) 
 	periods.mu.Unlock()
 	if err := verifyCapacity(); !errors.Is(err, contract4paymentus.ErrCapacityAuthority) {
 		t.Fatalf("capacity reader accepted an unreadable native period: %v", err)
+	}
+	periods.mu.Lock()
+	periods.err = nil
+	periods.states[period.Ref] = contract4paymentus.UsagePeriodState{Snapshot: period}
+	periods.mu.Unlock()
+	if err := verifyCapacity(); err != nil {
+		t.Fatalf("capacity reader rejected the exact open period and original paid proof: %v", err)
+	}
+	periods.mu.Lock()
+	periods.states[period.Ref] = contract4paymentus.UsagePeriodState{Snapshot: period}
+	periods.mu.Unlock()
+	var terms BusinessUsageCloseTerms
+	if err := db.RunReadonlyTransaction(ctx, func(txCtx context.Context, tx dal.ReadTransaction) error {
+		var readErr error
+		terms, readErr = reader.ReadBusinessUsageCloseTerms(txCtx, tx, period)
+		return readErr
+	}); err != nil {
+		t.Fatalf("derive close terms from a verified empty native capacity basis: %v", err)
+	}
+	if terms.Capacity.EffectivePrepaidUnits != 0 || terms.Capacity.Digest == "" || terms.BillMonthlyOverage != true {
+		t.Fatalf("empty native capacity basis did not produce bounded overage terms: %+v", terms)
+	}
+	queryErr := errors.New("capacity lot query unavailable")
+	if err := db.RunReadonlyTransaction(ctx, func(txCtx context.Context, tx dal.ReadTransaction) error {
+		_, readErr := reader.ReadBusinessUsageCloseTerms(txCtx, failingBusinessUsageCapacityQueryTx{ReadTransaction: tx, err: queryErr}, period)
+		return readErr
+	}); !errors.Is(err, ErrBusinessUsagePeriodUnavailable) {
+		t.Fatalf("close terms failed open after paid-capacity query error: %v", err)
 	}
 }
 
