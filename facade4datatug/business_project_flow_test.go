@@ -352,3 +352,57 @@ func TestUnifiedProBusinessServiceSelectsOnlyRequestedVerifiedPlan(t *testing.T)
 		})
 	}
 }
+
+func TestSharedProjectCreateBindingRejectsUnconfiguredAndWrongPlanIntent(t *testing.T) {
+	db, _, proOptions := paidCreateFixture(t)
+	_, businessOnly, _ := newBusinessProjectFixture(t)
+
+	tests := []struct {
+		name    string
+		service *SharedProjectService
+		intent  SharedProjectBillingIntent
+		wantErr error
+	}{
+		{name: "legacy service may not claim a paid plan", service: &SharedProjectService{}, intent: BillingIntentSpaceBusiness, wantErr: ErrSharedProjectUnauthorized},
+		{name: "Pro-only service may not select Business", service: &SharedProjectService{paid: &proOptions}, intent: BillingIntentSpaceBusiness, wantErr: ErrSharedProjectUnauthorized},
+		{name: "Business-only service may not select Pro", service: businessOnly, intent: BillingIntentPersonalPro, wantErr: ErrSharedProjectUnauthorized},
+		{name: "unsupported intent is rejected", service: &SharedProjectService{paid: &proOptions}, intent: "unlimited", wantErr: ErrSharedProjectInvalid},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binding, err := tc.service.resolveSharedProjectCreateBinding(context.Background(), "actor", "space", "command", "Project", tc.intent)
+			if !errors.Is(err, tc.wantErr) || binding.PayerID != "" || binding.Mode != "" || binding.Product != "" {
+				t.Fatalf("invalid plan selection returned binding %+v, error %v; want %v", binding, err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("Business-only service defaults only to its configured plan", func(t *testing.T) {
+		binding, err := businessOnly.resolveSharedProjectCreateBinding(context.Background(), "actor", "business-space", "command", "Project", "")
+		if err != nil || binding.PayerID != "business-space" || binding.Mode != "live" || binding.Product != BusinessProjectProductID {
+			t.Fatalf("Business-only default did not bind its selected Space: %+v, %v", binding, err)
+		}
+	})
+
+	t.Run("invalid directory payer cannot become Pro binding", func(t *testing.T) {
+		badOptions := proOptions
+		badOptions.Directory = paidCreateDirectory{payer: "not/a/space-id"}
+		service := &SharedProjectService{paid: &badOptions}
+		binding, err := service.resolveSharedProjectCreateBinding(context.Background(), "actor", "space", "command", "Project", BillingIntentPersonalPro)
+		if !errors.Is(err, ErrSharedProjectUnauthorized) || binding.PayerID != "" {
+			t.Fatalf("invalid directory identity became paid binding %+v, %v", binding, err)
+		}
+	})
+
+	// Keep the legacy no-intent path available without treating it as paid.
+	t.Run("unconfigured legacy selection carries no payer", func(t *testing.T) {
+		service, err := NewSharedProjectService(db, &sharedCounterIDs{}, &sharedAuthority{}, func() time.Time { return sharedTestTime })
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding, err := service.resolveSharedProjectCreateBinding(context.Background(), "actor", "space", "command", "Project", "")
+		if err != nil || binding.PayerID != "" || binding.Mode != "" || binding.Product != "" {
+			t.Fatalf("legacy empty intent acquired paid authority: %+v, %v", binding, err)
+		}
+	})
+}
