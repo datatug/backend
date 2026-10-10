@@ -110,6 +110,15 @@ func (businessUsageRuntimeCurrentGateway) ServiceCurrentSubscriptionEvidence(con
 	return stripeplumbing.ServiceCurrentFinancialEvidence{}, errors.New("unexpected provider read in runtime construction test")
 }
 
+type businessUsageRuntimeClockBoundCurrent struct {
+	contract4paymentus.CurrentSpaceServiceReader
+	clock *contract4paymentus.ServiceTestClockCapability
+}
+
+func (r businessUsageRuntimeClockBoundCurrent) TestClockCapability() *contract4paymentus.ServiceTestClockCapability {
+	return r.clock
+}
+
 type businessUsageRuntimeInvoiceProvider struct{}
 
 func (businessUsageRuntimeInvoiceProvider) FindByIntent(context.Context, contract4paymentus.UsageInvoiceProviderRequest) (contract4paymentus.UsageInvoiceLookup, error) {
@@ -172,6 +181,17 @@ func TestBusinessUsageRuntimeComposesOneExplicitTestMode(t *testing.T) {
 		runtime.Worker.mode != contract4paymentus.ModeTest || runtime.Periods.authority.mode != contract4paymentus.ModeTest {
 		t.Fatalf("incomplete or cross-mode runtime composition: %#v", runtime)
 	}
+	// The public factory must reject a clock-bound reader even when callers
+	// cannot set the private testClock option. This keeps a global Worker from
+	// escaping a one-Space TEST clock runtime.
+	options.CurrentService = businessUsageRuntimeClockBoundCurrent{
+		CurrentSpaceServiceReader: options.CurrentService,
+		clock:                     new(contract4paymentus.ServiceTestClockCapability),
+	}
+	if _, err := NewBusinessUsageRuntime(options); !errors.Is(err, ErrBusinessUsageRuntimeUnavailable) {
+		t.Fatalf("public factory accepted a clock-bound current reader: %v", err)
+	}
+	options.CurrentService = current
 	options.Mode = contract4paymentus.ModeLive // Request-like config cannot relabel TEST dependencies.
 	if _, err := NewBusinessUsageRuntime(options); !errors.Is(err, ErrBusinessUsageRuntimeUnavailable) {
 		t.Fatalf("runtime accepted configured LIVE mode with TEST-native authorities: %v", err)

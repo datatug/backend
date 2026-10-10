@@ -32,7 +32,7 @@ func NewBusinessUsageTestClockRuntime(options BusinessUsageRuntimeOptions, clock
 	}
 	options.Now = clock.LogicalTime
 	options.testClock = clock
-	runtime, err := NewBusinessUsageRuntime(options)
+	runtime, err := newBusinessUsageRuntime(options)
 	if err != nil {
 		return nil, err
 	}

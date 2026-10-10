@@ -57,10 +57,17 @@ type BusinessUsageRuntime struct {
 }
 
 func NewBusinessUsageRuntime(options BusinessUsageRuntimeOptions) (*BusinessUsageRuntime, error) {
-	if options.testClock != nil {
+	if options.testClock != nil || hasBusinessUsageTestClock(options.CurrentService) {
 		return nil, ErrBusinessUsageRuntimeUnavailable
 	}
 	return newBusinessUsageRuntime(options)
+}
+
+func hasBusinessUsageTestClock(reader contract4paymentus.CurrentSpaceServiceReader) bool {
+	bound, ok := reader.(interface {
+		TestClockCapability() *contract4paymentus.ServiceTestClockCapability
+	})
+	return ok && bound.TestClockCapability() != nil
 }
 
 func newBusinessUsageRuntime(options BusinessUsageRuntimeOptions) (*BusinessUsageRuntime, error) {
