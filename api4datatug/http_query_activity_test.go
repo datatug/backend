@@ -79,6 +79,51 @@ func TestQueryActivityContextHTTPValidatesExactScopeAndAuthentication(t *testing
 	}
 }
 
+func TestQueryActivityContextHTTPFailsClosedForInvalidIdentityAndAuthorityErrors(t *testing.T) {
+	service := &queryActivityRouteServiceFake{}
+	handler := httpGetQueryActivityContext(QueryActivityRouteOptions{Service: service})
+	target := "/v0/datatug/projects/query_activity_context?storage=firestore&spaceID=space&project=project"
+
+	setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		t.Fatal("invalid shared-project identifier reached authentication")
+		return nil, nil
+	})
+	invalid := httptest.NewRecorder()
+	handler(invalid, httptest.NewRequest(http.MethodGet, strings.Replace(target, "spaceID=space", "spaceID=space%2Fother", 1), nil))
+	if invalid.Code != http.StatusBadRequest || service.issues != 0 {
+		t.Fatalf("invalid identity response=%d service calls=%d", invalid.Code, service.issues)
+	}
+
+	setQueryActivityVerifier(t, func(w http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return nil, errors.New("invalid credentials")
+	})
+	authFailure := httptest.NewRecorder()
+	handler(authFailure, httptest.NewRequest(http.MethodGet, target, nil))
+	if authFailure.Code != http.StatusUnauthorized || service.issues != 0 {
+		t.Fatalf("authentication failure response=%d service calls=%d", authFailure.Code, service.issues)
+	}
+
+	setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		return facade.NewContextWithUser(context.Background(), nil), nil
+	})
+	missingUser := httptest.NewRecorder()
+	handler(missingUser, httptest.NewRequest(http.MethodGet, target, nil))
+	if missingUser.Code != http.StatusUnauthorized || service.issues != 0 {
+		t.Fatalf("missing verified user response=%d service calls=%d", missingUser.Code, service.issues)
+	}
+
+	service.err = facade4datatug.ErrQueryActivityUnauthorized
+	setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+		return facade.NewContextWithUser(context.Background(), facade.NewUserContext("verified-user")), nil
+	})
+	denied := httptest.NewRecorder()
+	handler(denied, httptest.NewRequest(http.MethodGet, target, nil))
+	if denied.Code != http.StatusForbidden || service.issues != 1 || strings.Contains(denied.Body.String(), "verified-user") {
+		t.Fatalf("authority denial response=%d calls=%d body=%q", denied.Code, service.issues, denied.Body.String())
+	}
+}
+
 func TestQueryActivityReportHTTPStrictBodyAndScopedActor(t *testing.T) {
 	service := &queryActivityRouteServiceFake{}
 	handler := httpPostQueryActivityReport(QueryActivityRouteOptions{Service: service})
@@ -94,6 +139,8 @@ func TestQueryActivityReportHTTPStrictBodyAndScopedActor(t *testing.T) {
 		{"valid", base, "application/json; charset=utf-8", `{"contextID":"server-context","operationID":"operation-1","kind":"query_edit"}`, http.StatusAccepted},
 		{"unknown body field", base, "application/json", `{"contextID":"server-context","operationID":"operation-1","kind":"query_edit","actorID":"forged"}`, http.StatusBadRequest},
 		{"duplicate JSON member", base, "application/json", `{"contextID":"server-context","contextID":"other","operationID":"operation-1","kind":"query_edit"}`, http.StatusBadRequest},
+		{"duplicate nested JSON member", base, "application/json", `{"contextID":"server-context","operationID":"operation-1","kind":"query_edit","metadata":{"x":1,"x":2}}`, http.StatusBadRequest},
+		{"duplicate member inside JSON array", base, "application/json", `{"contextID":"server-context","operationID":"operation-1","kind":"query_edit","metadata":[{"x":1,"x":2}]}`, http.StatusBadRequest},
 		{"invalid kind", base, "application/json", `{"contextID":"server-context","operationID":"operation-1","kind":"query_text"}`, http.StatusBadRequest},
 		{"trailing JSON", base, "application/json", `{"contextID":"server-context","operationID":"operation-1","kind":"query_edit"}{}`, http.StatusBadRequest},
 		{"wrong content type", base, "application/jsonfoo", `{"contextID":"server-context","operationID":"operation-1","kind":"query_edit"}`, http.StatusUnsupportedMediaType},
@@ -149,5 +196,35 @@ func TestQueryActivityReportHTTPMapsRateLimitAndAuthenticationFailure(t *testing
 	handler(w, r)
 	if w.Code != http.StatusUnauthorized || service.reports != before || strings.Contains(w.Body.String(), "sensitive") {
 		t.Fatalf("auth response=%d body=%q service=%+v", w.Code, w.Body.String(), service)
+	}
+}
+
+func TestQueryActivityReportHTTPMapsDomainErrorsWithoutDetails(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"invalid request", facade4datatug.ErrQueryActivityInvalid, http.StatusBadRequest},
+		{"revoked authority", facade4datatug.ErrQueryActivityUnauthorized, http.StatusForbidden},
+		{"receipt conflict", facade4datatug.ErrQueryActivityConflict, http.StatusConflict},
+		{"storage unavailable", errors.New("private datastore details"), http.StatusServiceUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &queryActivityRouteServiceFake{err: test.err}
+			handler := httpPostQueryActivityReport(QueryActivityRouteOptions{Service: service})
+			setQueryActivityVerifier(t, func(_ http.ResponseWriter, _ *http.Request, _ verify.RequestOptions) (facade.ContextWithUser, error) {
+				return facade.NewContextWithUser(context.Background(), facade.NewUserContext("verified-user")), nil
+			})
+			r := httptest.NewRequest(http.MethodPost, "/v0/datatug/projects/query_activity_report?storage=firestore&spaceID=space",
+				strings.NewReader(`{"contextID":"server-context","operationID":"operation-1","kind":"query_edit"}`))
+			r.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler(w, r)
+			if w.Code != test.want || strings.Contains(w.Body.String(), "private datastore details") || strings.Contains(w.Body.String(), "verified-user") {
+				t.Fatalf("response=%d body=%q, want status=%d without private details", w.Code, w.Body.String(), test.want)
+			}
+		})
 	}
 }

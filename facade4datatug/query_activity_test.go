@@ -332,6 +332,19 @@ type queryActivityCrashAfterLedgerCommit struct {
 	fail bool
 }
 
+type queryActivityFailLateOnceInbox struct {
+	contract4paymentus.UsageCorrectionInbox
+	failed bool
+}
+
+func (i *queryActivityFailLateOnceInbox) RecordLate(ctx context.Context, activity contract4paymentus.UsageActivity) (contract4paymentus.UsageLateReceipt, error) {
+	if !i.failed {
+		i.failed = true
+		return contract4paymentus.UsageLateReceipt{}, errors.New("simulated late inbox outage")
+	}
+	return i.UsageCorrectionInbox.RecordLate(ctx, activity)
+}
+
 func (l *queryActivityCrashAfterLedgerCommit) Admit(ctx context.Context, activity contract4paymentus.UsageActivity) (contract4paymentus.UsageAdmission, error) {
 	result, err := l.UsageLedger.Admit(ctx, activity)
 	if err == nil && l.fail {
@@ -370,6 +383,14 @@ func TestQueryActivityReplaysAfterLedgerCommitAndRoutesLateReceipt(t *testing.T)
 	closeRequest := contract4paymentus.UsageCloseRequest{Ref: f2.period.Ref, CloseID: "close-1", Capacity: contract4paymentus.UsageCapacityEvidence{Revision: "basis-1", Digest: strings.Repeat("c", 64)}, BaseEvent: contract4paymentus.UsageBaseMonthly, BillMonthlyOverage: true}
 	if _, err := f2.ledger.Close(f2.ctx, closeRequest); err != nil {
 		t.Fatalf("close period: %v", err)
+	}
+	f2.service.corrections = &queryActivityFailLateOnceInbox{UsageCorrectionInbox: f2.service.corrections}
+	if err := f2.service.Deliver(f2.ctx, "business-space", accepted.ReceiptID); err == nil || !strings.Contains(err.Error(), "late inbox outage") {
+		t.Fatalf("late inbox failure was hidden: %v", err)
+	}
+	latePendingRecord, latePending := models4datatug.NewQueryActivityPendingRecord("business-space", accepted.ReceiptID)
+	if err := f2.db.Get(f2.ctx, latePendingRecord); err != nil || latePending.Validate() != nil || latePending.Attempts != 1 || latePending.DeliveryState != models4datatug.QueryActivityPendingStatePending {
+		t.Fatalf("failed late retention completed pending delivery: %+v / %v", latePending, err)
 	}
 	if err := f2.service.Deliver(f2.ctx, "business-space", accepted.ReceiptID); err != nil {
 		t.Fatalf("closed-period delivery did not retain late receipt: %v", err)

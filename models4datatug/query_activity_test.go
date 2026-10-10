@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dal-go/record"
 	"github.com/sneat-co/paymentus/backend/contract4paymentus"
 )
 
@@ -117,5 +118,71 @@ func TestQueryActivityContextAndQuotaBounds(t *testing.T) {
 	quota.ContextsInWindow++
 	if err := quota.Validate(); err == nil {
 		t.Fatal("quota above bound validated")
+	}
+}
+
+func TestQueryActivityPendingValidationAndPrivateRecordKeys(t *testing.T) {
+	receipt := validQueryActivityReceipt()
+	pending := QueryActivityPending{
+		Version: 1, ReceiptID: receipt.ReceiptID, SpaceID: receipt.SpaceID, Period: receipt.Period,
+		Activity: receipt.Activity, DeliveryState: QueryActivityPendingStatePending, Attempts: 1,
+		UpdatedAtUTC: receipt.AcceptedAtUTC.Add(time.Second),
+	}
+	if err := pending.Validate(); err != nil {
+		t.Fatalf("valid pending record rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*QueryActivityPending){
+		"version":           func(p *QueryActivityPending) { p.Version++ },
+		"receipt scope":     func(p *QueryActivityPending) { p.ReceiptID = "another-receipt" },
+		"space scope":       func(p *QueryActivityPending) { p.SpaceID = "another-space" },
+		"period scope":      func(p *QueryActivityPending) { p.Period.PeriodID = "another-period" },
+		"activity source":   func(p *QueryActivityPending) { p.Activity.SourceID = "untrusted-source" },
+		"activity event":    func(p *QueryActivityPending) { p.Activity.EventID = "" },
+		"activity user":     func(p *QueryActivityPending) { p.Activity.UserID = "" },
+		"activity evidence": func(p *QueryActivityPending) { p.Activity.EvidenceDigest = "not-a-digest" },
+		"activity time":     func(p *QueryActivityPending) { p.Activity.OccurredAtUTC = time.Time{} },
+		"delivery state":    func(p *QueryActivityPending) { p.DeliveryState = "unknown" },
+		"negative attempts": func(p *QueryActivityPending) { p.Attempts = -1 },
+		"updated time":      func(p *QueryActivityPending) { p.UpdatedAtUTC = time.Time{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := pending
+			mutate(&value)
+			if err := value.Validate(); err == nil {
+				t.Fatal("invalid pending record validated")
+			}
+		})
+	}
+
+	contextRecord, contextValue := NewQueryActivityContextRecord(receipt.SpaceID, receipt.ContextID)
+	quotaRecord, quotaValue := NewQueryActivityContextQuotaRecord(receipt.ActorID, receipt.Period)
+	receiptRecord, receiptValue := NewQueryActivityReceiptRecord(receipt.ActorID, receipt.Period)
+	pendingRecord, pendingValue := NewQueryActivityPendingRecord(receipt.SpaceID, receipt.ReceiptID)
+	if contextValue == nil || quotaValue == nil || receiptValue == nil || pendingValue == nil {
+		t.Fatal("record constructor returned a nil DTO")
+	}
+	for name, item := range map[string]struct {
+		record     interface{ Key() *record.Key }
+		collection string
+	}{
+		"context": {contextRecord, QueryActivityContextsCollection},
+		"quota":   {quotaRecord, QueryActivityContextQuotasCollection},
+		"receipt": {receiptRecord, QueryActivityReceiptsCollection},
+		"pending": {pendingRecord, QueryActivityPendingCollection},
+	} {
+		t.Run(name+" key", func(t *testing.T) {
+			key := item.record.Key()
+			if key.Collection() != item.collection || key.Parent() == nil || key.Parent().ID != "datatug" || key.Parent().Parent() == nil || key.Parent().Parent().ID != receipt.SpaceID {
+				t.Fatalf("record key is not under the shared Space extension: %s", key)
+			}
+			if err := key.Validate(); err != nil {
+				t.Fatalf("record key invalid: %v", err)
+			}
+		})
+	}
+	if NewQueryActivityContextID(receipt.ActorID, receipt.ProjectID, receipt.Period) != activityDigest(append([]string{"query-activity-context/1", receipt.ActorID, receipt.ProjectID}, periodKeyValues(receipt.Period)...)...) ||
+		NewQueryActivityContextQuotaID(receipt.ActorID, receipt.Period) != quotaRecord.Key().ID ||
+		NewQueryActivityReceiptID(receipt.ActorID, receipt.Period) != receiptRecord.Key().ID {
+		t.Fatal("deterministic activity record IDs do not match their private record keys")
 	}
 }
