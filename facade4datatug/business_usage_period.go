@@ -162,7 +162,11 @@ type BusinessUsagePeriodAuthorityOptions struct {
 	InitialStarts contract4paymentus.InitialServiceStartReader
 	Periods       contract4paymentus.UsagePeriodReader
 	CloseTerms    BusinessUsageCloseTermsReader
-	Now           func() time.Time
+	// Pricing resolves the current server-approved config for new periods. It
+	// is a server-owned dependency, never request input. Existing periods keep
+	// the config frozen in their native snapshot.
+	Pricing func() contract4paymentus.UsagePricingConfig
+	Now     func() time.Time
 }
 
 // NativeBusinessUsagePeriodAuthority combines current paid access for Open,
@@ -173,6 +177,7 @@ type NativeBusinessUsagePeriodAuthority struct {
 	initialStarts contract4paymentus.InitialServiceStartReader
 	periods       contract4paymentus.UsagePeriodReader
 	closeTerms    BusinessUsageCloseTermsReader
+	pricing       func() contract4paymentus.UsagePricingConfig
 	now           func() time.Time
 }
 
@@ -181,9 +186,12 @@ func NewNativeBusinessUsagePeriodAuthority(options BusinessUsagePeriodAuthorityO
 		sharedProjectPortAbsent(options.Periods) || sharedProjectPortAbsent(options.CloseTerms) || options.Now == nil {
 		return nil, ErrBusinessUsagePeriodUnavailable
 	}
+	if options.Pricing == nil {
+		options.Pricing = contract4paymentus.DataTugBusinessUsagePricing
+	}
 	return &NativeBusinessUsagePeriodAuthority{
 		access: options.Access, initialStarts: options.InitialStarts, periods: options.Periods,
-		closeTerms: options.CloseTerms, now: options.Now,
+		closeTerms: options.CloseTerms, pricing: options.Pricing, now: options.Now,
 	}, nil
 }
 
@@ -211,8 +219,18 @@ func (a *NativeBusinessUsagePeriodAuthority) verifyOpen(ctx context.Context, tx 
 		return contract4paymentus.ErrUsageAuthority
 	}
 	access, initial, expected, err := a.readCurrentOpenFacts(ctx, tx, operation.Period.Ref.Scope.SpaceID, operation.ObservedAtUTC)
-	if err != nil || expected != operation.Period || !operation.ObservedAtUTC.Before(access.PaidUntilUTC) {
+	if err != nil || !sameBusinessUsageWindow(expected, operation.Period) || !validBusinessUsageSnapshot(operation.Period) ||
+		!usagePeriodMatchesOriginalStart(operation.Period, initial) || !operation.ObservedAtUTC.Before(access.PaidUntilUTC) {
 		return contract4paymentus.ErrUsageAuthority
+	}
+	if expected.Config != operation.Period.Config {
+		// A retry may encounter a period that was already opened under the
+		// previous approved pricing config. Accept it only when the native
+		// ledger itself proves that exact frozen snapshot is already stored.
+		state, readErr := a.periods.ReadPeriod(ctx, tx, operation.Period.Ref)
+		if readErr != nil || state.Snapshot != operation.Period || state.Closed {
+			return contract4paymentus.ErrUsageAuthority
+		}
 	}
 	checkpoint, err := readBusinessUsageCheckpoint(ctx, tx, operation.Period.Ref)
 	if err != nil || checkpoint.Validate() != nil || checkpoint.Snapshot != operation.Period ||
@@ -243,11 +261,11 @@ func (a *NativeBusinessUsagePeriodAuthority) verifyClose(ctx context.Context, tx
 		return contract4paymentus.ErrUsageAuthority
 	}
 	storedPeriod, err := a.periods.ReadPeriod(ctx, tx, period.Ref)
-	if err != nil || storedPeriod.Snapshot != period {
+	if err != nil || storedPeriod.Snapshot != period || storedPeriod.DistinctMAU != checkpoint.AcceptedCount {
 		return contract4paymentus.ErrUsageAuthority
 	}
 	if storedPeriod.Closed {
-		if storedPeriod.Closure.Request != operation.Close || checkpoint.State == models4datatug.QueryActivityCheckpointOpening || checkpoint.State == models4datatug.QueryActivityCheckpointReady {
+		if storedPeriod.Closure.Request != operation.Close {
 			return contract4paymentus.ErrUsageAuthority
 		}
 		return nil
@@ -289,7 +307,7 @@ func (a *NativeBusinessUsagePeriodAuthority) readCurrentOpenFacts(ctx context.Co
 		return zeroAccess, zeroInitial, zeroPeriod, err
 	}
 	scope := contract4paymentus.UsageScope{Mode: contract4paymentus.ModeLive, SpaceID: spaceID, ProductID: BusinessProjectProductID, PayerID: spaceID, ServiceID: BusinessProjectServiceID}
-	period, err := contract4paymentus.UsagePeriodForAnchor(scope, contract4paymentus.DataTugBusinessUsagePricing(), initial.AnchorUTC, observedAt)
+	period, err := contract4paymentus.UsagePeriodForAnchor(scope, a.pricing(), initial.AnchorUTC, observedAt)
 	if err != nil {
 		return zeroAccess, zeroInitial, zeroPeriod, err
 	}
@@ -318,16 +336,28 @@ func usagePeriodMatchesOriginalStart(period contract4paymentus.UsagePeriodSnapsh
 		return false
 	}
 	// Asking for the period at its exact start verifies the complete anchored
-	// UTC half-open window without accepting a caller-selected origin.
-	expected, err := contract4paymentus.UsagePeriodForAnchor(period.Ref.Scope, contract4paymentus.DataTugBusinessUsagePricing(), initial.AnchorUTC, period.StartUTC)
+	// UTC half-open window using the config frozen in this native snapshot.
+	expected, err := contract4paymentus.UsagePeriodForAnchor(period.Ref.Scope, period.Config, initial.AnchorUTC, period.StartUTC)
 	return err == nil && expected == period
 }
 
 func validBusinessUsageSnapshot(period contract4paymentus.UsagePeriodSnapshot) bool {
-	return period.Ref.Scope.Mode == contract4paymentus.ModeLive && period.Ref.Scope.ProductID == BusinessProjectProductID &&
-		period.Ref.Scope.ServiceID == BusinessProjectServiceID && period.Ref.Scope.PayerID == period.Ref.Scope.SpaceID &&
-		period.Config == contract4paymentus.DataTugBusinessUsagePricing() && !period.StartUTC.IsZero() && !period.EndUTC.IsZero() &&
-		period.StartUTC.Location() == time.UTC && period.EndUTC.Location() == time.UTC && period.EndUTC.After(period.StartUTC)
+	if period.Ref.Scope.Mode != contract4paymentus.ModeLive || period.Ref.Scope.ProductID != BusinessProjectProductID ||
+		period.Ref.Scope.ServiceID != BusinessProjectServiceID || period.Ref.Scope.PayerID != period.Ref.Scope.SpaceID ||
+		period.StartUTC.IsZero() || period.EndUTC.IsZero() || period.AnchorUTC.IsZero() ||
+		period.StartUTC.Location() != time.UTC || period.EndUTC.Location() != time.UTC || period.AnchorUTC.Location() != time.UTC ||
+		!period.EndUTC.After(period.StartUTC) {
+		return false
+	}
+	// The native snapshot owns its validated pricing config. Current config is
+	// consulted only when deriving a new Open; historical validation must not
+	// reprice an already-open period.
+	expected, err := contract4paymentus.UsagePeriodForAnchor(period.Ref.Scope, period.Config, period.AnchorUTC, period.StartUTC)
+	return err == nil && expected == period
+}
+
+func sameBusinessUsageWindow(left, right contract4paymentus.UsagePeriodSnapshot) bool {
+	return left.Ref == right.Ref && left.AnchorUTC == right.AnchorUTC && left.StartUTC == right.StartUTC && left.EndUTC == right.EndUTC
 }
 
 func readBusinessUsageCheckpoint(ctx context.Context, tx dal.ReadTransaction, period contract4paymentus.UsagePeriodRef) (*models4datatug.QueryActivityPeriodCheckpoint, error) {
@@ -372,6 +402,7 @@ func NewBusinessUsagePeriodService(db dal.DB, authority *NativeBusinessUsagePeri
 
 func (s *BusinessUsagePeriodService) OpenCurrent(ctx context.Context, spaceID string) (contract4paymentus.UsagePeriodSnapshot, error) {
 	var snapshot contract4paymentus.UsagePeriodSnapshot
+	wasReady := false
 	if s == nil || sharedProjectPortAbsent(s.db) || sharedProjectPortAbsent(s.authority) || sharedProjectPortAbsent(s.ledger) ||
 		models4datatug.ValidateSharedProjectIdentifier(spaceID) != nil {
 		return snapshot, ErrBusinessUsagePeriodUnavailable
@@ -391,11 +422,22 @@ func (s *BusinessUsagePeriodService) OpenCurrent(ctx context.Context, spaceID st
 		}
 		digest := businessInitialStartDigest(initial)
 		if checkpointRecord.Exists() {
-			if checkpoint.Validate() != nil || checkpoint.Snapshot != expected || checkpoint.AnchorUTC != models4datatug.CanonicalQueryActivityTime(initial.AnchorUTC) || checkpoint.AnchorProofDigest != digest {
+			if checkpoint.Validate() != nil || !sameBusinessUsageWindow(checkpoint.Snapshot, expected) || checkpoint.AnchorUTC != models4datatug.CanonicalQueryActivityTime(initial.AnchorUTC) || checkpoint.AnchorProofDigest != digest {
 				return ErrBusinessUsagePeriodUnavailable
 			}
 			if checkpoint.State != models4datatug.QueryActivityCheckpointOpening && checkpoint.State != models4datatug.QueryActivityCheckpointReady {
 				return ErrBusinessUsagePeriodUnavailable
+			}
+			wasReady = checkpoint.State == models4datatug.QueryActivityCheckpointReady
+			if checkpoint.Snapshot.Config != expected.Config {
+				// A staged retry may retain older rates only when the native
+				// ledger confirms that exact frozen period already exists. An
+				// uncommitted checkpoint alone cannot pin superseded pricing.
+				state, readErr := s.periods.ReadPeriod(txCtx, tx, expected.Ref)
+				if readErr != nil || state.Snapshot != checkpoint.Snapshot || state.Closed {
+					return ErrBusinessUsagePeriodUnavailable
+				}
+				expected = checkpoint.Snapshot
 			}
 		} else {
 			*checkpoint = models4datatug.QueryActivityPeriodCheckpoint{
@@ -425,7 +467,7 @@ func (s *BusinessUsagePeriodService) OpenCurrent(ctx context.Context, spaceID st
 		state, err = s.periods.ReadPeriod(txCtx, tx, snapshot.Ref)
 		return err
 	})
-	if err != nil || state.Snapshot != snapshot || state.Closed || state.DistinctMAU != 0 {
+	if err != nil || state.Snapshot != snapshot || state.Closed || (!wasReady && state.DistinctMAU != 0) {
 		return contract4paymentus.UsagePeriodSnapshot{}, ErrBusinessUsagePeriodUnavailable
 	}
 	err = s.db.RunReadwriteTransaction(ctx, func(txCtx context.Context, tx dal.ReadwriteTransaction) error {
@@ -509,7 +551,7 @@ func (s *BusinessUsagePeriodService) prepareClose(ctx context.Context, request c
 			return ErrBusinessUsagePeriodUnavailable
 		}
 		state, err := s.authority.periods.ReadPeriod(txCtx, tx, request.Ref)
-		if err != nil || state.Snapshot != checkpoint.Snapshot {
+		if err != nil || state.Snapshot != checkpoint.Snapshot || state.DistinctMAU != checkpoint.AcceptedCount {
 			return ErrBusinessUsagePeriodUnavailable
 		}
 		if checkpoint.State == models4datatug.QueryActivityCheckpointClosing || checkpoint.State == models4datatug.QueryActivityCheckpointClosed {

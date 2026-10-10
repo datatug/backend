@@ -43,8 +43,8 @@ type QueryActivityPeriodCheckpoint struct {
 func (c QueryActivityPeriodCheckpoint) Validate() error {
 	if c.Version != 1 || !validActivityPeriod(c.Period, c.Period.Scope.SpaceID) || c.Snapshot.Ref != c.Period ||
 		!validActivityUTC(c.Snapshot.StartUTC) || !validActivityUTC(c.Snapshot.EndUTC) ||
-		!c.Snapshot.EndUTC.After(c.Snapshot.StartUTC) || c.Snapshot.Config != contract4paymentus.DataTugBusinessUsagePricing() ||
-		!validActivityUTC(c.AnchorUTC) || c.AnchorUTC.After(c.Snapshot.StartUTC) || !validActivityDigest(c.AnchorProofDigest) ||
+		!c.Snapshot.EndUTC.After(c.Snapshot.StartUTC) || !validCheckpointUsageSnapshot(c.Snapshot) ||
+		!validActivityUTC(c.AnchorUTC) || c.AnchorUTC != c.Snapshot.AnchorUTC || c.AnchorUTC.After(c.Snapshot.StartUTC) || !validActivityDigest(c.AnchorProofDigest) ||
 		(c.State != QueryActivityCheckpointOpening && c.State != QueryActivityCheckpointReady && c.State != QueryActivityCheckpointClosing && c.State != QueryActivityCheckpointClosed) ||
 		c.AcceptedCount < 0 || c.DeliveredThrough < 0 || c.DeliveredThrough > c.AcceptedCount ||
 		!validActivityUTC(c.UpdatedAtUTC) {
@@ -62,6 +62,11 @@ func (c QueryActivityPeriodCheckpoint) Validate() error {
 		return ErrInvalidQueryActivityPeriod
 	}
 	return nil
+}
+
+func validCheckpointUsageSnapshot(snapshot contract4paymentus.UsagePeriodSnapshot) bool {
+	expected, err := contract4paymentus.UsagePeriodForAnchor(snapshot.Ref.Scope, snapshot.Config, snapshot.AnchorUTC, snapshot.StartUTC)
+	return err == nil && expected == snapshot
 }
 
 // QueryActivityPeriodSequence maps a period-local accepted sequence to its
