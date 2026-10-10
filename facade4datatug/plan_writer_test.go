@@ -682,7 +682,7 @@ func TestProtectedGrantsAndLegacyEffectDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(legacy, []byte("protectedProjects")) || bytes.Contains(legacy, []byte("terminalFullRefund")) {
+	if bytes.Contains(legacy, []byte("protectedProjects")) || bytes.Contains(legacy, []byte("terminalFullRefund")) || bytes.Contains(legacy, []byte("PlaceID")) {
 		t.Fatal(string(legacy))
 	}
 	first, err := planEffectDigest(f.effect)
