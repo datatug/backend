@@ -83,6 +83,7 @@ type AccountPlanEffect struct {
 	BuyerID                  string
 	AccountKind              string
 	PlanID                   string
+	PlaceID                  string
 	Tier                     string
 	Period                   string
 	Status                   string

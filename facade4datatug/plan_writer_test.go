@@ -35,6 +35,8 @@ type planOwnerTestPort struct {
 	reconcileErr      error
 	reads, reconciles int
 	lastTx            dal.ReadTransaction
+	verifiedPlaceID   string
+	reconciledPlaceID string
 	onReconcile       func()
 }
 
@@ -67,7 +69,8 @@ func (p *planOwnerTestPort) ClassifyEffect(ctx context.Context, tx dal.ReadTrans
 	_, err := p.read(ctx, tx)
 	return p.authority, err
 }
-func (p *planOwnerTestPort) VerifyCurrentEffect(ctx context.Context, tx dal.ReadTransaction, _ AccountPlanEffect) error {
+func (p *planOwnerTestPort) VerifyCurrentEffect(ctx context.Context, tx dal.ReadTransaction, effect AccountPlanEffect) error {
+	p.verifiedPlaceID = effect.PlaceID
 	_, err := p.read(ctx, tx)
 	if err != nil {
 		return err
@@ -78,6 +81,7 @@ func (p *planOwnerTestPort) ReconcileMoney(ctx context.Context, tx dal.Readwrite
 	if p.reconcileErr != nil {
 		return p.reconcileErr
 	}
+	p.reconciledPlaceID = effect.PlaceID
 	data, err := p.read(ctx, tx) // paymentus CAS performs one final read
 	if err != nil {
 		return err
@@ -283,6 +287,26 @@ func TestAccountPlanWriterEndedThenBasisOnly(t *testing.T) {
 	}
 	if a := f.application(t); a.LastFullEffectRevision != 2 || a.SubscriptionRevision != 3 || a.LastProQuoteKey != "" {
 		t.Fatal(a)
+	}
+}
+
+func TestAccountPlanWriterPreservesPlaceIDThroughVerificationAndMoneyReconciliation(t *testing.T) {
+	f := newPlanWriterFixture(t)
+	f.effect.PlaceID = "paymentus-place/opaque-reference-v1"
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanApplied {
+		t.Fatalf("apply with signed place identity: result=%q err=%v", got, err)
+	}
+	if f.owner.verifiedPlaceID != f.effect.PlaceID || f.owner.reconciledPlaceID != f.effect.PlaceID || f.owner.reconciles != 1 {
+		t.Fatalf("place identity changed across authority ports: effect=%q verified=%q reconciled=%q calls=%d",
+			f.effect.PlaceID, f.owner.verifiedPlaceID, f.owner.reconciledPlaceID, f.owner.reconciles)
+	}
+	if got, err := f.writer.Apply(context.Background(), f.effect); err != nil || got != PlanIdempotent {
+		t.Fatalf("same place identity was not idempotent: result=%q err=%v", got, err)
+	}
+	changed := f.effect
+	changed.PlaceID = "another-place"
+	if got, err := f.writer.Apply(context.Background(), changed); !errors.Is(err, ErrPlanEffectUnproved) || got != "" {
+		t.Fatalf("same owner revision accepted a different place identity: result=%q err=%v", got, err)
 	}
 }
 
