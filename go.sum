@@ -91,6 +91,8 @@ github.com/sneat-co/paymentus/backend v0.34.0 h1:CPLH51igB4gySa9LJ+J8QAhQI60L7kU
 github.com/sneat-co/paymentus/backend v0.34.0/go.mod h1:+qIM4m+6NKp1qPapfTiHvpxVvOd2gBUuRN0eX7QcBIg=
 github.com/sneat-co/paymentus/backend v0.39.0 h1:P1VSCUnrkjC/nBeC936uzdfjKymTbgiZOlsupIgGGRQ=
 github.com/sneat-co/paymentus/backend v0.39.0/go.mod h1:+qIM4m+6NKp1qPapfTiHvpxVvOd2gBUuRN0eX7QcBIg=
+github.com/sneat-co/paymentus/backend v0.39.1 h1:NFnsoAqxPxi5bCPdhHdxImljCMfSHu5Tm1r5G5tTlBo=
+github.com/sneat-co/paymentus/backend v0.39.1/go.mod h1:+qIM4m+6NKp1qPapfTiHvpxVvOd2gBUuRN0eX7QcBIg=
 github.com/sneat-co/sneat-core-modules v0.92.0 h1:8i54QqA2Lw766ai183SOqTegJ9qK5vMsgxK6B9JTwrA=
 github.com/sneat-co/sneat-core-modules v0.92.0/go.mod h1:rz7pGoQCzhg6QydeeKZS4bnOm+8uqqt9dXyIfl+4DX4=
 github.com/sneat-co/sneat-ext-contracts/contactus v0.12.12 h1:NdMmVsNo3HZ8aYTHgFZhZlD1aYE7LgglrzzFTa8942M=
