@@ -22,6 +22,10 @@ type businessCurrentServiceReader struct {
 	calls  int
 }
 
+func (*businessCurrentServiceReader) Mode() contract4paymentus.Mode {
+	return contract4paymentus.ModeLive
+}
+
 func (r *businessCurrentServiceReader) ReadCurrentSpaceServiceAccess(_ context.Context, tx dal.ReadTransaction, scope contract4paymentus.ServicePurchaseScope) (contract4paymentus.CurrentSpaceServiceAccess, error) {
 	r.calls++
 	if tx == nil || scope.Mode != contract4paymentus.ModeLive || scope.ServiceID != BusinessProjectServiceID || scope.SpaceID == "" || scope != r.access.Scope || scope.SpaceID != r.access.PayerSpaceID {
