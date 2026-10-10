@@ -27,6 +27,24 @@ func (f initialServiceStartReaderFunc) ReadInitialServiceStart(ctx context.Conte
 	return f(ctx, tx, scope)
 }
 
+type businessActivityContactReaderFunc func(context.Context, dal.ReadTransaction, contract4linkage.RelationshipEntityRef) (ProjectContactState, error)
+
+func (f businessActivityContactReaderFunc) ReadCurrentProjectContact(ctx context.Context, tx dal.ReadTransaction, ref contract4linkage.RelationshipEntityRef) (ProjectContactState, error) {
+	return f(ctx, tx, ref)
+}
+
+type malformedBusinessActivityGraphTx struct{ dal.ReadTransaction }
+
+func (tx malformedBusinessActivityGraphTx) Get(ctx context.Context, r record.Record) error {
+	if err := tx.ReadTransaction.Get(ctx, r); err != nil {
+		return err
+	}
+	if graph, ok := r.Data().(*contract4linkage.WithRelatedAndIDs); ok {
+		graph.RelatedIDs = []string{""}
+	}
+	return nil
+}
+
 func newBusinessActivityFixture(t *testing.T, actorID string) (dal.DB, contract4linkage.RelationshipEntityRef, contract4linkage.RelationshipEntityRef, *NativeBusinessActivityBindingReader, *businessCurrentServiceReader, *contract4paymentus.ServiceInitialServiceStart) {
 	t.Helper()
 	db := sneatcoretesting.NewMemoryDB()
@@ -163,6 +181,223 @@ func TestBusinessActivityBindingUsesExternalProjectContactAndOriginalStart(t *te
 		got.PaidUntilUTC != current.access.EvidenceValidUntilUTC {
 		t.Fatalf("Business activity binding = %+v, expected original anchor %s and current paid proof", got, anchor.AnchorUTC)
 	}
+}
+
+func TestBusinessActivityBindingReaderRequiresEveryAuthority(t *testing.T) {
+	_, _, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+	base := BusinessActivityBindingReaderOptions{
+		Access: reader.access, InitialStarts: reader.initialStarts, Contacts: reader.contacts, Actors: reader.actors,
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*BusinessActivityBindingReaderOptions)
+	}{
+		{"current service reader", func(o *BusinessActivityBindingReaderOptions) { o.Access = nil }},
+		{"initial service start reader", func(o *BusinessActivityBindingReaderOptions) { o.InitialStarts = nil }},
+		{"current contact reader", func(o *BusinessActivityBindingReaderOptions) { o.Contacts = nil }},
+		{"authenticated actor verifier", func(o *BusinessActivityBindingReaderOptions) { o.Actors = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options := base
+			tc.mutate(&options)
+			if reader, err := NewNativeBusinessActivityBindingReader(options); reader != nil || !errors.Is(err, ErrBusinessActivityBindingUnavailable) {
+				t.Fatalf("reader = %v, error = %v; want unavailable", reader, err)
+			}
+		})
+	}
+}
+
+func TestBusinessActivityBindingRequiresCurrentProjectAndPaidInterval(t *testing.T) {
+	t.Run("missing project", func(t *testing.T) {
+		_, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		emptyDB := sneatcoretesting.NewMemoryDB()
+		err := emptyDB.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), "missing-project", sharedTestTime)
+			return err
+		})
+		if err == nil {
+			t.Fatal("missing project was accepted")
+		}
+	})
+
+	t.Run("non-protected project", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		projectRecord, project := models4datatug.NewSharedLinkedProjectRecord(string(projectRef.SpaceID), projectRef.ItemRef.ItemID)
+		if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			if err := tx.Get(ctx, projectRecord); err != nil {
+				return err
+			}
+			project.Access = "public"
+			return tx.Set(ctx, projectRecord)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, ErrQueryActivityUnauthorized) {
+			t.Fatalf("non-protected project error = %v, want unauthorized", err)
+		}
+	})
+
+	t.Run("missing immutable admission", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		admissionRecord, _ := models4datatug.NewProjectAdmissionRecord(string(projectRef.SpaceID), projectRef.ItemRef.ItemID)
+		if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			return tx.Delete(ctx, admissionRecord.Key())
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if err == nil {
+			t.Fatal("missing immutable admission was accepted")
+		}
+	})
+
+	t.Run("paid evidence expired at occurrence time", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		at := sharedTestTime.Add(40 * time.Minute)
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, at)
+			return err
+		})
+		if !errors.Is(err, ErrBusinessServiceUnproved) {
+			t.Fatalf("binding after paid evidence expiry = %v, want unproved", err)
+		}
+	})
+}
+
+func TestBusinessActivityBindingFailsClosedOnAuthorityReadErrors(t *testing.T) {
+	t.Run("contact lookup error", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		reader.contacts = businessActivityContactReaderFunc(func(context.Context, dal.ReadTransaction, contract4linkage.RelationshipEntityRef) (ProjectContactState, error) {
+			return ProjectContactState{}, errors.New("contact lookup failed")
+		})
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, ErrQueryActivityUnavailable) {
+			t.Fatalf("contact lookup error = %v, want unavailable", err)
+		}
+	})
+
+	t.Run("mismatched contact reference", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		reader.contacts = businessActivityContactReaderFunc(func(_ context.Context, _ dal.ReadTransaction, ref contract4linkage.RelationshipEntityRef) (ProjectContactState, error) {
+			ref.ItemRef.ItemID = "different-contact"
+			return ProjectContactState{Ref: ref, Exists: true, Active: true, UserID: "external-uid"}, nil
+		})
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, ErrSharedProjectConflict) {
+			t.Fatalf("mismatched contact reference error = %v, want conflict", err)
+		}
+	})
+
+	t.Run("initial start read error", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		want := errors.New("initial service proof unavailable")
+		reader.initialStarts = initialServiceStartReaderFunc(func(context.Context, dal.ReadTransaction, contract4paymentus.ServicePurchaseScope) (contract4paymentus.ServiceInitialServiceStart, error) {
+			return contract4paymentus.ServiceInitialServiceStart{}, want
+		})
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, want) {
+			t.Fatalf("initial start read error = %v, want original failure", err)
+		}
+	})
+}
+
+func TestBusinessActivityBindingRejectsInvalidOccurrenceAndPreAnchorTime(t *testing.T) {
+	t.Run("non-UTC occurrence time", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		localTime := time.Date(2026, 10, 10, 12, 0, 0, 0, time.FixedZone("UTC", 0))
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, localTime)
+			return err
+		})
+		if !errors.Is(err, ErrQueryActivityInvalid) {
+			t.Fatalf("non-UTC occurrence error = %v, want invalid", err)
+		}
+	})
+
+	t.Run("occurrence before original service start", func(t *testing.T) {
+		db, projectRef, _, reader, _, anchor := newBusinessActivityFixture(t, "external-uid")
+		at := anchor.AnchorUTC.Add(-time.Minute)
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, at)
+			return err
+		})
+		if err == nil {
+			t.Fatal("activity before immutable service start was accepted")
+		}
+	})
+}
+
+func TestBusinessActivityBindingRejectsAmbiguousAndMalformedContactEvidence(t *testing.T) {
+	t.Run("two contacts for the authenticated UID", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		second := contactFixtureRef(string(projectRef.SpaceID), "second-external-contact")
+		seedProjectContact(t, db, second, "external-uid", true)
+		linkActivityContact(t, db, projectRef, second, string(models4datatug.ProjectRoleViewer))
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, ErrQueryActivityUnauthorized) {
+			t.Fatalf("ambiguous contact evidence error = %v, want unauthorized", err)
+		}
+	})
+
+	t.Run("empty assignment is not query permission", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		projectRecord, project := models4datatug.NewSharedLinkedProjectRecord(string(projectRef.SpaceID), projectRef.ItemRef.ItemID)
+		if err := db.RunReadwriteTransaction(context.Background(), func(ctx context.Context, tx dal.ReadwriteTransaction) error {
+			if err := tx.Get(ctx, projectRecord); err != nil {
+				return err
+			}
+			for _, collections := range project.Related {
+				for _, items := range collections {
+					for _, item := range items {
+						if item != nil {
+							item.RolesOfItem = nil
+						}
+					}
+				}
+			}
+			return tx.Set(ctx, projectRecord)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, tx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, ErrQueryActivityUnauthorized) {
+			t.Fatalf("empty role assignment error = %v, want unauthorized", err)
+		}
+	})
+
+	t.Run("corrupt linkage index", func(t *testing.T) {
+		db, projectRef, _, reader, _, _ := newBusinessActivityFixture(t, "external-uid")
+		err := db.RunReadonlyTransaction(context.Background(), func(ctx context.Context, tx dal.ReadTransaction) error {
+			corruptingTx := malformedBusinessActivityGraphTx{ReadTransaction: tx}
+			_, err := reader.ReadCurrentBusinessActivityBinding(ctx, corruptingTx, "external-uid", string(projectRef.SpaceID), projectRef.ItemRef.ItemID, sharedTestTime)
+			return err
+		})
+		if !errors.Is(err, ErrQueryActivityUnavailable) {
+			t.Fatalf("corrupt linkage index error = %v, want unavailable", err)
+		}
+	})
 }
 
 func TestBusinessActivityBindingRejectsUnverifiedOrBrokenProjectAccess(t *testing.T) {
