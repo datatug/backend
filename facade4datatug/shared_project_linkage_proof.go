@@ -17,6 +17,22 @@ func readLinkedProjectAdmissionForMode(ctx context.Context, tx dal.ReadTransacti
 	if err := tx.Get(ctx, r); err != nil {
 		return nil, err
 	}
+	return validateLinkedProjectAdmission(ctx, tx, ref, project, admission, expectedMode, allowInitializing...)
+}
+
+func readLinkedProjectAdmissionForBusinessMode(ctx context.Context, tx dal.ReadTransaction, ref contract4linkage.RelationshipEntityRef, project *models4datatug.SharedLinkedProject, businessMode string, allowInitializing ...bool) (*models4datatug.ProjectAdmission, error) {
+	r, admission := models4datatug.NewProjectAdmissionRecord(string(ref.SpaceID), ref.ItemRef.ItemID)
+	if err := tx.Get(ctx, r); err != nil {
+		return nil, err
+	}
+	expectedMode := "live"
+	if admission.Version == 2 && admission.Product == BusinessProjectProductID {
+		expectedMode = businessMode
+	}
+	return validateLinkedProjectAdmission(ctx, tx, ref, project, admission, expectedMode, allowInitializing...)
+}
+
+func validateLinkedProjectAdmission(ctx context.Context, tx dal.ReadTransaction, ref contract4linkage.RelationshipEntityRef, project *models4datatug.SharedLinkedProject, admission *models4datatug.ProjectAdmission, expectedMode string, allowInitializing ...bool) (*models4datatug.ProjectAdmission, error) {
 	productMatches := admission.Version == 1 && admission.Product == "datatug" || admission.Version == 2 && admission.Product == BusinessProjectProductID
 	githubInitializingReplay := len(allowInitializing) != 0 && allowInitializing[0] && project.Status == models4datatug.GitHubProjectInitializing
 	githubStatusInvalid := project.Storage == models4datatug.GithubStoreID && project.Status != models4datatug.GitHubProjectReady && !githubInitializingReplay

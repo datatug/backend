@@ -135,7 +135,11 @@ func (p *PaidProjectLinkagePolicy) authorizeProject(ctx context.Context, tx dal.
 	if err != nil {
 		return err
 	}
-	admission, err := readLinkedProjectAdmission(ctx, tx, e.Ref, project)
+	businessMode := "live"
+	if p.business != nil {
+		businessMode = string(p.business.Mode())
+	}
+	admission, err := readLinkedProjectAdmissionForBusinessMode(ctx, tx, e.Ref, project, businessMode)
 	if err != nil {
 		return err
 	}
